@@ -113,10 +113,19 @@ class ModelDiscovery:
         "max_position_embeddings",
     ]
 
+    KNOWN_CONTEXT_WINDOWS = {
+        "minimax-m2.7": 204800,
+        "minimax_m2.7": 204800,
+        "minimaxm2.7": 204800,
+        "minimaxm27": 204800,
+        "m2.7": 204800,
+    }
+
     def __init__(
         self,
         api_base: str,
         model_name: Optional[str] = None,
+        api_key: Optional[str] = None,
         timeout: int = 5,  # vLLM 响应很快，5秒足够
         enabled: bool = True,
     ):
@@ -131,6 +140,7 @@ class ModelDiscovery:
         """
         self.api_base = api_base.rstrip("/")
         self.model_name = model_name
+        self.api_key = api_key or ""
         self.timeout = timeout
         self.enabled = enabled
 
@@ -175,7 +185,7 @@ class ModelDiscovery:
                 continue
 
         # 所有端点都失败，返回 fallback
-        debug_logger.warning(f"模型发现失败，使用 fallback 值")
+        debug_logger.warning("模型发现失败，使用 fallback 值")
         return self._create_fallback_info()
 
     async def _try_endpoint(self, endpoint: str) -> ModelInfo:
@@ -196,7 +206,11 @@ class ModelDiscovery:
         url = f"{self.api_base}/{endpoint}"
         debug_logger.info(f"尝试模型发现: {url}")
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        headers = {}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        async with httpx.AsyncClient(timeout=self.timeout, headers=headers) as client:
             response = await client.get(url)
             response.raise_for_status()
 
@@ -281,9 +295,30 @@ class ModelDiscovery:
                 if result > 0:
                     return result
 
+        known_context = self._lookup_known_context_window(model)
+        if known_context > 0:
+            debug_logger.info(f"使用已知模型上下文窗口: {known_context}")
+            return known_context
+
         # 返回默认值
-        debug_logger.warning(f"未找到 context_window，使用默认值 32768")
+        debug_logger.warning("未找到 context_window，使用默认值 32768")
         return 32768
+
+    def _lookup_known_context_window(self, model: Dict[str, Any]) -> int:
+        candidates = [
+            str(model.get("id", "") or ""),
+            str(model.get("model", "") or ""),
+            str(model.get("name", "") or ""),
+            str(self.model_name or ""),
+        ]
+        for candidate in candidates:
+            normalized = "".join(ch.lower() for ch in candidate if ch.isalnum() or ch in {".", "_", "-"})
+            if not normalized:
+                continue
+            for key, value in self.KNOWN_CONTEXT_WINDOWS.items():
+                if key in normalized:
+                    return int(value)
+        return 0
 
     def _calculate_suggestions(
         self,
@@ -393,6 +428,7 @@ class ModelDiscovery:
 async def get_dynamic_model_config(
     api_base: str,
     model_name: Optional[str] = None,
+    api_key: Optional[str] = None,
     fallback_max_tokens: Optional[int] = None,
     fallback_max_token_limit: Optional[int] = None,
     timeout: int = 30,
@@ -417,6 +453,7 @@ async def get_dynamic_model_config(
     discovery = ModelDiscovery(
         api_base=api_base,
         model_name=model_name,
+        api_key=api_key,
         timeout=timeout,
         enabled=enabled,
     )
@@ -425,3 +462,36 @@ async def get_dynamic_model_config(
         discovery.set_fallback(fallback_max_tokens, fallback_max_token_limit)
 
     return await discovery.discover()
+
+
+def discover_model_sync(
+    api_base: str,
+    model_name: Optional[str] = None,
+    api_key: Optional[str] = None,
+    fallback_max_tokens: Optional[int] = None,
+    fallback_max_token_limit: Optional[int] = None,
+    timeout: int = 30,
+    enabled: bool = True,
+) -> ModelInfo:
+    """同步获取动态模型配置，供非 async 启动路径和旧调用方使用。"""
+    import asyncio
+
+    coroutine = get_dynamic_model_config(
+        api_base=api_base,
+        model_name=model_name,
+        api_key=api_key,
+        fallback_max_tokens=fallback_max_tokens,
+        fallback_max_token_limit=fallback_max_token_limit,
+        timeout=timeout,
+        enabled=enabled,
+    )
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+    try:
+        return loop.run_until_complete(coroutine)
+    finally:
+        close = getattr(coroutine, "close", None)
+        if close is not None:
+            close()

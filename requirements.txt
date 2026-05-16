@@ -11,6 +11,7 @@ langchain>=0.1.0
 langchain-core>=0.1.0
 langchain-community>=0.0.10
 langchain-openai>=0.0.2
+litellm>=1.51.0
 
 # 配置管理 (Pydantic v2)
 pydantic>=2.0.0
@@ -20,7 +21,9 @@ pydantic>=2.0.0
 # lxml>=4.9.0            # XML/HTML 解析器（beautifulsoup4 的后端）
 
 # 开发/测试依赖
-# pytest>=7.0.0          # 单元测试框架
-# pytest-asyncio>=0.21.0 # 异步测试支持
+pytest>=7.0.0            # 单元测试框架
+pytest-asyncio>=0.21.0   # 异步测试支持
+jedi>=0.19.0             # Python 符号分析（定义 / 引用 / 悬浮）
+ruff>=0.6.0              # Python lint 诊断
 # black>=23.0.0          # 代码格式化
 # mypy>=1.0.0            # 类型检查

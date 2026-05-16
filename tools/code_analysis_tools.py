@@ -209,6 +209,12 @@ def get_code_entity(file_path: str, entity_name: str, include_imports: bool = Fa
                 break
     
     if target_entity is None:
+        for entity in extractor.entities['class']:
+            if entity['name'] == target_method_name:
+                target_entity = entity
+                break
+
+    if target_entity is None:
         for entity_list in [extractor.entities['function'], extractor.entities['async_function']]:
             for entity in entity_list:
                 if entity['name'] == target_method_name:
@@ -221,6 +227,10 @@ def get_code_entity(file_path: str, entity_name: str, include_imports: bool = Fa
         return _search_entity_by_text(lines, entity_name, file_path, target_class_name, target_method_name)
 
     start_line = target_entity['lineno']
+    decorators = target_entity.get('decorators') or []
+    if decorators:
+        decorator_count = len(decorators)
+        start_line = max(1, start_line - decorator_count)
     end_line = target_entity['end_lineno']
     entity_lines = lines[start_line - 1:end_line]
     code = ''.join(entity_lines)
@@ -435,7 +445,10 @@ def _find_match_position(content: str, search_block: str, allow_fuzzy: bool = Fa
     lines = content.split('\n')
     search_lines_raw = search_block.split('\n')
     
-    search_key_lines = [l.rstrip() for l in search_lines_raw if l.strip()]
+    def _normalize_line(line: str) -> str:
+        return line.strip()
+
+    search_key_lines = [_normalize_line(l) for l in search_lines_raw if l.strip()]
     if not search_key_lines:
         return None
     
@@ -445,7 +458,7 @@ def _find_match_position(content: str, search_block: str, allow_fuzzy: bool = Fa
     for i in range(len(lines) - search_len + 1):
         match = True
         for j, search_line in enumerate(search_key_lines):
-            content_line = lines[i + j].rstrip()
+            content_line = _normalize_line(lines[i + j])
             if content_line != search_line:
                 match = False
                 break
@@ -465,7 +478,7 @@ def _find_match_position(content: str, search_block: str, allow_fuzzy: bool = Fa
             for search_line in search_key_lines:
                 found = False
                 for cj in range(content_idx, min(i + search_len * 2, len(lines))):
-                    if lines[cj].rstrip() == search_line:
+                    if _normalize_line(lines[cj]) == search_line:
                         matches += 1
                         content_idx = cj + 1
                         found = True
@@ -523,15 +536,24 @@ def _parse_diff_blocks(diff_text: str) -> List[Tuple[str, str]]:
         lines = block.split('\n')
         old_lines = []
         new_lines = []
+
+        def flush_current_block():
+            if old_lines and new_lines:
+                blocks.append(('\n'.join(old_lines), '\n'.join(new_lines)))
+                old_lines.clear()
+                new_lines.clear()
+
         for line in lines:
             if line.startswith('- '):
+                if new_lines:
+                    flush_current_block()
                 old_lines.append(line[2:].strip())
             elif line.startswith('+ '):
                 new_lines.append(line[2:].strip())
+            else:
+                flush_current_block()
         
-        if old_lines and new_lines:
-            # 取第一个配对
-            blocks.append(('\n'.join(old_lines), '\n'.join(new_lines)))
+        flush_current_block()
     
     return blocks
 
@@ -581,6 +603,56 @@ def _find_similar_snippet(content: str, search_block: str, context_lines: int = 
     return ""
 
 
+def _parse_patch_update_operations(diff_text: str) -> List[Tuple[str, str, str]]:
+    """解析 *** Begin Patch 风格的多文件更新操作。"""
+    text = (diff_text or "").strip()
+    if not text.startswith("*** Begin Patch"):
+        return []
+
+    operations: List[Tuple[str, str, str]] = []
+    current_file = None
+    old_lines: List[str] = []
+    new_lines: List[str] = []
+    in_hunk = False
+
+    def flush_current_block():
+        if current_file and old_lines and new_lines:
+            operations.append((current_file, "\n".join(old_lines), "\n".join(new_lines)))
+            old_lines.clear()
+            new_lines.clear()
+
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip("\n")
+        if line == "*** Begin Patch":
+            continue
+        if line == "*** End Patch":
+            flush_current_block()
+            break
+        if line.startswith("*** Update File: "):
+            flush_current_block()
+            current_file = line[len("*** Update File: "):].strip()
+            in_hunk = False
+            continue
+        if line.strip() == "@@":
+            flush_current_block()
+            in_hunk = True
+            continue
+        if not in_hunk or current_file is None:
+            continue
+        if line.startswith("- "):
+            if new_lines:
+                flush_current_block()
+            old_lines.append(line[2:].strip())
+            continue
+        if line.startswith("+ "):
+            new_lines.append(line[2:].strip())
+            continue
+
+        flush_current_block()
+
+    return operations
+
+
 def apply_diff_edit(file_path: str, diff_text: str, allow_fuzzy: bool = False) -> str:
     """
     应用 Diff Block 编辑
@@ -610,6 +682,20 @@ def apply_diff_edit(file_path: str, diff_text: str, allow_fuzzy: bool = False) -
 
     if not path.is_file():
         return f"[编辑] 错误: 路径不是文件 - {file_path}"
+
+    patch_operations = _parse_patch_update_operations(diff_text)
+    if patch_operations:
+        changed_files = []
+        base_dir = path.parent
+        for target_file, search_block, replace_block in patch_operations:
+            target_path = Path(target_file)
+            if not target_path.is_absolute():
+                target_path = base_dir / target_path
+            result = apply_diff_edit(str(target_path), f"<<<<<<< SEARCH\n{search_block}\n=======\n{replace_block}\n>>>>>>> REPLACE", allow_fuzzy=allow_fuzzy)
+            if result.startswith("[编辑] 错误"):
+                return result
+            changed_files.append(str(target_path))
+        return f"[编辑] 成功修改 {len(changed_files)} 个文件"
 
     try:
         with open(path, 'r', encoding='utf-8') as f:
@@ -680,12 +766,53 @@ def validate_diff_format(diff_text: str) -> Tuple[bool, str]:
     Returns:
         (是否有效, 错误信息)
     """
+    text = (diff_text or "").strip()
+    if not text:
+        return False, "diff 不能为空"
+
+    if "***" in text:
+        lines = text.splitlines()
+        if not lines or lines[0].strip() != "*** Begin Patch":
+            return False, "格式错误: 缺少 *** Begin Patch"
+        if lines[-1].strip() != "*** End Patch":
+            return False, "格式错误: 缺少 *** End Patch"
+        if not any(line.startswith("*** Update File: ") for line in lines):
+            return False, "格式错误: 缺少 *** Update File: 行"
+        if "@@" not in text:
+            return False, "格式错误: 缺少 @@ hunk 标记"
+
+        hunk_lines = []
+        in_hunk = False
+        for line in lines[1:-1]:
+            if line.strip() == "@@":
+                in_hunk = True
+                continue
+            if line.startswith("*** Update File: "):
+                continue
+            if in_hunk:
+                hunk_lines.append(line)
+
+        if not hunk_lines:
+            return False, "格式错误: hunk 不能为空"
+        if not any(line.startswith("- ") for line in hunk_lines):
+            return False, "格式错误: hunk 缺少删除行"
+        if not any(line.startswith("+ ") for line in hunk_lines):
+            return False, "格式错误: hunk 缺少新增行"
+        for line in hunk_lines:
+            if not line.strip():
+                continue
+            if line.startswith(("- ", "+ ", "  ")):
+                continue
+            return False, "格式错误: hunk 行必须以 '+ '、'- ' 或双空格开头"
+
+        return True, ""
+
     blocks = _parse_diff_blocks(diff_text)
 
     if not blocks:
         return False, "未找到有效的 SEARCH/REPLACE 块。请使用以下格式:\n<<<<<<< SEARCH\n...old code...\n=======\n...new code...\n>>>>>>> REPLACE"
 
-    return True, f"格式正确，包含 {len(blocks)} 个块"
+    return True, ""
 
 
 def preview_diff(file_path: str, diff_text: str) -> str:
@@ -723,8 +850,8 @@ def preview_diff(file_path: str, diff_text: str) -> str:
         if match_pos:
             start_line = content[:match_pos[0]].count('\n') + 1
             result.append(f"将替换第 {start_line} 行附近的代码:")
-            result.append("  [-] " + "\n  [-] ".join(search_block.split('\n')[:5]))
-            result.append("  [+] " + "\n  [+] ".join(replace_block.split('\n')[:5]))
+            result.append("- " + "\n- ".join(search_block.split('\n')[:5]))
+            result.append("+ " + "\n+ ".join(replace_block.split('\n')[:5]))
         else:
             result.append("  未找到匹配位置")
 

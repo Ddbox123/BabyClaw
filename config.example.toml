@@ -1,0 +1,456 @@
+# ============================================================
+# Self-Evolving Agent 示例配置
+# ============================================================
+# 复制本文件为本地配置后，再通过环境变量提供真实 API Key。
+# 推荐：不要把真实密钥写入任何受版本控制的文件。
+# 本文件与 config.toml 保持同形，用于初始化、对比和自检。
+# ============================================================
+
+[runtime]
+profile = "safe_remote"
+preflight_doctor = true
+require_venv = true
+
+[avatar]
+preset = "lobster"
+
+[llm]
+
+[llm.providers]
+
+[llm.providers.remote_main]
+kind = "minimax"
+api_key = ""
+api_key_env = "MINIMAX_API_KEY"
+base_url = "https://api.minimaxi.com/v1"
+compat_mode = "openai"
+requires_api_key = true
+context_window = 204800
+
+[llm.providers.local_main]
+kind = "local"
+api_key = ""
+api_key_env = ""
+base_url = "http://localhost:8000/v1"
+compat_mode = "openai"
+requires_api_key = false
+context_window = 65536
+
+[llm.providers.deepseek_main]
+kind = "deepseek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com"
+compat_mode = "openai"
+requires_api_key = true
+context_window = 131072
+provider_id = "deepseek_main"
+
+[llm.profiles]
+
+[llm.profiles.primary]
+provider_id = "remote_main"
+model = "MiniMax-M2.7"
+temperature = 1.0
+max_output_tokens = 8192
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+api_key_env = "VIBELUTION_LLM_REMOTE_MAIN_MINIMAX_M2_7_API_KEY"
+
+[llm.profiles.mental_model]
+provider_id = "remote_main"
+model = "MiniMax-M2.7"
+temperature = 1.0
+max_output_tokens = 8192
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+
+[llm.profiles.subagent_worker]
+provider_id = "remote_main"
+model = "MiniMax-M2.7"
+temperature = 1.0
+max_output_tokens = 8192
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+
+[llm.profiles.subagent_explorer]
+provider_id = "remote_main"
+model = "MiniMax-M2.7"
+temperature = 0.3
+max_output_tokens = 4096
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+
+[llm.profiles.supervised_baseline]
+provider_id = "remote_main"
+model = "MiniMax-M2.7"
+temperature = 1.0
+max_output_tokens = 8192
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+
+[llm.profiles.supervised_candidate]
+provider_id = "remote_main"
+model = "MiniMax-M2.7"
+temperature = 1.0
+max_output_tokens = 8192
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+
+[llm.profiles.compression]
+provider_id = "local_main"
+model = "qwen-32b-awq"
+temperature = 0.3
+max_output_tokens = 2048
+timeout = 45
+connect_timeout = 5
+streaming = false
+tool_calling_mode = "disabled"
+discovery_enabled = false
+api_key_env = "VIBELUTION_LLM_LOCAL_MAIN_QWEN_32B_AWQ_API_KEY"
+
+[llm.discovery]
+enabled = true
+timeout = 5
+fallback_max_tokens = 4096
+fallback_max_token_limit = 32768
+auto_adjust = true
+output_reserve_ratio = 0.125
+
+[llm.model_library]
+
+[llm.model_library.remote_main_minimax_m2_7]
+provider_id = "remote_main"
+model = "MiniMax-M2.7"
+label = "MiniMax-M2.7"
+api_key_env = "VIBELUTION_LLM_REMOTE_MAIN_MINIMAX_M2_7_API_KEY"
+temperature = 1.0
+max_output_tokens = 8192
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+
+[llm.model_library.deepseek_v4_pro]
+provider_id = "deepseek_main"
+model = "deepseek-v4-pro"
+label = "DeepSeek V4 Pro"
+api_key_env = "VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY"
+temperature = 0.7
+max_output_tokens = 8192
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+
+[agent]
+name = "SelfEvolvingAgent"
+workspace = "workspace"
+awake_interval = 60
+max_iterations = 60
+max_runtime = 0
+auto_backup = true
+backup_interval = 3000
+auto_restart_threshold = 0
+exploration_mode = false
+
+[context_compression]
+enabled = true
+max_token_limit = 32768
+keep_recent_steps = 2
+summary_max_chars = 1000
+compression_model = "qwen-32b-awq"
+compression_temperature = 0.3
+max_compressions_per_session = 20
+effectiveness_threshold = 0.3
+
+[context_compression.levels]
+light = 0.6
+standard = 0.8
+deep = 0.9
+emergency = 0.95
+
+[context_compression.summary_chars]
+light = 500
+standard = 1000
+deep = 2000
+emergency = 3000
+
+[context_compression.preservation]
+keep_ai_messages = 5
+keep_tool_results = true
+preserve_errors = true
+extract_key_decisions = true
+
+[tools]
+restart_enabled = true
+allowed_directories = [
+    "${PROJECT_ROOT}",
+    "${PROJECT_ROOT}/tools",
+    "${PROJECT_ROOT}",
+    "${HOME}"
+]
+forbidden_patterns = [
+    ".env", ".password", ".secret", ".key", "id_rsa", "credentials.json"
+]
+
+[tools.file]
+edit_enabled = true
+create_enabled = true
+syntax_check_enabled = true
+max_read_lines = 0
+max_read_chars = 0
+encoding_priority = ["utf-8", "utf-8-sig", "gbk", "gb2312", "latin-1"]
+editable_extensions = [
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".kt", ".go", ".rs",
+    ".c", ".cpp", ".h", ".hpp", ".rb", ".php", ".html", ".css", ".scss",
+    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".md", ".txt",
+    ".sh", ".sql", ".xml", ".svg"
+]
+
+[tools.shell]
+enabled = true
+default_timeout = 60
+max_output_length = 10000
+max_file_size = 10485760
+safety_check = true
+dangerous_pattern_check = true
+allowed_shells = ["powershell", "cmd", "bash"]
+
+[tools.search]
+max_file_size = 10485760
+max_matches_per_file = 100
+max_results = 50
+context_lines = 3
+skip_directories = [
+    "__pycache__", ".git", ".svn", ".hg", "node_modules",
+    ".venv", "venv", "env", ".env", ".idea", ".vscode",
+    "dist", "build", ".tox", ".pytest_cache", ".mypy_cache",
+    "site-packages", "egg-info", ".eggs"
+]
+skip_extensions = [
+    ".exe", ".dll", ".so", ".dylib", ".pyc", ".pyo", ".pyd"
+]
+include_extensions = [
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".md", ".json", ".yaml",
+    ".yml", ".toml", ".txt", ".html", ".css", ".xml", ".sh", ".bat", ".ps1"
+]
+
+[tools.web]
+search_enabled = true
+max_search_results = 10
+search_timeout = 30
+
+[security]
+enabled = true
+allowed_directories = [
+    "${PROJECT_ROOT}",
+    "${PROJECT_ROOT}/tools",
+    "${HOME}"
+]
+forbidden_patterns = [
+    ".env", ".password", ".secret", ".key", "id_rsa", "credentials.json"
+]
+forbidden_delete_patterns = [
+    ".env", ".password", ".secret", ".key", "id_rsa", "credentials.json",
+    "config.py", "config.toml", ".git", "restarter.py", "agent.py"
+]
+dangerous_commands = [
+    "rm -rf /", "rm -rf /*", "mkfs", "dd if=/dev/zero of=/dev/sda",
+    "format", "del /f /s /q", "rmdir /s /q", "rm -rf",
+    "cipher /w:", "shutdown", "sysprep", ":(){ :|:& };:"
+]
+
+[log]
+level = "INFO"
+format = "%(asctime)s | %(levelname)-8s | %(message)s"
+date_format = "%Y-%m-%d %H:%M:%S"
+file_enabled = false
+file_path = "logs/agent.log"
+max_file_size = 10485760
+backup_count = 5
+detailed_traceback = false
+
+[log.third_party]
+httpx = "WARNING"
+httpcore = "WARNING"
+langchain = "WARNING"
+openai = "WARNING"
+anthropic = "WARNING"
+urllib3 = "WARNING"
+litellm = "WARNING"
+rich = "WARNING"
+
+[network]
+timeout = 30
+user_agent = "Mozilla/5.0 (compatible; SelfEvolvingAgent/1.0)"
+max_retries = 3
+retry_delay = 1.0
+verify_ssl = true
+
+[evolution]
+enabled = true
+config_path = "workspace/evolution_config.json"
+archive_dir = "workspace/archives"
+backup_dir = "backups"
+test_gate_enabled = true
+test_gate_timeout = 120
+test_command = "pytest tests/ -v --tb=short -q"
+proposals_dir = "workspace/evolution/proposals"
+audit_log_path = "workspace/evolution/audit.jsonl"
+auto_check_approved = true
+allowed_target_dirs = ["workspace/prompts/"]
+
+[memory]
+storage_dir = "workspace/memory"
+memory_file = "memory.json"
+archive_dir = "workspace/memory/archives"
+max_entries = 1000
+
+[strategy]
+data_dir = "workspace/strategy"
+exploration_rate = 0.2
+learning_enabled = true
+learning_data_path = "workspace/strategy/learner_data.json"
+
+[analysis]
+data_dir = "workspace/analytics"
+feedback_dir = "workspace/feedback"
+knowledge_graph_path = "workspace/knowledge_graph.json"
+pattern_library_path = "workspace/pattern_library.json"
+
+[ui]
+language = "zh"
+theme = "lobster"
+max_log_entries = 100
+refresh_rate = 4
+show_ascii_art = true
+show_welcome = true
+
+[parser]
+strip_tags = [
+    "<think>",
+    "tool_call", "invoke", "skill",
+    "thinking", "state_memory",
+    "active_rules", "active_components"
+]
+strip_thinking_alias = true
+
+[prompt]
+default_components = [
+    "SOUL",
+    "SPEC",
+    "CODEBASE_MAP",
+    "GIT_MEMORY",
+    "DELEGATION_RULES",
+    "CONFIG_AWARENESS",
+    "LANGUAGE_AWARENESS",
+    "GIT_RULES",
+    "MEMORY",
+    "ENV_INFO"
+]
+
+[[prompt.sections]]
+name = "SOUL"
+path = "core/core_prompt/SOUL.md"
+priority = 10
+required = true
+cache_break = false
+description = "身份使命与铁律"
+
+[[prompt.sections]]
+name = "SPEC"
+path = "core/core_prompt/SPEC.md"
+priority = 65
+required = false
+cache_break = false
+description = "开发规范与编码约束"
+
+[debug]
+enabled = false
+verbose = false
+trace_llm = false
+trace_tools = false
+track_token_usage = true
+
+[pet]
+enabled = true
+name = "虾宝"
+auto_save = true
+save_interval = 60
+
+[pet.gene]
+inherit_from_model = true
+context_window_factor = 0.001
+
+[pet.heart]
+enabled = true
+active_rate = 2.0
+idle_rate = 0.5
+cooldown_time = 5
+
+[pet.dream]
+enabled = true
+compression_triggers_dream = true
+dream_duration = 3
+keep_key_memory_ratio = 0.7
+
+[pet.personality]
+enabled = true
+learning_window = 100
+trait_change_rate = 0.05
+
+[pet.hunger]
+enabled = true
+food_per_meal = 0.1
+hunger_decay_rate = 1.0
+mood_decay_rate = 0.5
+auto_feed_threshold = 1000
+
+[pet.diary]
+enabled = true
+max_entries = 365
+auto_summarize = true
+sentiment_analysis = true
+
+[pet.social]
+enabled = true
+track_other_models = true
+friendship_gain_rate = 1.0
+max_friends = 10
+
+[pet.health]
+enabled = true
+check_interval = 30
+response_time_weight = 0.3
+error_rate_weight = 0.4
+efficiency_weight = 0.3
+
+[pet.skin]
+enabled = true
+unlock_by_achievement = true
+
+[pet.sound]
+enabled = true
+volume = 0.5
+mood_sounds = true
+action_sounds = true

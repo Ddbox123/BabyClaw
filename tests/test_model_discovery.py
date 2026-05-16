@@ -11,6 +11,7 @@ from core.infrastructure.model_discovery import (
     ModelInfo,
     CompressionThresholds,
     DiscoveryStatus,
+    discover_model_sync,
     get_dynamic_model_config,
 )
 
@@ -90,6 +91,16 @@ class TestModelDiscovery:
 
         result = discovery._extract_context_window(model)
         assert result == 32768
+
+    def test_extract_context_window_uses_known_minimax_window_when_field_missing(self):
+        discovery = ModelDiscovery(
+            api_base="https://api.minimaxi.com/v1",
+            model_name="MiniMax-M2.7",
+        )
+        model = {"id": "MiniMax-M2.7"}
+
+        result = discovery._extract_context_window(model)
+        assert result == 204800
 
     def test_parse_response_openai_format(self):
         """测试解析 OpenAI 格式响应"""
@@ -320,6 +331,41 @@ class TestAsyncDiscovery:
             assert result.max_model_len == 32768
             assert result.suggested_max_tokens == 4096
 
+    async def test_discover_sends_bearer_auth_header(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "data": [
+                {"id": "MiniMax-M2.7"}
+            ]
+        }
+        mock_response.raise_for_status = MagicMock()
+        captured = {}
+
+        class DummyClient:
+            def __init__(self, *args, **kwargs):
+                captured["headers"] = kwargs.get("headers") or {}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, _url):
+                return mock_response
+
+        discovery = ModelDiscovery(
+            api_base="https://api.minimaxi.com/v1",
+            model_name="MiniMax-M2.7",
+            api_key="demo-key",
+        )
+
+        with patch("httpx.AsyncClient", DummyClient):
+            result = await discovery.discover()
+
+        assert captured["headers"]["Authorization"] == "Bearer demo-key"
+        assert result.max_model_len == 204800
+
     async def test_discover_all_endpoints_fail(self):
         """测试所有端点都失败"""
         discovery = ModelDiscovery(
@@ -344,7 +390,6 @@ class TestConvenienceFunctions:
 
     def test_discover_model_sync(self):
         """测试同步版本"""
-        import asyncio
         with patch("asyncio.get_event_loop") as mock_loop:
             mock_loop.return_value.run_until_complete = lambda x: ModelInfo(
                 model_name="test",
@@ -363,15 +408,10 @@ class TestConvenienceFunctions:
     @pytest.mark.asyncio
     async def test_get_dynamic_model_config(self):
         """测试动态配置获取"""
-        discovery = ModelDiscovery(
-            api_base="http://localhost:8000/v1",
-            model_name="qwen-32b",
-            enabled=False,
-        )
-
         result = await get_dynamic_model_config(
             api_base="http://localhost:8000/v1",
             model_name="qwen-32b",
+            api_key="demo-key",
             fallback_max_tokens=4096,
             fallback_max_token_limit=16000,
             enabled=False,

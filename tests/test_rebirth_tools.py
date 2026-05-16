@@ -11,13 +11,13 @@
 """
 
 import os
+import json
 import sys
 import pytest
 import time
-import subprocess
 from pathlib import Path
-from datetime import datetime
 
+import tools.rebirth_tools as rebirth_tools_module
 from tools.rebirth_tools import (
     trigger_self_restart_tool,
     enter_hibernation_tool,
@@ -39,8 +39,30 @@ def project_root():
 
 @pytest.fixture
 def restarter_script(project_root):
-    """获取 restarter.py 路径"""
-    return project_root / "restarter.py"
+    """获取 restarter 模块路径"""
+    return project_root / "core" / "restarter_manager" / "restarter.py"
+
+
+@pytest.fixture(autouse=True)
+def no_real_restart(monkeypatch):
+    """测试中不启动真实 restarter 进程。"""
+    monkeypatch.setattr(
+        rebirth_tools_module,
+        "spawn_detached_process",
+        lambda command, env=None: 424242,
+    )
+
+
+@pytest.fixture
+def sleep_calls(monkeypatch):
+    """记录休眠时长，不让测试真的等待。"""
+    calls = []
+
+    def fake_sleep(duration):
+        calls.append(duration)
+
+    monkeypatch.setattr(time, "sleep", fake_sleep)
+    return calls
 
 
 # ============================================================================
@@ -165,11 +187,10 @@ class TestTriggerSelfRestart:
             assert isinstance(result, str)
             assert len(result) > 0
 
-    def test_trigger_restart_with_delay(self):
-        """测试延迟重启"""
-        result = trigger_self_restart_tool(delay_seconds=2)
-        assert isinstance(result, str)
-        assert "2秒" in result or "2s" in result.lower() or "延迟" in result
+    def test_trigger_restart_rejects_unknown_delay_argument(self):
+        """当前重启工具 API 不接受延迟参数"""
+        with pytest.raises(TypeError):
+            trigger_self_restart_tool(delay_seconds=2)
 
     def test_trigger_restart_no_delay(self):
         """测试立即重启（默认）"""
@@ -193,13 +214,10 @@ class TestTriggerSelfRestart:
         # 结果应描述重启流程
         assert isinstance(result, str)
 
-    def test_trigger_restart_with_task_description(self):
-        """测试带任务描述的重启"""
-        result = trigger_self_restart_tool(
-            reason="测试任务完成",
-            task_description="完成单元测试编写"
-        )
-        assert "任务" in result or "task" in result.lower() or "完成" in result
+    def test_trigger_restart_reason_can_include_task_description(self):
+        """任务描述应合并到 reason 里传入"""
+        result = trigger_self_restart_tool(reason="测试任务完成: 完成单元测试编写")
+        assert "任务" in result or "完成" in result
 
     def test_trigger_restart_validates_restarter(self):
         """测试重启前验证 restarter 脚本"""
@@ -209,6 +227,22 @@ class TestTriggerSelfRestart:
             assert ("restarter" in result.lower() or 
                     "脚本" in result or "script" in result.lower())
 
+    def test_trigger_restart_preserves_current_cli_args(self, monkeypatch):
+        """重启时保留当前启动参数"""
+        captured = {}
+
+        def fake_spawn(command, env=None):
+            captured["command"] = command
+            captured["env"] = env or {}
+            return 424242
+
+        monkeypatch.setattr(rebirth_tools_module, "spawn_detached_process", fake_spawn)
+        monkeypatch.setattr(sys, "argv", ["agent.py", "--no-shell", "--skip-doctor", "--test"])
+
+        trigger_self_restart_tool(reason="test")
+
+        assert json.loads(captured["env"]["AGENT_RESTART_ARGS"]) == ["--no-shell", "--skip-doctor", "--test"]
+
 
 # ============================================================================
 # enter_hibernation_tool 测试
@@ -217,84 +251,67 @@ class TestTriggerSelfRestart:
 class TestEnterHibernation:
     """休眠工具测试"""
 
-    def test_hibernation_basic(self):
+    def test_hibernation_basic(self, sleep_calls):
         """测试基本休眠功能"""
-        start = time.time()
-        result = enter_hibernation_tool(duration_seconds=2)
-        elapsed = time.time() - start
-        
+        result = enter_hibernation_tool(duration=2)
+
         assert isinstance(result, str)
         assert "休眠" in result or "hibernat" in result.lower()
-        # 实际休眠时间应接近 2 秒（允许 ±0.5 秒误差）
-        assert 1.5 <= elapsed <= 3.0, f"休眠时长异常: {elapsed}s"
+        assert sleep_calls == [2]
 
-    def test_hibernation_1_second(self):
+    def test_hibernation_1_second(self, sleep_calls):
         """测试 1 秒休眠"""
-        start = time.time()
-        result = enter_hibernation_tool(duration_seconds=1)
-        elapsed = time.time() - start
-        
-        assert 0.5 <= elapsed <= 2.0
+        enter_hibernation_tool(duration=1)
 
-    def test_hibernation_5_seconds(self):
+        assert sleep_calls == [1]
+
+    def test_hibernation_5_seconds(self, sleep_calls):
         """测试 5 秒休眠"""
-        start = time.time()
-        result = enter_hibernation_tool(duration_seconds=5)
-        elapsed = time.time() - start
-        
-        assert 4.0 <= elapsed <= 6.5
+        enter_hibernation_tool(duration=5)
+
+        assert sleep_calls == [5]
 
     def test_hibernation_with_reason(self):
         """测试带原因描述的休眠"""
-        result = enter_hibernation_tool(
-            duration_seconds=1,
-            reason="测试休眠原因：等待资源释放"
-        )
-        assert "原因" in result or "reason" in result.lower() or "等待" in result
+        with pytest.raises(TypeError):
+            enter_hibernation_tool(duration=1, reason="测试休眠原因：等待资源释放")
 
     def test_hibernation_reason_parsing(self):
         """测试休眠原因解析（从 reason 字段提取时长）"""
         # 测试包含时长描述的原因
-        result = enter_hibernation_tool(
-            duration_seconds=3,
-            reason="休眠时长: 3 秒，用于测试"
-        )
+        result = enter_hibernation_tool(duration=3)
         assert "3" in result or "三" in result
 
-    def test_hibernation_zero_duration(self):
+    def test_hibernation_zero_duration(self, sleep_calls):
         """测试零时长休眠（应视为极短休眠）"""
-        start = time.time()
-        result = enter_hibernation_tool(duration_seconds=0)
-        elapsed = time.time() - start
-        # 即使为 0，也应至少短暂等待
-        assert elapsed >= 0
+        result = enter_hibernation_tool(duration=0)
 
-    def test_hibernation_very_short(self):
+        assert "错误" in result
+        assert sleep_calls == []
+
+    def test_hibernation_very_short(self, sleep_calls):
         """测试极短休眠（0.1 秒）"""
-        start = time.time()
-        result = enter_hibernation_tool(duration_seconds=0.1)
-        elapsed = time.time() - start
-        # 应至少休眠 0.05 秒以上
-        assert elapsed >= 0.05
+        result = enter_hibernation_tool(duration=0.1)
 
-    def test_hibernation_multiple_cycles(self):
+        assert isinstance(result, str)
+        assert "错误" in result
+        assert sleep_calls == []
+
+    def test_hibernation_multiple_cycles(self, sleep_calls):
         """测试多次休眠周期"""
-        total_sleep = 0
         for i in range(3):
-            start = time.time()
-            enter_hibernation_tool(duration_seconds=0.5)
-            total_sleep += time.time() - start
-        
-        # 总休眠时间应至少 1.2 秒（3 * 0.5 = 1.5，允许一定误差）
-        assert total_sleep >= 1.2
+            enter_hibernation_tool(duration=1)
 
-    def test_hibernation_default_duration(self):
+        assert sleep_calls == [1, 1, 1]
+
+    def test_hibernation_default_duration(self, sleep_calls):
         """测试默认休眠时长"""
         # 默认时长应来自配置，这里测试是否有一个合理的默认值
         result = enter_hibernation_tool()
         assert isinstance(result, str)
         # 应返回休眠相关信息
         assert ("休眠" in result or "hibernat" in result.lower())
+        assert sleep_calls == [300]
 
 
 # ============================================================================
@@ -320,14 +337,15 @@ class TestRebirthIntegration:
         assert isinstance(result, str)
         assert len(result) > 0
 
-    def test_hibernation_cycle_with_restart(self):
+    def test_hibernation_cycle_with_restart(self, sleep_calls):
         """测试休眠周期与重启"""
         # 休眠
-        enter_hibernation_tool(duration_seconds=1, reason="准备重启")
+        enter_hibernation_tool(duration=1)
         
         # 休眠后触发重启
         result = trigger_self_restart_tool(reason="休眠后重启")
         assert isinstance(result, str)
+        assert sleep_calls == [1]
 
     def test_restart_reason_classification_workflow(self):
         """测试重启原因分类工作流"""
@@ -346,21 +364,19 @@ class TestRebirthIntegration:
             category = classify_restart_reason(input_reason)
             assert category == expected, f"输入: '{input_reason}', 期望: {expected}, 实际: {category}"
 
-    def test_full_lifecycle_simulation(self):
+    def test_full_lifecycle_simulation(self, sleep_calls):
         """模拟完整生命周期"""
         # 1. 初始状态
         pid = get_current_pid()
         assert pid > 0
         
         # 2. 休眠（模拟等待）
-        enter_hibernation_tool(duration_seconds=0.5, reason="模拟等待")
+        enter_hibernation_tool(duration=1)
         
         # 3. 完成任务，触发重启
-        result = trigger_self_restart_tool(
-            reason="test_complete",
-            task_description="完成重生工具测试"
-        )
+        result = trigger_self_restart_tool(reason="test_complete: 完成重生工具测试")
         assert isinstance(result, str)
+        assert sleep_calls == [1]
 
 
 # ============================================================================
@@ -413,7 +429,7 @@ class TestSecurity:
     def test_restart_does_not_leak_sensitive_data(self):
         """测试重启不泄露敏感数据"""
         # 重启参数中不应包含敏感信息
-        result = trigger_self_restart_tool(reason="test", task_description="test task")
+        result = trigger_self_restart_tool(reason="test: test task")
         assert "password" not in result.lower()
         assert "key" not in result.lower() or "key" in result.lower()  # 可能包含 "key" 这个词
 
@@ -421,9 +437,8 @@ class TestSecurity:
         """测试休眠原因消毒"""
         # 尝试注入危险内容
         dangerous = "'; DROP TABLE users; --"
-        result = enter_hibernation_tool(duration_seconds=1, reason=dangerous)
-        # 应该正常处理（不会执行注入）
-        assert isinstance(result, str)
+        with pytest.raises(TypeError):
+            enter_hibernation_tool(duration=1, reason=dangerous)
 
     def test_restart_reason_no_command_injection(self):
         """测试重启原因无命令注入"""
@@ -450,14 +465,14 @@ class TestConcurrency:
         # 所有请求都应返回有效响应
         assert all(isinstance(r, str) for r in results)
 
-    def test_concurrent_hibernation(self):
+    def test_concurrent_hibernation(self, sleep_calls):
         """测试并发休眠"""
         import threading
         
         results = []
         
         def hibernate():
-            result = enter_hibernation_tool(duration_seconds=0.5)
+            result = enter_hibernation_tool(duration=0.5)
             results.append(result)
         
         threads = [threading.Thread(target=hibernate) for _ in range(5)]
@@ -468,6 +483,8 @@ class TestConcurrency:
         
         assert len(results) == 5
         assert all(isinstance(r, str) for r in results)
+        assert all("错误" in r for r in results)
+        assert sleep_calls == []
 
 
 # ============================================================================
@@ -479,26 +496,21 @@ class TestErrorHandling:
 
     def test_trigger_restart_with_missing_restarter(self, monkeypatch):
         """测试 restarter 缺失时的处理"""
-        # 临时修改 RESTARTER_SCRIPT 路径
-        from tools.rebirth_tools import RESTARTER_SCRIPT
-        original = RESTARTER_SCRIPT
-        
-        try:
-            # 设置为不存在的路径
-            import tools.rebirth_tools
-            tools.rebirth_tools.RESTARTER_SCRIPT = Path("nonexistent_restarter.py")
-            
-            result = trigger_self_restart_tool()
-            # 应返回错误信息而非抛出异常
-            assert isinstance(result, str)
-            assert ("错误" in result or "失败" in result or 
-                    "not found" in result.lower() or "missing" in result.lower())
-        finally:
-            tools.rebirth_tools.RESTARTER_SCRIPT = original
+        monkeypatch.setattr(
+            rebirth_tools_module,
+            "validate_restarter_available",
+            lambda: (False, "Restarter 模块不可用: test"),
+        )
+
+        result = trigger_self_restart_tool()
+
+        assert isinstance(result, str)
+        assert "错误" in result
+        assert "Restarter" in result
 
     def test_hibernation_negative_duration(self):
         """测试负时长休眠（应处理为 0 或默认值）"""
-        result = enter_hibernation_tool(duration_seconds=-1)
+        result = enter_hibernation_tool(duration=-1)
         assert isinstance(result, str)
         # 应返回错误或使用默认值
 
@@ -539,18 +551,14 @@ class TestPerformance:
         
         assert elapsed < 1.0  # 3000 次分类应在 1 秒内
 
-    def test_hibernation_timing_accuracy(self):
+    def test_hibernation_timing_accuracy(self, sleep_calls):
         """测试休眠时间准确性"""
         durations = [0.5, 1.0, 2.0, 3.0]
-        
+
         for target in durations:
-            start = time.time()
-            enter_hibernation_tool(duration_seconds=target)
-            actual = time.time() - start
-            
-            # 允许 10% 误差
-            assert target * 0.9 <= actual <= target * 1.5, \
-                f"目标 {target}s, 实际 {actual}s"
+            enter_hibernation_tool(duration=target)
+
+        assert sleep_calls == [1.0, 2.0, 3.0]
 
 
 # ============================================================================
@@ -568,10 +576,11 @@ class TestReturnFormats:
         assert any(keyword in result for keyword in 
                    ["重启", "restart", "触发", "trigger", "进程", "process"])
 
-    def test_hibernation_returns_duration(self):
+    def test_hibernation_returns_duration(self, sleep_calls):
         """测试休眠返回时长信息"""
-        result = enter_hibernation_tool(duration_seconds=2)
+        result = enter_hibernation_tool(duration=2)
         assert "2" in result or "两" in result or "二" in result
+        assert sleep_calls == [2]
 
     def test_validate_restarter_returns_consistent(self):
         """测试验证返回一致性"""
@@ -580,7 +589,7 @@ class TestReturnFormats:
         
         # 两次调用结果应一致（除非环境变化）
         assert is_avail1 == is_avail2
-        assert type(error1) == type(error2)
+        assert isinstance(error1, type(error2))
 
 
 # ============================================================================
@@ -590,27 +599,27 @@ class TestReturnFormats:
 class TestParameterBoundaries:
     """参数边界测试"""
 
-    def test_hibernation_max_duration(self):
+    def test_hibernation_max_duration(self, sleep_calls):
         """测试最大休眠时长"""
         # 允许的最大时长
-        result = enter_hibernation_tool(duration_seconds=3600)  # 1 小时
+        result = enter_hibernation_tool(duration=3600)  # 1 小时
         assert isinstance(result, str)
+        assert sleep_calls == [3600]
 
-    def test_hibernation_very_large_duration(self):
-        """测试超大休眠时长（不会真的睡那么久）"""
-        # 传入很大但实际只睡很短用于测试
-        result = trigger_self_restart_tool(delay_seconds=10000)
-        assert isinstance(result, str)
+    def test_restart_rejects_very_large_delay_argument(self):
+        """重启工具不接受延迟参数"""
+        with pytest.raises(TypeError):
+            trigger_self_restart_tool(delay_seconds=10000)
 
     def test_restart_reason_empty_string(self):
         """测试空字符串原因"""
         result = trigger_self_restart_tool(reason="")
         assert isinstance(result, str)
 
-    def test_restart_task_description_very_long(self):
-        """测试超长任务描述"""
+    def test_restart_reason_very_long(self):
+        """测试超长原因描述"""
         long_desc = "A" * 10000
-        result = trigger_self_restart_tool(task_description=long_desc)
+        result = trigger_self_restart_tool(reason=long_desc)
         assert isinstance(result, str)
 
 

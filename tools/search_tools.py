@@ -12,8 +12,7 @@
 import re
 import os
 from pathlib import Path
-from typing import Optional, List, Tuple
-
+from typing import Optional, List, Tuple, Dict
 
 # ============================================================================
 # 配置常量 - 从配置文件加载
@@ -55,6 +54,11 @@ INCLUDE_EXTENSIONS = _search_defaults.get("INCLUDE_EXTENSIONS", {
     '.py', '.js', '.ts', '.jsx', '.tsx', '.md', '.json', '.yaml', '.yml', '.toml', '.txt', '.html', '.css', '.xml', '.sh', '.bat', '.ps1'
 })
 
+EXTENSION_FAMILIES = {
+    ".js": {".js", ".jsx"},
+    ".ts": {".ts", ".tsx"},
+}
+
 
 def _normalize_path(file_path: str) -> Path:
     """规范化文件路径"""
@@ -85,12 +89,36 @@ def _should_process_file(file_path: Path) -> bool:
     return True
 
 
+def _resolve_extensions(include_ext: str) -> set[str]:
+    """把公开扩展名参数解析为实际扩展集合。"""
+    if include_ext == "*":
+        return INCLUDE_EXTENSIONS
+    if include_ext.startswith("."):
+        normalized = include_ext.lower()
+    else:
+        normalized = f".{include_ext.lstrip('.')}".lower()
+    return EXTENSION_FAMILIES.get(normalized, {normalized})
+
+
+def _looks_like_redos_pattern(pattern: str) -> bool:
+    """轻量检测常见 ReDoS 形态，避免高危嵌套量词。"""
+    if not pattern:
+        return False
+    heuristics = [
+        r"\([^)]*[+*][^)]*\)[+*?]",   # (a+)+ / (.*)* / (.+)?
+        r"\([^)]*\{[^}]+\}[^)]*\)[+*?]",  # (a{1,3})+
+    ]
+    return any(re.search(rule, pattern) for rule in heuristics)
+
+
 def grep_search_tool(
     regex_pattern: str = "",
     include_ext: str = ".py",
     search_dir: str = ".",
     case_sensitive: bool = True,
     max_results: int = None,
+    context_lines: Optional[int] = None,
+    recursive: bool = True,
     max_output_chars: int = 8000
 ) -> str:
     """
@@ -102,6 +130,8 @@ def grep_search_tool(
         search_dir: 搜索的根目录
         case_sensitive: 是否区分大小写
         max_results: 最大返回结果数（默认从配置读取，最高50）
+        context_lines: 匹配前后展示的上下文行数；None 表示使用默认配置
+        recursive: 兼容参数；当前实现默认递归搜索
         max_output_chars: 最大输出字符数，默认8000，防止上下文爆炸
 
     Returns:
@@ -111,10 +141,13 @@ def grep_search_tool(
         max_results = _search_defaults.get("max_results", 50)
     # 强制上限，防止配置被改大导致上下文爆炸
     max_results = min(max_results, 50)
+    effective_context_lines = MAX_CONTEXT_LINES if context_lines is None else max(0, int(context_lines))
 
     if not regex_pattern:
         import json
         return json.dumps({"status": "error", "code": "EMPTY_PATTERN", "message": "正则表达式不能为空"})
+    if _looks_like_redos_pattern(regex_pattern):
+        return "[搜索] 错误: 正则表达式存在潜在高复杂度嵌套量词，已拒绝执行"
 
     search_dir_path = _normalize_path(search_dir)
     
@@ -139,12 +172,7 @@ def grep_search_tool(
         return f"[搜索] 错误: 无效的正则表达式 - {e}"
 
     # 确定要搜索的扩展名
-    if include_ext == "*":
-        extensions = INCLUDE_EXTENSIONS
-    elif include_ext.startswith("."):
-        extensions = {include_ext.lower()}
-    else:
-        extensions = {f".{include_ext.lstrip('.')}"}
+    extensions = _resolve_extensions(include_ext)
 
     results: List[Tuple[str, int, str, List[str]]] = []  # (文件路径, 行号, 匹配行, 上下文)
 
@@ -183,8 +211,8 @@ def grep_search_tool(
                 for line_num, line in enumerate(lines, 1):
                     if pattern.search(line):
                         # 收集上下文
-                        context_start = max(0, line_num - 1 - MAX_CONTEXT_LINES)
-                        context_end = min(len(lines), line_num + MAX_CONTEXT_LINES)
+                        context_start = max(0, line_num - 1 - effective_context_lines)
+                        context_end = min(len(lines), line_num + effective_context_lines)
                         context = [lines[i].rstrip() for i in range(context_start, context_end)]
 
                         results.append((
@@ -220,42 +248,76 @@ def grep_search_tool(
         display_dir = f"{search_dir_path}/{target_filename}" if is_single_file else str(search_dir_path)
         return f"[搜索] 未找到匹配项\n正则: {regex_pattern}\n目录: {display_dir}\n类型: {include_ext}"
 
+    grouped: Dict[str, List[Tuple[int, str, List[str]]]] = {}
+    for file_path, line_num, match_line, context in results:
+        grouped.setdefault(file_path, []).append((line_num, match_line, context))
+
     output_lines = [
         f"[搜索] 正则: {regex_pattern}",
         f"[搜索] 目录: {search_dir_path if not is_single_file else search_dir_path / target_filename}",
         f"[搜索] 类型: {include_ext}",
-        f"[搜索] 找到 {len(results)} 个匹配\n",
-        "=" * 80,
+        f"[搜索] 找到 {len(results)} 个匹配，分布在 {len(grouped)} 个文件",
+        "[搜索] 阅读策略: 先看文件分组与首个命中，再按需用 read_file_tool / get_code_entity_tool 精读",
+        "",
+        "[搜索摘要]",
     ]
 
-    MAX_OUTPUT_CHARS = 8000  # 限制输出总长度，避免上下文膨胀
+    for file_path, entries in grouped.items():
+        line_numbers = [str(item[0]) for item in entries[:3]]
+        more = f" ... +{len(entries) - 3}" if len(entries) > 3 else ""
+        output_lines.append(
+            f"- {file_path} | 命中 {len(entries)} 处 | 行 {', '.join(line_numbers)}{more}"
+        )
+
+    output_lines.extend(["", "=" * 80, "[搜索预览]"])
+
+    max_output_chars = max(1200, int(max_output_chars or 8000))
+    preview_file_limit = 3
+    preview_match_limit = 6
 
     current_file = None
     chars_so_far = 0
     truncated = False
+    preview_blocks = 0
+    preview_matches = 0
     for file_path, line_num, match_line, context in results:
         if file_path != current_file:
+            if preview_blocks >= preview_file_limit:
+                truncated = True
+                break
             current_file = file_path
             output_lines.append(f"\n📁 {file_path}")
             output_lines.append("-" * 80)
+            preview_blocks += 1
 
         # 上下文行
         for ctx_idx, ctx_line in enumerate(context):
             if ctx_line == match_line:
                 line = f"  → 第 {line_num} 行 | {ctx_line}"
             else:
-                line = f"    第 {line_num - MAX_CONTEXT_LINES + ctx_idx} 行 | {ctx_line}"
+                line = f"    第 {line_num - effective_context_lines + ctx_idx} 行 | {ctx_line}"
             output_lines.append(line)
             chars_so_far += len(line) + 1
-            if chars_so_far > MAX_OUTPUT_CHARS:
+            if chars_so_far > max_output_chars:
                 truncated = True
                 break
 
         if truncated:
             break
+        preview_matches += 1
+        if preview_matches >= preview_match_limit:
+            truncated = True
+            break
 
     if truncated:
-        output_lines.append(f"\n... (结果已截断，仅显示前 {len(output_lines) - 7} 项)")
+        output_lines.append(f"\n... (搜索预览已截断，仅显示前 {preview_blocks} 个预览块)")
+        if grouped:
+            first_file = next(iter(grouped.keys()))
+            output_lines.append(f'[续读] read_file_tool(file_path="{first_file}", offset=0, max_lines=80)')
+        else:
+            output_lines.append("[续读] 缩小 regex_pattern / search_dir，或对目标文件使用 read_file_tool 分页读取")
+    else:
+        output_lines.append("\n[续读] 若需要完整上下文，请对上面命中的目标文件继续分页读取")
 
     output_lines.append("\n" + "=" * 80)
     output_lines.append(f"[搜索完成] 共 {len(results)} 个匹配")
@@ -306,39 +368,59 @@ def find_definitions_tool(
         rf'\b{re.escape(symbol_name)}\s*=\s*(?!=)',
     ]
     combined_pattern = '|'.join(patterns)
-    return grep_search_tool(combined_pattern, include_ext, search_dir)
+    return grep_search_tool(combined_pattern, include_ext, search_dir, context_lines=10)
 
 
 def search_imports_tool(
-    module_or_name: str,
+    module_or_name: str = "",
+    module_name: Optional[str] = None,
     search_dir: str = ".",
-    include_ext: str = ".py"
+    include_ext: str = "*"
 ) -> str:
     """
     查找特定的 import 语句
 
     Args:
         module_or_name: 模块名或导入的名称
+        module_name: 兼容旧调用的别名；若提供则优先使用
         search_dir: 搜索目录
         include_ext: 文件类型
 
     Returns:
         所有 import 该模块/名称的位置
     """
+    # 兼容旧的 positional 调用：search_imports_tool(module_name, search_dir)
+    if (
+        isinstance(module_name, str)
+        and module_name
+        and search_dir == "."
+        and include_ext == "*"
+        and not module_name.startswith(".")
+        and ("\\" in module_name or "/" in module_name)
+    ):
+        search_dir = module_name
+        module_name = None
+
+    target = module_name or module_or_name
+    if not target:
+        return "[搜索] 错误: 模块名不能为空"
+
     patterns = [
-        rf'^import\s+.*{re.escape(module_or_name)}',
-        rf'^from\s+.*{re.escape(module_or_name)}\s+import',
+        rf'^import\s+.*{re.escape(target)}',
+        rf'^from\s+.*{re.escape(target)}\s+import',
     ]
     combined_pattern = '|'.join(patterns)
     return grep_search_tool(combined_pattern, include_ext, search_dir)
 
 
 def search_and_read_tool(
-    query: str,
+    query: str = "",
+    search_pattern: Optional[str] = None,
     context_lines: int = 5,
     include_ext: str = ".py",
     search_dir: str = ".",
-    max_matches: int = 50
+    max_matches: int = 50,
+    max_results: Optional[int] = None
 ) -> str:
     """
     搜索并读取 - 一步到位的代码检索
@@ -348,16 +430,39 @@ def search_and_read_tool(
 
     Args:
         query: 搜索关键词（支持正则表达式）
+        search_pattern: 兼容旧调用的别名；若提供则优先使用
         context_lines: 每个匹配项返回的上下文行数（前后各 context_lines 行）
         include_ext: 文件类型过滤
         search_dir: 搜索目录
         max_matches: 最大匹配数（超过则截断）
+        max_results: 兼容旧调用的别名；若提供则优先使用
 
     Returns:
         格式化的搜索结果，每个匹配包含完整的上下文代码块
     """
-    if not query:
+    # 兼容更老的 positional 调用：search_and_read_tool(query, include_ext, search_dir)
+    if (
+        isinstance(search_pattern, str)
+        and search_pattern.startswith(".")
+        and isinstance(context_lines, str)
+        and include_ext == ".py"
+        and search_dir == "."
+    ):
+        search_dir = context_lines
+        include_ext = search_pattern
+        search_pattern = None
+        context_lines = 5
+
+    # 兼容旧的 positional 调用：search_and_read_tool(query, include_ext, search_dir)
+    if isinstance(context_lines, str) and isinstance(include_ext, str) and search_dir == ".":
+        search_dir = include_ext
+        include_ext = context_lines
+        context_lines = 5
+
+    target_query = search_pattern or query
+    if not target_query:
         return "[搜索读取] 错误: 查询不能为空"
+    effective_max_matches = int(max_results) if max_results is not None else int(max_matches)
 
     search_dir_path = _normalize_path(search_dir)
     if not search_dir_path.exists():
@@ -365,20 +470,16 @@ def search_and_read_tool(
 
     # 编译正则
     try:
-        pattern = re.compile(query)
+        pattern = re.compile(target_query)
     except re.error as e:
         return f"[搜索读取] 错误: 无效的正则表达式 - {e}"
 
     # 确定扩展名
-    if include_ext == "*":
-        extensions = INCLUDE_EXTENSIONS
-    elif include_ext.startswith("."):
-        extensions = {include_ext.lower()}
-    else:
-        extensions = {f".{include_ext.lstrip('.')}"}
+    extensions = _resolve_extensions(include_ext)
 
     # 收集所有匹配
     all_matches = []
+    total_collected_matches = 0
 
     try:
         for root, dirs, files in os.walk(search_dir_path):
@@ -420,6 +521,9 @@ def search_and_read_tool(
                             'context': context_block,
                             'match_line': line.rstrip(),
                         })
+                        total_collected_matches += 1
+                        if total_collected_matches >= effective_max_matches:
+                            break
 
                 if file_matches:
                     all_matches.append({
@@ -427,10 +531,10 @@ def search_and_read_tool(
                         'matches': file_matches,
                     })
 
-                if len(all_matches) >= max_matches:
+                if total_collected_matches >= effective_max_matches:
                     break
 
-            if len(all_matches) >= max_matches:
+            if total_collected_matches >= effective_max_matches:
                 break
 
     except Exception as e:
@@ -476,4 +580,3 @@ def search_and_read_tool(
     output.append(f"[搜索读取完成] 共 {total_matches} 处匹配")
 
     return '\n'.join(output)
-

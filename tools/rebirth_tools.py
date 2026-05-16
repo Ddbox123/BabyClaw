@@ -23,6 +23,7 @@
 """
 
 import os
+import json
 import sys
 from pathlib import Path
 from typing import Optional
@@ -45,6 +46,15 @@ RESTART_REASONS = {
     'error_recovery': '错误恢复重启',
     'scheduled': '定时重启',
     'maintenance': '维护重启',
+}
+
+RESTART_REASON_KEYWORDS = {
+    'code_update': ('code_update', '代码更新', '代码已更新', '源码更新', '修改代码'),
+    'threshold_reached': ('threshold_reached', '阈值', '达到运行阈值', '达到重启阈值'),
+    'manual': ('manual', '手动', '用户请求'),
+    'error_recovery': ('error_recovery', '错误恢复', '异常恢复', '失败恢复'),
+    'scheduled': ('scheduled', '定时', '计划任务', '周期'),
+    'maintenance': ('maintenance', '维护', '保养'),
 }
 
 
@@ -83,9 +93,9 @@ def classify_restart_reason(reason: str) -> str:
         分类后的原因类别
     """
     reason_lower = reason.lower()
-    
-    for category, desc in RESTART_REASONS.items():
-        if category in reason_lower:
+
+    for category, keywords in RESTART_REASON_KEYWORDS.items():
+        if any(keyword.lower() in reason_lower for keyword in keywords):
             return category
     
     return 'manual'
@@ -337,10 +347,8 @@ def trigger_self_restart_tool(reason: str = "") -> str:
         # reason 格式可能是 "xxx|智慧摘要" 或纯 reason
         if "|" in reason:
             parts = reason.split("|", 1)
-            restart_reason = parts[0].strip()
             model_wisdom = parts[1].strip() if len(parts) > 1 else core_ctx
         else:
-            restart_reason = reason
             model_wisdom = core_ctx
 
         snapshot_result = force_save_current_state(
@@ -376,6 +384,7 @@ def trigger_self_restart_tool(reason: str = "") -> str:
     env['AGENT_RESTART_REASON'] = reason
     env['AGENT_RESTART_CATEGORY'] = reason_category
     env['AGENT_ORIGINAL_PID'] = str(current_pid)
+    env['AGENT_RESTART_ARGS'] = json.dumps(sys.argv[1:], ensure_ascii=False)
 
     # 5. 构建命令（使用 -m 方式调用）
     command = [
@@ -451,6 +460,44 @@ def write_restart_log(pid: int, reason: str, success: bool) -> None:
         f.write(f"{timestamp} | PID:{pid} | {status} | {reason}\n")
 
 
+def _open_restart_transaction(reason: str = "") -> Optional[str]:
+    """为高风险重启动作打开演化事务。"""
+    try:
+        from core.infrastructure.git_memory import get_git_memory_service
+        summary = f"restart_request: {reason}".strip()
+        return get_git_memory_service().open_evolution_transaction(summary=summary)
+    except Exception:
+        return None
+
+
+def _close_restart_transaction(txn_id: Optional[str], status: str, summary: str = "") -> None:
+    """关闭重启事务；失败时静默降级，不影响主流程。"""
+    if not txn_id:
+        return
+    try:
+        from core.infrastructure.git_memory import get_git_memory_service
+        get_git_memory_service().close_evolution_transaction(
+            txn_id=txn_id,
+            status=status,
+            summary=summary,
+        )
+    except Exception:
+        pass
+
+
+def _restart_trigger_succeeded(result: str) -> bool:
+    """判断重启触发是否成功。"""
+    if not isinstance(result, str):
+        return False
+    lowered = result.lower()
+    return not (
+        lowered.startswith("错误")
+        or lowered.startswith("[")
+        or "启动重启进程失败" in result
+        or "restarter 模块不可用" in result
+    )
+
+
 # ============================================================================
 # 重启请求处理（与 Agent 逻辑解耦）
 # ============================================================================
@@ -476,15 +523,32 @@ def handle_restart_request(
         - result_message: 操作结果或错误信息
         - action: "restart" 表示重启，None 表示被拦截
     """
+    reason = str(tool_args.get("reason", "")).strip()
+    txn_id = _open_restart_transaction(reason)
+
     # 任务清单拦截检查
     try:
         from tools.memory_tools import check_restart_block
         is_blocked, block_msg = check_restart_block()
         if is_blocked:
             debug_logger.warning("任务清单未完成，禁止重启", tag="TASK_BLOCK")
+            _close_restart_transaction(txn_id, "cancelled", f"restart blocked: {block_msg}")
             return (block_msg, None)
     except Exception as e:
         debug_logger.error(f"任务清单检查失败: {e}", tag="TASK_BLOCK")
+
+    # 环境烟雾门控（所有重启请求都必须通过）
+    try:
+        from core.infrastructure.test_gate import check_environment_ready
+        passed, msg = check_environment_ready()
+        if not passed:
+            debug_logger.error("环境 smoke 门控失败，禁止重启", tag="ENV_GATE")
+            _close_restart_transaction(txn_id, "failed", f"environment gate failed: {msg}")
+            return (f"[ENVIRONMENT GATE FAILED] {msg}", None)
+    except Exception as e:
+        debug_logger.error(f"环境 smoke 门控执行失败: {e}", tag="ENV_GATE")
+        _close_restart_transaction(txn_id, "failed", f"environment gate error: {e}")
+        return (f"[ENVIRONMENT GATE ERROR] {e}", None)
 
     # 测试门控（仅当 Agent 产生过自我修改时触发）
     if self_modified:
@@ -493,14 +557,21 @@ def handle_restart_request(
             passed, msg = check_evolution_ready()
             if not passed:
                 debug_logger.error("测试门控失败，禁止重启", tag="GATE")
+                _close_restart_transaction(txn_id, "failed", f"test gate failed: {msg}")
                 return (f"[TEST GATE FAILED] {msg}", None)
         except Exception as e:
             debug_logger.error(f"测试门控执行失败: {e}", tag="GATE")
+            _close_restart_transaction(txn_id, "failed", f"test gate error: {e}")
+            return (f"[TEST GATE ERROR] {e}", None)
 
     # 触发实际重启
     tool_result = trigger_self_restart_tool(**tool_args)
+    if _restart_trigger_succeeded(tool_result):
+        _close_restart_transaction(txn_id, "success", f"restart accepted: {reason}")
+        return (tool_result, "restart")
 
-    return (tool_result, "restart")
+    _close_restart_transaction(txn_id, "failed", f"restart trigger failed: {tool_result}")
+    return (tool_result, None)
 
 
 def enter_hibernation_tool(duration: int = 300) -> str:

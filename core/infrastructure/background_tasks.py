@@ -34,9 +34,13 @@ class BackgroundTaskManager:
     def _execute_task(self, task_id: str, command: str, timeout: int):
         """在线程中执行命令并捕获输出"""
         try:
+            # Windows 兼容策略：
+            # - 默认使用 shell=False（避免 Windows cmd 不识别 Unix 命令如 head）
+            # - 仅当命令包含 shell 特殊字符（|, >, <, &, &&, ||, $() 等）时启用 shell
+            needs_shell = any(c in command for c in ('|', '>', '<', '&', '$', '`'))
             result = subprocess.run(
                 command,
-                shell=True,
+                shell=needs_shell,
                 capture_output=True,
                 text=True,
                 timeout=timeout,

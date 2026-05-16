@@ -1,346 +1,395 @@
 # ============================================================
-# Self-Evolving Agent 配置文件
+# Self-Evolving Agent 主配置
 # ============================================================
-# 所有参数都在此文件中配置，支持环境变量覆盖
-# 配置优先级：环境变量 > TOML > 默认值
+# 本文件是项目的完整主配置面。想知道项目当前如何运行，先看这里。
+# 模型默认值仅作为最低优先级兜底。
+# 配置优先级：命令行参数(kwargs) > 环境变量 > config.toml > 默认值
 # ============================================================
 
-# ============================================================
-# [基础] 形象配置
-# ============================================================
+[runtime]
+profile = "safe_remote"
+preflight_doctor = true
+require_venv = true
+
 [avatar]
-# 预设形象: lobster(龙虾), shrimp(小虾米), crab(小螃蟹), cat(猫猫), chick(小鸡)
-preset = "lobster"
+preset = "moose"
 
-# ============================================================
-# [核心] 大语言模型配置
-# ============================================================
 [llm]
-# 提供商：aliyun, openai, anthropic, deepseek, google, zhipu, ollama, siliconflow, groq, minimax, local
-provider = "minimax"
 
-# 模型名称
-model_name = "MiniMax-M2.7"
+[llm.providers]
 
-# API Key（支持环境变量覆盖）
-api_key = "sk-cp-ShC6ObKxYH3_5g7fGXTYlimU8Cn_TJhqVm8toc72iNQw0DSW3Zaf7tejKfroi7GulrtE-acQ9haO6Dici0EgzIvGa_MeKe_H6yHgA3d0aMKO_qvO3U16ib4"  # 设置 MINIMAX_API_KEY 环境变量
+[llm.providers.remote_main]
+kind = "minimax"
+api_key = ""
+api_key_env = "MINIMAX_API_KEY"
+base_url = "https://api.minimaxi.com/v1"
+compat_mode = "openai"
+requires_api_key = true
+context_window = 204800
 
-# API 端点
-api_base = "https://api.minimaxi.com/v1"
-
-# 温度参数 (0.0, 1.0]，推荐 1.0，越高越有创意（MiniMax 不支持 0）
-temperature = 1.0
-
-# 最大输出 tokens
-max_tokens = 8192
-
-# API 超时时间（秒）
-api_timeout = 120
-
-# 连接超时（秒）
-connect_timeout = 30
-
-# ============================================================
-# [核心] 本地部署配置（当 provider = "local" 时生效）
-# ============================================================
-[llm.local]
-# 本地服务 URL（支持 Ollama, LM Studio, vLLM 等）
-url = "http://localhost:8000/v1"
-
-# 本地模型名称
-model = "qwen-32b-awq"
-
-# 是否需要 API Key（大多数本地部署不需要）
-require_api_key = false
-
-# 本地 API Key（如果需要）
-# api_key = ""
-
-# 流式响应
-streaming = true
-
-# 上下文窗口大小（自动发现，如无法发现则使用此值）
+[llm.providers.local_main]
+kind = "local"
+api_key = ""
+api_key_env = ""
+base_url = "http://localhost:8000/v1"
+compat_mode = "openai"
+requires_api_key = false
 context_window = 65536
 
-# 是否自动检测可用模型
-auto_detect_model = true
+[llm.providers.deepseek_main]
+kind = "deepseek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com"
+compat_mode = "openai"
+requires_api_key = true
+context_window = 131072
+provider_id = "deepseek_main"
 
-# 模型列表刷新间隔（秒）
-model_refresh_interval = 300
+[llm.profiles]
 
-# 模型动态发现配置
+[llm.profiles.primary]
+provider_id = "deepseek_main"
+model = "deepseek-v4-pro"
+temperature = 0.7
+max_output_tokens = 8192
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+api_key_env = "VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY"
+
+[llm.profiles.mental_model]
+provider_id = "remote_main"
+model = "MiniMax-M2.7"
+temperature = 1
+max_output_tokens = 8192
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+
+[llm.profiles.subagent_worker]
+provider_id = "remote_main"
+model = "MiniMax-M2.7"
+temperature = 1
+max_output_tokens = 8192
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+
+[llm.profiles.subagent_explorer]
+provider_id = "remote_main"
+model = "MiniMax-M2.7"
+temperature = 0.3
+max_output_tokens = 4096
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+
+[llm.profiles.supervised_baseline]
+provider_id = "remote_main"
+model = "MiniMax-M2.7"
+temperature = 1
+max_output_tokens = 8192
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+
+[llm.profiles.supervised_candidate]
+provider_id = "remote_main"
+model = "MiniMax-M2.7"
+temperature = 1
+max_output_tokens = 8192
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+
+[llm.profiles.compression]
+provider_id = "remote_main"
+model = "MiniMax-M2.7"
+temperature = 1
+max_output_tokens = 8192
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+api_key_env = "VIBELUTION_LLM_REMOTE_MAIN_MINIMAX_M2_7_API_KEY"
+
 [llm.discovery]
-# 是否启用运行时模型发现
 enabled = true
-
-# 发现请求超时（秒）- vLLM 响应很快，5秒足够
 timeout = 5
-
-# 发现失败时使用的 max_tokens（空则使用配置文件的值）
 fallback_max_tokens = 4096
-
-# 发现失败时使用的 max_token_limit（空则使用 context_window * 0.5）
 fallback_max_token_limit = 32768
-
-# 是否自动调整压缩阈值
 auto_adjust = true
-
-# 预留输出 tokens 比例（用于计算 suggested_max_tokens）
 output_reserve_ratio = 0.125
 
-# ============================================================
-# [核心] Agent 行为配置
-# ============================================================
+[llm.model_library]
+
+[llm.model_library.remote_main_minimax_m2_7]
+provider_id = "remote_main"
+model = "MiniMax-M2.7"
+label = "MiniMax-M2.7"
+api_key_env = "VIBELUTION_LLM_REMOTE_MAIN_MINIMAX_M2_7_API_KEY"
+temperature = 1
+max_output_tokens = 8192
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+
+[llm.model_library.deepseek_v4_pro]
+provider_id = "deepseek_main"
+model = "deepseek-v4-pro"
+label = "DeepSeek V4 Pro"
+api_key_env = "VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY"
+temperature = 0.7
+max_output_tokens = 8192
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+
 [agent]
-# Agent 名称
 name = "SelfEvolvingAgent"
-
-# 工作区域目录（相对于项目根目录）
 workspace = "workspace"
-
-# 苏醒间隔（秒）- Agent 每隔多久苏醒一次进行思考
-# 建议：简单任务用 60 秒，复杂任务用 300 秒
 awake_interval = 60
-
-# 单次苏醒的最大工具调用次数
-max_iterations = 100
-
-# 最大运行时间（秒），0 表示无限制
+max_iterations = 60
 max_runtime = 0
-
-# 是否启用自动备份
 auto_backup = true
-
-# 自动备份间隔（秒）
 backup_interval = 3000
-
-# 自动重启阈值，0 表示不自动重启
 auto_restart_threshold = 0
-
-# 是否启用探索模式
 exploration_mode = false
 
-# ============================================================
-# [核心] 上下文压缩配置
-# ============================================================
 [context_compression]
-# 是否启用上下文压缩
 enabled = true
-
-# Token 阈值，超过此值触发压缩
 max_token_limit = 32768
-
-# 保留最近的工具调用次数
 keep_recent_steps = 2
-
-# 压缩摘要的最大字符数
 summary_max_chars = 1000
-
-# 压缩用模型（建议用更轻量的模型）
 compression_model = "qwen-32b-awq"
-
-# 压缩用模型温度
 compression_temperature = 0.3
-
-# 每会话最大压缩次数
 max_compressions_per_session = 20
-
-# 压缩效率阈值（低于此值认为压缩无效）
 effectiveness_threshold = 0.3
 
-# 压缩级别配置
 [context_compression.levels]
-# 轻度压缩阈值（相对于 max_token_limit）
 light = 0.6
-# 标准压缩阈值
 standard = 0.8
-# 深度压缩阈值
 deep = 0.9
-# 紧急压缩阈值
 emergency = 0.95
 
-# 各压缩级别摘要字数
 [context_compression.summary_chars]
 light = 500
 standard = 1000
 deep = 2000
 emergency = 3000
 
-# 智能保留策略
 [context_compression.preservation]
-# 保留最近 AI 消息数
 keep_ai_messages = 5
-# 保留工具调用结果
 keep_tool_results = true
-# 保留错误信息
 preserve_errors = true
-# 提取关键决策
 extract_key_decisions = true
 
-# ============================================================
-# [工具] 文件操作配置
-# ============================================================
+[tools]
+restart_enabled = true
+allowed_directories = [
+    "${PROJECT_ROOT}",
+    "${PROJECT_ROOT}/tools",
+    "${PROJECT_ROOT}",
+    "${HOME}"
+]
+forbidden_patterns = [
+    ".env",
+    ".password",
+    ".secret",
+    ".key",
+    "id_rsa",
+    "credentials.json"
+]
+
 [tools.file]
-# 是否启用文件编辑
 edit_enabled = true
-
-# 是否启用文件创建
 create_enabled = true
-
-# 是否启用语法检查
 syntax_check_enabled = true
-
-# 单次读取最大行数（0 表示无限制）
 max_read_lines = 0
-
-# 单次读取最大字符数（0 表示无限制）
 max_read_chars = 0
-
-# 文件编码自动检测顺序
-encoding_priority = ["utf-8", "utf-8-sig", "gbk", "gb2312", "latin-1"]
-
-# 允许编辑的文件扩展名
+encoding_priority = [
+    "utf-8",
+    "utf-8-sig",
+    "gbk",
+    "gb2312",
+    "latin-1"
+]
 editable_extensions = [
-    ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".kt", ".go", ".rs",
-    ".c", ".cpp", ".h", ".hpp", ".rb", ".php", ".html", ".css", ".scss",
-    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".md", ".txt",
-    ".sh", ".sql", ".xml", ".svg"
+    ".py",
+    ".js",
+    ".ts",
+    ".jsx",
+    ".tsx",
+    ".java",
+    ".kt",
+    ".go",
+    ".rs",
+    ".c",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".rb",
+    ".php",
+    ".html",
+    ".css",
+    ".scss",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".md",
+    ".txt",
+    ".sh",
+    ".sql",
+    ".xml",
+    ".svg"
 ]
 
-# ============================================================
-# [工具] Shell 命令配置
-# ============================================================
 [tools.shell]
-# 是否启用 Shell 执行
 enabled = true
-
-# 默认超时时间（秒）
 default_timeout = 60
-
-# 最大输出长度（字符）
 max_output_length = 10000
-
-# 最大文件大小（字节）
 max_file_size = 10485760
-
-# 是否启用安全检查
 safety_check = true
-
-# 危险命令黑名单检测
 dangerous_pattern_check = true
+allowed_shells = [
+    "powershell",
+    "cmd",
+    "bash"
+]
 
-# 允许的 Shell 类型
-allowed_shells = ["powershell", "cmd", "bash"]
-
-# ============================================================
-# [工具] 搜索工具配置
-# ============================================================
 [tools.search]
-# 搜索最大文件大小（字节）
 max_file_size = 10485760
-
-# 每个文件最大匹配数
 max_matches_per_file = 100
-
-# 最大总结果数（控制单次搜索的返回量，避免上下文膨胀）
 max_results = 50
-
-# 上下文行数（前后各显示的行数）
 context_lines = 3
-
-# 搜索时跳过的目录
 skip_directories = [
-    "__pycache__", ".git", ".svn", ".hg", "node_modules",
-    ".venv", "venv", "env", ".env", ".idea", ".vscode",
-    "dist", "build", ".tox", ".pytest_cache", ".mypy_cache",
-    "site-packages", "egg-info", ".eggs"
+    "__pycache__",
+    ".git",
+    ".svn",
+    ".hg",
+    "node_modules",
+    ".venv",
+    "venv",
+    "env",
+    ".env",
+    ".idea",
+    ".vscode",
+    "dist",
+    "build",
+    ".tox",
+    ".pytest_cache",
+    ".mypy_cache",
+    "site-packages",
+    "egg-info",
+    ".eggs"
 ]
-
-# 搜索时跳过的文件扩展名
 skip_extensions = [
-    ".exe", ".dll", ".so", ".dylib", ".pyc", ".pyo", ".pyd"
+    ".exe",
+    ".dll",
+    ".so",
+    ".dylib",
+    ".pyc",
+    ".pyo",
+    ".pyd"
 ]
-
-# 搜索时包含的文件扩展名
 include_extensions = [
-    ".py", ".js", ".ts", ".jsx", ".tsx", ".md", ".json", ".yaml",
-    ".yml", ".toml", ".txt", ".html", ".css", ".xml", ".sh", ".bat", ".ps1"
+    ".py",
+    ".js",
+    ".ts",
+    ".jsx",
+    ".tsx",
+    ".md",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".txt",
+    ".html",
+    ".css",
+    ".xml",
+    ".sh",
+    ".bat",
+    ".ps1"
 ]
 
-# ============================================================
-# [工具] 网络工具配置
-# ============================================================
 [tools.web]
-# 是否启用网络搜索
 search_enabled = true
-
-# 搜索结果数量
 max_search_results = 10
-
-# 搜索超时（秒）
 search_timeout = 30
 
-# ============================================================
-# [安全] 安全配置
-# ============================================================
 [security]
-# 是否启用安全验证
 enabled = true
-
-# 允许访问的根目录
 allowed_directories = [
     "${PROJECT_ROOT}",
     "${PROJECT_ROOT}/tools",
     "${HOME}"
 ]
-
-# 禁止访问的文件模式
 forbidden_patterns = [
-    ".env", ".password", ".secret", ".key", "id_rsa", "credentials.json"
+    ".env",
+    ".password",
+    ".secret",
+    ".key",
+    "id_rsa",
+    "credentials.json"
 ]
-
-# 禁止删除的文件/目录
 forbidden_delete_patterns = [
-    ".env", ".password", ".secret", ".key", "id_rsa", "credentials.json",
-    "config.py", "config.toml", ".git", "restarter.py", "agent.py"
+    ".env",
+    ".password",
+    ".secret",
+    ".key",
+    "id_rsa",
+    "credentials.json",
+    "config.py",
+    "config.toml",
+    ".git",
+    "restarter.py",
+    "agent.py"
 ]
-
-# 危险命令黑名单
 dangerous_commands = [
-    "rm -rf /", "rm -rf /*", "mkfs", "dd if=/dev/zero of=/dev/sda",
-    "format", "del /f /s /q", "rmdir /s /q", "rm -rf",
-    "cipher /w:", "shutdown", "sysprep", ":(){ :|:& };:"
+    "rm -rf /",
+    "rm -rf /*",
+    "mkfs",
+    "dd if=/dev/zero of=/dev/sda",
+    "format",
+    "del /f /s /q",
+    "rmdir /s /q",
+    "rm -rf",
+    "cipher /w:",
+    "shutdown",
+    "sysprep",
+    ":(){ :|:& };:"
 ]
 
-# ============================================================
-# [日志] 日志配置
-# ============================================================
 [log]
-# 日志级别：DEBUG, INFO, WARNING, ERROR, CRITICAL
 level = "INFO"
-
-# 是否写入文件
-file_enabled = false
-
-# 日志文件路径
-file_path = "logs/agent.log"
-
-# 日志格式
 format = "%(asctime)s | %(levelname)-8s | %(message)s"
-
-# 日期格式
 date_format = "%Y-%m-%d %H:%M:%S"
-
-# 最大日志文件大小（字节），0 表示无限制
+file_enabled = false
+file_path = "logs/agent.log"
 max_file_size = 10485760
-
-# 保留的日志文件数量
 backup_count = 5
-
-# 是否启用详细错误堆栈
 detailed_traceback = false
 
-# 第三方库日志级别
 [log.third_party]
 httpx = "WARNING"
 httpcore = "WARNING"
@@ -351,248 +400,150 @@ urllib3 = "WARNING"
 litellm = "WARNING"
 rich = "WARNING"
 
-# ============================================================
-# [网络] 网络请求配置
-# ============================================================
 [network]
-# 请求超时（秒）
 timeout = 30
-
-# 最大重试次数
-max_retries = 3
-
-# 重试延迟（秒）
-retry_delay = 1.0
-
-# User-Agent
 user_agent = "Mozilla/5.0 (compatible; SelfEvolvingAgent/1.0)"
-
-# 是否验证 SSL 证书
+max_retries = 3
+retry_delay = 1
 verify_ssl = true
 
-# ============================================================
-# [进化] 进化引擎配置
-# ============================================================
 [evolution]
-# 是否启用自动进化
 enabled = true
-
-# 进化配置路径
 config_path = "workspace/evolution_config.json"
-
-# 归档目录
 archive_dir = "workspace/archives"
-
-# 备份目录
 backup_dir = "backups"
-
-# 进化门控：是否在重启前运行测试
 test_gate_enabled = true
-
-# 进化测试超时（秒）
 test_gate_timeout = 120
-
-# 测试命令
 test_command = "pytest tests/ -v --tb=short -q"
-
-# ── 熵减进化流程 ──
-
-# 进化提案存储目录
 proposals_dir = "workspace/evolution/proposals"
-
-# 进化审计日志路径（JSONL 格式）
 audit_log_path = "workspace/evolution/audit.jsonl"
-
-# Agent 苏醒时是否自动检查已审批提案
 auto_check_approved = true
-
-# 允许进化修改的目录白名单
-allowed_target_dirs = ["workspace/prompts/"]
-
-# ============================================================
-# [记忆] 记忆系统配置
-# ============================================================
-[memory]
-# 记忆存储目录
-storage_dir = "workspace/memory"
-
-# 记忆文件名称
-memory_file = "memory.json"
-
-# 归档目录
-archive_dir = "workspace/memory/archives"
-
-# 最大记忆条目数
-max_entries = 1000
-
-# ============================================================
-# [策略] 决策系统配置
-# ============================================================
-[strategy]
-# 策略数据目录
-data_dir = "workspace/strategy"
-
-# 探索率（0.0-1.0）
-exploration_rate = 0.2
-
-# 策略学习启用
-learning_enabled = true
-
-# 学习数据存储路径
-learning_data_path = "workspace/strategy/learner_data.json"
-
-# ============================================================
-# [分析] 代码分析配置
-# ============================================================
-[analysis]
-# 分析数据目录
-data_dir = "workspace/analytics"
-
-# 反馈数据目录
-feedback_dir = "workspace/feedback"
-
-# 知识图谱存储路径
-knowledge_graph_path = "workspace/knowledge_graph.json"
-
-# 模式库存储路径
-pattern_library_path = "workspace/pattern_library.json"
-
-# ============================================================
-# [界面] CLI UI 配置
-# ============================================================
-[ui]
-# 主题名称：lobster, shrimp, crab, cat, chick
-theme = "lobster"
-
-# 日志面板最大条目数
-max_log_entries = 100
-
-# 实时刷新频率
-refresh_rate = 4
-
-# 是否显示 ASCII Art
-show_ascii_art = true
-
-# 是否显示欢迎面板
-show_welcome = true
-
-# ============================================================
-# [解析器] LLM 响应解析配置
-# ============================================================
-[parser]
-# 解析时需要去除的 XML 标签名列表
-strip_tags = [
-    "<think>",  # 必须放最前面
-    "tool_call", "invoke", "skill",
-    "thinking", "state_memory",
-    "active_rules", "active_components",
+allowed_target_dirs = [
+    "workspace/prompts/"
 ]
 
-# 是否去除 <think>...</think> 格式的思考标签
+[memory]
+storage_dir = "workspace/memory"
+memory_file = "memory.json"
+archive_dir = "workspace/memory/archives"
+max_entries = 1000
+
+[strategy]
+data_dir = "workspace/strategy"
+exploration_rate = 0.2
+learning_enabled = true
+learning_data_path = "workspace/strategy/learner_data.json"
+
+[analysis]
+data_dir = "workspace/analytics"
+feedback_dir = "workspace/feedback"
+knowledge_graph_path = "workspace/knowledge_graph.json"
+pattern_library_path = "workspace/pattern_library.json"
+
+[ui]
+language = "zh"
+theme = "lobster"
+max_log_entries = 100
+refresh_rate = 4
+show_ascii_art = true
+show_welcome = true
+
+[parser]
+strip_tags = [
+    "<think>",
+    "tool_call",
+    "invoke",
+    "skill",
+    "thinking",
+    "state_memory",
+    "active_rules",
+    "active_components"
+]
 strip_thinking_alias = true
 
-# ============================================================
-# [调试] 调试配置
-# ============================================================
+[prompt]
+default_components = [
+    "SOUL",
+    "SPEC",
+    "CODEBASE_MAP",
+    "GIT_MEMORY",
+    "DELEGATION_RULES",
+    "CONFIG_AWARENESS",
+    "LANGUAGE_AWARENESS",
+    "GIT_RULES",
+    "MEMORY",
+    "ENV_INFO"
+]
+
+[[prompt.sections]]
+name = "SOUL"
+path = "core/core_prompt/SOUL.md"
+priority = 10
+required = true
+cache_break = false
+description = "身份使命与铁律"
+
+[[prompt.sections]]
+name = "SPEC"
+path = "core/core_prompt/SPEC.md"
+priority = 65
+required = false
+cache_break = false
+description = "开发规范与编码约束"
+
 [debug]
-# 是否启用调试模式
 enabled = false
-
-# 是否打印详细日志
 verbose = false
-
-# 是否跟踪 LLM 调用
 trace_llm = false
-
-# 是否跟踪工具调用
 trace_tools = false
-
-# Token 使用统计
 track_token_usage = true
 
-# ============================================================
-# [兼容性] 向后兼容配置
-# ============================================================
-[compat]
-# 启用旧版 API
-legacy_api_enabled = true
-
-# 旧版配置路径
-legacy_config_path = "config.py"
-
-# ============================================================
-# [宠物] 宠物系统主配置
-# ============================================================
 [pet]
 enabled = true
 name = "虾宝"
 auto_save = true
 save_interval = 60
 
-# ============================================================
-# [宠物.基因] 基因系统配置
-# ============================================================
 [pet.gene]
 inherit_from_model = true
 context_window_factor = 0.001
 
-# ============================================================
-# [宠物.心跳] 心跳系统配置
-# ============================================================
 [pet.heart]
 enabled = true
-active_rate = 2.0
+active_rate = 2
 idle_rate = 0.5
 cooldown_time = 5
 
-# ============================================================
-# [宠物.梦境] 梦境系统配置
-# ============================================================
 [pet.dream]
 enabled = true
 compression_triggers_dream = true
 dream_duration = 3
 keep_key_memory_ratio = 0.7
 
-# ============================================================
-# [宠物.性格] 性格养成配置
-# ============================================================
 [pet.personality]
 enabled = true
 learning_window = 100
 trait_change_rate = 0.05
 
-# ============================================================
-# [宠物.饥饿] 饥饿系统配置
-# ============================================================
 [pet.hunger]
 enabled = true
 food_per_meal = 0.1
-hunger_decay_rate = 1.0
+hunger_decay_rate = 1
 mood_decay_rate = 0.5
 auto_feed_threshold = 1000
 
-# ============================================================
-# [宠物.日记] 成长日记配置
-# ============================================================
 [pet.diary]
 enabled = true
 max_entries = 365
 auto_summarize = true
 sentiment_analysis = true
 
-# ============================================================
-# [宠物.社交] 同伴社交配置
-# ============================================================
 [pet.social]
 enabled = true
 track_other_models = true
-friendship_gain_rate = 1.0
+friendship_gain_rate = 1
 max_friends = 10
 
-# ============================================================
-# [宠物.健康] 健康体检配置
-# ============================================================
 [pet.health]
 enabled = true
 check_interval = 30
@@ -600,49 +551,12 @@ response_time_weight = 0.3
 error_rate_weight = 0.4
 efficiency_weight = 0.3
 
-# ============================================================
-# [宠物.装扮] 装扮系统配置
-# ============================================================
 [pet.skin]
 enabled = true
 unlock_by_achievement = true
 
-# ============================================================
-# [宠物.声音] 情绪声音配置
-# ============================================================
 [pet.sound]
 enabled = true
 volume = 0.5
 mood_sounds = true
 action_sounds = true
-
-# ============================================================
-# [提示词] 提示词管理器配置
-# ============================================================
-[prompt]
-# 默认拼装的组件列表
-# 静态章节名对应下方 [[prompt.sections]] 定义
-# 内置动态章节（无需定义）: TASK_CHECKLIST, CODEBASE_MAP, MEMORY, ENV_INFO
-#   - TASK_CHECKLIST / CODEBASE_MAP: 重，建议通过 <active_components> 按需激活
-#   - ENV_INFO / MEMORY: 轻量且必要，建议常驻
-default_components = ["SOUL", "SPEC", "CODEBASE_MAP", "ENV_INFO"]
-
-# ═══════════════════════════════════════════════
-# 静态章节定义（从 Markdown 文件加载）
-# 增删改都在这里操作，不需要改 Python 代码
-# ═══════════════════════════════════════════════
-
-[[prompt.sections]]
-name = "SOUL"
-path = "core/core_prompt/SOUL.md"
-priority = 10
-required = true
-description = "身份使命与铁律"
-
-[[prompt.sections]]
-name = "SPEC"
-path = "core/core_prompt/SPEC.md"
-priority = 65
-description = "开发规范与编码约束"
-
-

@@ -27,7 +27,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.box import ROUNDED
 
 # 导入 Agent 相关
-from config import Config, get_config
+from config.settings import get_config
 from core.ui.cli_ui import get_ui as get_cli_ui
 from core.ui.ascii_art import AvatarManager, get_avatar_manager
 from core.ui.theme import LobsterTheme
@@ -147,7 +147,7 @@ class XuebaInteractiveCLI:
         self.console.print(panel)
 
         # 附加信息
-        info = f"""[cyan]模型:[/cyan] {self.config.llm.model_name}
+        info = f"""[cyan]模型:[/cyan] {self.config.llm.get_profile(role="primary").model}
 [green]时间:[/green] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
         self.console.print(info)
 

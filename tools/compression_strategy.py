@@ -26,6 +26,20 @@ class CompressionLevel(Enum):
     DEEP = "deep"            # 深度压缩：保留 30% 内容 + 关键信息
     EMERGENCY = "emergency"  # 紧急压缩：只保留最新消息
 
+    @property
+    def severity(self) -> int:
+        _order = {
+            CompressionLevel.LIGHT: 1,
+            CompressionLevel.STANDARD: 2,
+            CompressionLevel.DEEP: 3,
+            CompressionLevel.EMERGENCY: 4,
+        }
+        return _order[self]
+
+    @classmethod
+    def max_severity(cls, a: 'CompressionLevel', b: 'CompressionLevel') -> 'CompressionLevel':
+        return a if a.severity >= b.severity else b
+
 
 @dataclass
 class CompressionConfig:
@@ -221,6 +235,33 @@ class CompressionStrategy:
             return CompressionLevel.LIGHT
 
         return CompressionLevel.LIGHT  # 默认轻度
+
+    def determine_level_with_iteration(
+        self,
+        current_tokens: int,
+        max_tokens: int,
+        iteration: int,
+        compression_count: int = 0,
+    ) -> CompressionLevel:
+        """结合 token 比和迭代数确定压缩级别（防止认知漂移）。
+
+        Args:
+            current_tokens: 当前 Token 数
+            max_tokens: 最大 Token 数
+            iteration: 当前迭代数
+            compression_count: 已压缩次数
+
+        Returns:
+            压缩级别
+        """
+        base = self.determine_level(current_tokens, max_tokens, compression_count)
+        if iteration >= 25:
+            return CompressionLevel.EMERGENCY
+        elif iteration >= 18:
+            return CompressionLevel.max_severity(base, CompressionLevel.DEEP)
+        elif iteration >= 12:
+            return CompressionLevel.max_severity(base, CompressionLevel.STANDARD)
+        return base
 
     def set_summary_chars(
         self,

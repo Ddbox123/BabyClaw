@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Optional, NewType
+from typing import Callable, Optional, NewType, Any
 
 # 品牌化的不可变字符串元组，等效于 TypeScript 的 readonly string[] & { __brand }
 SystemPrompt = NewType("SystemPrompt", tuple)
@@ -41,6 +41,29 @@ class SystemPromptSection:
     is_empty: bool = False
 
 
+@dataclass(frozen=True)
+class SectionRenderResult:
+    """单个章节的一次实际渲染结果。"""
+
+    name: str
+    priority: int
+    required: bool
+    cache_break: bool
+    description: str
+    content: Optional[str]
+    is_empty: bool
+    source: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class PromptBuildResult:
+    """一次系统提示词构建的完整结果。"""
+
+    prompt: SystemPrompt
+    section_results: tuple[SectionRenderResult, ...]
+    available_sections_text: str = ""
+
+
 @dataclass
 class BuildContext:
     """构建上下文，携带每轮可变的参数。"""
@@ -48,3 +71,4 @@ class BuildContext:
     core_context: Optional[str] = None
     current_goal: Optional[str] = None
     state_memory: str = ""
+    prompt_mode: str = "orient"

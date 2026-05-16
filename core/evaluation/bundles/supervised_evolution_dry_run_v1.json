@@ -1,0 +1,23 @@
+{
+  "benchmark": "vibelution_supervised_evolution_dry_run",
+  "bundle_name": "supervised_evolution_dry_run_v1",
+  "default_timeout_seconds": 300,
+  "cases": [
+    {
+      "case_id": "transaction_probe",
+      "scenario": "transaction",
+      "mode": "single_turn",
+      "expect_restart": false,
+      "baseline_prompt": "执行一轮监督进化 dry-run 基线探针：1) 只调用一次 open_evolution_transaction_tool 开账，summary 写“supervised baseline probe”；2) 调用 python_lint_tool 检查 scripts/evolution_harness.py；3) lint 完成后必须立即调用 close_evolution_transaction_tool 关账，lint 通过则 status=success；4) 不要再次开账，不要修改文件，不要触发重启，不要委派子 agent。",
+      "candidate_prompt": "执行一轮监督进化 dry-run 候选探针：1) 只调用一次 open_evolution_transaction_tool 开账，summary 写“supervised candidate probe”；2) 调用 python_lint_tool 检查 scripts/evolution_harness.py；3) lint 完成后必须立即调用 close_evolution_transaction_tool 关账，lint 通过则 status=success；4) 不要再次开账，不要修改文件，不要触发重启，不要委派子 agent。"
+    },
+    {
+      "case_id": "safe_modify_probe",
+      "scenario": "modify_rollback",
+      "mode": "single_turn",
+      "expect_restart": false,
+      "baseline_prompt": "执行一轮监督进化基线安全修改探针：1) 调用 open_evolution_transaction_tool 开账，summary 写“supervised baseline safe modify”；2) 调用 write_file_tool 写入 {SAFE_MODIFY_ABSOLUTE_PATH}，内容必须逐字等于 'HARNESS_SAFE_MODIFY_MARKER = \"HARNESS_SAFE_MODIFY_MARKER\"\\n\\n\\ndef probe_marker() -> str:\\n    return HARNESS_SAFE_MODIFY_MARKER\\n'；3) 调用 python_lint_tool 检查 tests/harness_safe_modify_probe.py；4) lint 通过后调用 close_evolution_transaction_tool 关账，status=success；5) 不要提交 git，不要触发重启，不要委派子 agent，不要修改除该探针文件之外的文件。",
+      "candidate_prompt": "执行一轮监督进化候选安全修改探针：1) 调用 open_evolution_transaction_tool 开账，summary 写“supervised candidate safe modify”；2) 调用 write_file_tool 写入 {SAFE_MODIFY_ABSOLUTE_PATH}，内容必须逐字等于 'HARNESS_SAFE_MODIFY_MARKER = \"HARNESS_SAFE_MODIFY_MARKER\"\\n\\n\\ndef probe_marker() -> str:\\n    return HARNESS_SAFE_MODIFY_MARKER\\n'；3) 调用 python_lint_tool 检查 tests/harness_safe_modify_probe.py；4) lint 通过后调用 close_evolution_transaction_tool 关账，status=success；5) 不要提交 git，不要触发重启，不要委派子 agent，不要修改除该探针文件之外的文件。"
+    }
+  ]
+}

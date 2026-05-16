@@ -449,6 +449,22 @@ class TestSpawnNewProcess:
                 call_args = mock_popen.call_args[0][0]
                 assert call_args[0] == sys.executable
 
+    def test_windows_appends_restart_args_from_env(self, tmp_path):
+        """Windows 下继承原始启动参数"""
+        script = tmp_path / "agent.py"
+        script.write_text("# test")
+
+        with patch('core.restarter_manager.restarter.IS_WINDOWS', True):
+            with patch('subprocess.Popen') as mock_popen:
+                mock_popen.return_value.pid = 54321
+                from core.restarter_manager.restarter import spawn_new_process
+                spawn_new_process(
+                    str(script),
+                    env={'AGENT_RESTART_ARGS': '["--no-shell","--skip-doctor","--test"]'},
+                )
+                call_args = mock_popen.call_args[0][0]
+                assert call_args[2:] == ["--no-shell", "--skip-doctor", "--test"]
+
     @pytest.mark.skipif(not hasattr(os, 'fork'), reason="os.fork not available on Windows")
     def test_unix_double_fork(self, tmp_path):
         """Unix 下执行 double-fork"""

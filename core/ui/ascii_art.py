@@ -11,72 +11,238 @@ from __future__ import annotations
 from typing import Dict, Type
 
 
+def _mirror_ascii_art(art: str) -> str:
+    lines = art.strip("\n").splitlines()
+    translation = str.maketrans(r"/\()<>{}[]", r"\/)(><}{][")
+    mirrored = []
+    for line in lines:
+        mirrored.append(line[::-1].translate(translation))
+    return "\n".join(mirrored)
+
+
+def _generic_pose_from_status(provider_cls, pose: str, direction: str = "right", frame_index: int = 0) -> str:
+    pose_to_status = {
+        "idle": "happy",
+        "walk": "working",
+        "turn": "surprised",
+        "think": "thinking",
+        "sleep": "sleeping",
+        "success": "success",
+        "sad": "sad",
+        "confused": "surprised",
+        "tired": "sleeping",
+    }
+    status = pose_to_status.get(pose, "happy")
+    art = provider_cls.get_status_art(status).strip("\n")
+    if pose == "walk" and frame_index % 2 == 1:
+        art = art.replace("..'", ". .'").replace("zzZ", "z z")
+    if pose == "turn":
+        art = provider_cls.get_status_art("surprised").strip("\n")
+    if direction == "left":
+        art = _mirror_ascii_art(art)
+    return art
+
+
+def _make_lobster_sprite(
+    eyes: str = "o o",
+    mouth: str = "~",
+    leg_variant: int = 0,
+    claw_variant: int = 0,
+    topper: str = "",
+) -> str:
+    claw_sets = [
+        (
+            "      __     __",
+            "  ___/  \\___/  \\___",
+            " /___    ___    ___\\",
+        ),
+        (
+            "      __     __",
+            "  ___/  \\___/  \\___",
+            " /___    _^_    ___\\",
+        ),
+        (
+            "      __     __",
+            "  ___/  \\___/  \\___",
+            " /___    _!_    ___\\",
+        ),
+    ]
+    top_claw, mid_claw, low_claw = claw_sets[claw_variant % len(claw_sets)]
+
+    belly_sets = [
+        (
+            "   \\_\\  /| |\\  /_/",
+            "    \\_\\/ | | \\/_/",
+            "     /_/ |_| \\_\\",
+            "      /_/   \\_\\",
+        ),
+        (
+            "   \\_\\  /|_|\\  /_/",
+            "    \\_\\/ |_| \\/_/",
+            "     /_/ |_| \\_\\",
+            "      /_/   \\_\\",
+        ),
+    ]
+    upper_belly, mid_belly, lower_belly, tail = belly_sets[leg_variant % len(belly_sets)]
+
+    face = [
+        "      .-^^-.",
+        f"    .' {eyes} '.",
+        "    |   /\\   |",
+        f"    |  ({mouth})  |",
+        "     \\ .__. /",
+    ]
+
+    lines = [
+        top_claw,
+        mid_claw,
+        low_claw,
+        *face,
+        upper_belly,
+        mid_belly,
+        lower_belly,
+        tail,
+    ]
+    if topper:
+        lines.insert(0, topper)
+    return "\n".join(lines) + "\n"
+
+
 # ==================== 龙虾 ASCII Art ====================
 class LobsterASCII:
     """龙虾 ASCII Art 艺术库"""
 
+    POSE_ART = {
+        ("idle", "right"): [
+            _make_lobster_sprite("o o", "~", leg_variant=1),
+        ],
+        ("idle", "left"): [
+            _mirror_ascii_art(_make_lobster_sprite("o o", "~", leg_variant=1)),
+        ],
+        ("walk", "right"): [
+            _make_lobster_sprite("o o", "^", leg_variant=0, claw_variant=0),
+            _make_lobster_sprite("o o", "^", leg_variant=1, claw_variant=1),
+        ],
+        ("walk", "left"): [
+            _mirror_ascii_art(_make_lobster_sprite("o o", "^", leg_variant=0, claw_variant=0)),
+            _mirror_ascii_art(_make_lobster_sprite("o o", "^", leg_variant=1, claw_variant=1)),
+        ],
+        ("turn", "right"): [
+            _make_lobster_sprite("o O", "!", leg_variant=0, claw_variant=2),
+            _make_lobster_sprite("o o", "~", leg_variant=1, claw_variant=1),
+        ],
+        ("turn", "left"): [
+            _mirror_ascii_art(_make_lobster_sprite("o O", "!", leg_variant=0, claw_variant=2)),
+            _mirror_ascii_art(_make_lobster_sprite("o o", "~", leg_variant=1, claw_variant=1)),
+        ],
+        ("think", "right"): [
+            _make_lobster_sprite("? ?", ".", leg_variant=1),
+        ],
+        ("think", "left"): [
+            _mirror_ascii_art(_make_lobster_sprite("? ?", ".", leg_variant=1)),
+        ],
+        ("sleep", "right"): [
+            _make_lobster_sprite("- -", "_", leg_variant=0, topper="   zZ"),
+        ],
+        ("sleep", "left"): [
+            _mirror_ascii_art(_make_lobster_sprite("- -", "_", leg_variant=0, topper="   zZ")),
+        ],
+        ("success", "right"): [
+            _make_lobster_sprite("^ ^", "v", leg_variant=1, claw_variant=1),
+        ],
+        ("success", "left"): [
+            _mirror_ascii_art(_make_lobster_sprite("^ ^", "v", leg_variant=1, claw_variant=1)),
+        ],
+        ("sad", "right"): [
+            _make_lobster_sprite("; ;", ".", leg_variant=0),
+        ],
+        ("sad", "left"): [
+            _mirror_ascii_art(_make_lobster_sprite("; ;", ".", leg_variant=0)),
+        ],
+        ("confused", "right"): [
+            _make_lobster_sprite("@ ?", "?", leg_variant=0, claw_variant=2),
+        ],
+        ("confused", "left"): [
+            _mirror_ascii_art(_make_lobster_sprite("@ ?", "?", leg_variant=0, claw_variant=2)),
+        ],
+        ("tired", "right"): [
+            _make_lobster_sprite("- -", "_", leg_variant=0),
+        ],
+        ("tired", "left"): [
+            _mirror_ascii_art(_make_lobster_sprite("- -", "_", leg_variant=0)),
+        ],
+    }
+
     HAPPY = r"""
-  (\ /)
-  ( ^.^)
-   >^<
-  /| |\
-  (_|_)
+      __
+  ___( o)>
+  \ <_. )
+   `---'
+   /|_|\
+  /_/ \_\
 """
 
     THINKING = r"""
-  (\ /)
-  ( ???)
-   >?<
-  /| |\
-  (_|_)
+      __
+  ___( ?)>
+  \ <_. )
+   `-?-'
+   /|_|\
+  /_/ \_\
 """
 
     WORKING = r"""
-  (\ /)
-  ( *.*)
-   >~<
-  /| |\
-  (_|_)
+      __
+  ___( *}>
+  \ <_. )
+   `-~-'
+   /|_|\
+  /_/ \_\
 """
 
     SLEEPING = r"""
-  (\ /)
-  ( ---)
-   >z<
-  /| |\
-  (_|_)
+      __
+  ___( -)>
+  \ <_. )
+   `-z-'
+   /|_|\
+  /_/ \_\
 """
 
     SURPRISED = r"""
-  (\ /)
-  ( O.O)
-   >!<
-  /| |\
-  (_|_)
+      __
+  ___( O)>
+  \ <_. )
+   `-!-'
+   /|_|\
+  /_/ \_\
 """
 
     SUCCESS = r"""
-  (\ /)
-  ( ^o^)
-   >v<
-  /| |\
-  (_|_)
+      __
+  ___( ^)>
+  \ <_o )
+   `-v-'
+   /|_|\
+  /_/ \_\
 """
 
     SAD = r"""
-  (\ /)
-  ( T.T)
-   >.<
-  /| |\
-  (_|_)
+      __
+  ___( ;)>
+  \ <_. )
+   `-.-'
+   /|_|\
+  /_/ \_\
 """
 
     LOVE = r"""
-  (\ /)
-  (<3<3)
-   >^<
-  /| |\
-  (_|_)
+      __
+  ___(<3)>
+  \ <3. )
+   `---'
+   /|_|\
+  /_/ \_\
 """
 
     TINY = r"""
@@ -89,17 +255,32 @@ class LobsterASCII:
     @classmethod
     def get_status_art(cls, status: str) -> str:
         status_map = {
-            "happy": cls.HAPPY,
-            "thinking": cls.THINKING,
-            "working": cls.WORKING,
-            "sleeping": cls.SLEEPING,
-            "surprised": cls.SURPRISED,
-            "success": cls.SUCCESS,
-            "sad": cls.SAD,
-            "error": cls.SAD,
-            "love": cls.LOVE,
+            "happy": ("idle", "right"),
+            "thinking": ("think", "right"),
+            "working": ("walk", "right"),
+            "sleeping": ("sleep", "right"),
+            "surprised": ("confused", "right"),
+            "success": ("success", "right"),
+            "sad": ("sad", "right"),
+            "error": ("sad", "right"),
+            "love": ("success", "right"),
         }
-        return status_map.get(status.lower(), cls.HAPPY)
+        pose, direction = status_map.get(status.lower(), ("idle", "right"))
+        return cls.get_pose_art(pose=pose, direction=direction, frame_index=0)
+
+    @classmethod
+    def get_pose_art(
+        cls,
+        pose: str,
+        direction: str = "right",
+        frame_index: int = 0,
+        variant: str | None = None,
+    ) -> str:
+        sprites = cls.POSE_ART.get((pose, direction))
+        if not sprites:
+            sprites = cls.POSE_ART.get(("idle", direction)) or cls.POSE_ART[("idle", "right")]
+        index = frame_index % len(sprites)
+        return sprites[index]
 
     @classmethod
     def get_banner(cls, name: str = "Baby", version: str = "v1.0", pet_data: dict = None) -> str:
@@ -230,6 +411,16 @@ class ShrimpASCII:
         return status_map.get(status.lower(), cls.HAPPY)
 
     @classmethod
+    def get_pose_art(
+        cls,
+        pose: str,
+        direction: str = "right",
+        frame_index: int = 0,
+        variant: str | None = None,
+    ) -> str:
+        return _generic_pose_from_status(cls, pose, direction, frame_index)
+
+    @classmethod
     def get_banner(cls, name: str = "Baby", version: str = "v1.0", pet_data: dict = None) -> str:
         return _make_simple_banner(name, version, pet_data)
 
@@ -349,6 +540,16 @@ class CrabASCII:
         return status_map.get(status.lower(), cls.HAPPY)
 
     @classmethod
+    def get_pose_art(
+        cls,
+        pose: str,
+        direction: str = "right",
+        frame_index: int = 0,
+        variant: str | None = None,
+    ) -> str:
+        return _generic_pose_from_status(cls, pose, direction, frame_index)
+
+    @classmethod
     def get_banner(cls, name: str = "Baby", version: str = "v1.0", pet_data: dict = None) -> str:
         return _make_simple_banner(name, version, pet_data)
 
@@ -460,6 +661,16 @@ class CatASCII:
         return status_map.get(status.lower(), cls.HAPPY)
 
     @classmethod
+    def get_pose_art(
+        cls,
+        pose: str,
+        direction: str = "right",
+        frame_index: int = 0,
+        variant: str | None = None,
+    ) -> str:
+        return _generic_pose_from_status(cls, pose, direction, frame_index)
+
+    @classmethod
     def get_banner(cls, name: str = "Baby", version: str = "v1.0", pet_data: dict = None) -> str:
         return _make_simple_banner(name, version, pet_data)
 
@@ -563,6 +774,677 @@ class ChickASCII:
         return status_map.get(status.lower(), cls.HAPPY)
 
     @classmethod
+    def get_pose_art(
+        cls,
+        pose: str,
+        direction: str = "right",
+        frame_index: int = 0,
+        variant: str | None = None,
+    ) -> str:
+        return _generic_pose_from_status(cls, pose, direction, frame_index)
+
+    @classmethod
+    def get_banner(cls, name: str = "Baby", version: str = "v1.0", pet_data: dict = None) -> str:
+        return _make_simple_banner(name, version, pet_data)
+
+    @classmethod
+    def get_welcome_art(cls) -> str:
+        return cls.HAPPY
+
+
+# ==================== 兔兔 ASCII Art ====================
+class BunnyASCII:
+    """兔兔 ASCII Art - Q 版长耳朵头像"""
+
+    HAPPY = r"""
+    /\   /\
+   {  `-'  }
+   {  o o  }
+   ~~>  v <~~
+    \  ===  /
+   __`-----'__
+  /  /|   |\  \
+  `"` `"` `"` `"`
+"""
+
+    THINKING = r"""
+    /\   /\
+   {  `-'  }
+   {  ? ?  }
+   ~~>  . <~~
+    \  ===  /
+   __`-----'__
+  /  /|   |\  \
+  `"` `"` `"` `"`
+"""
+
+    WORKING = r"""
+    /\   /\
+   {  `-'  }
+   {  * *  }
+   ~~>  < <~~
+    \  ===  /
+   __`-----'__
+  /  /|   |\  \
+  `"` `"` `"` `"`
+"""
+
+    SLEEPING = r"""
+    /\   /\
+   {  - -  }
+   {  - -  }
+   ~~>  ~ <~~
+    \  ===  /
+   __`-----'__
+  /  /|   |\  \
+  `"` `"` `"` `"`
+"""
+
+    SURPRISED = r"""
+    /\   /\
+   {  `-'  }
+   {  O O  }
+   ~~>  ! <~~
+    \  ===  /
+   __`-----'__
+  /  /|   |\  \
+  `"` `"` `"` `"`
+"""
+
+    SUCCESS = r"""
+    /\   /\
+   {  `-'  }
+   {  ^ ^  }
+   ~~>  w <~~
+    \  ===  /
+   __`-----'__
+  /  /|   |\  \
+  `"` `"` `"` `"` *
+"""
+
+    SAD = r"""
+    /\   /\
+   {  `-'  }
+   {  ; ;  }
+   ~~>  . <~~
+    \  ===  /
+   __`-----'__
+  /  /|   |\  \
+  `"` `"` `"` `"`
+"""
+
+    LOVE = r"""
+    /\   /\
+   {  `-'  }
+   {  < >  }
+   ~~>  w <~~
+    \  ===  /
+   __`-----'__
+  /  /|   |\  \
+  `"` `"` `"` `"` *
+"""
+
+    DIVIDER = "~" * 35
+
+    @classmethod
+    def get_status_art(cls, status: str) -> str:
+        status_map = {
+            "happy": cls.HAPPY,
+            "thinking": cls.THINKING,
+            "working": cls.WORKING,
+            "sleeping": cls.SLEEPING,
+            "surprised": cls.SURPRISED,
+            "success": cls.SUCCESS,
+            "sad": cls.SAD,
+            "error": cls.SAD,
+            "love": cls.LOVE,
+        }
+        return status_map.get(status.lower(), cls.HAPPY)
+
+    @classmethod
+    def get_pose_art(
+        cls,
+        pose: str,
+        direction: str = "right",
+        frame_index: int = 0,
+        variant: str | None = None,
+    ) -> str:
+        return _generic_pose_from_status(cls, pose, direction, frame_index)
+
+    @classmethod
+    def get_banner(cls, name: str = "Baby", version: str = "v1.0", pet_data: dict = None) -> str:
+        return _make_simple_banner(name, version, pet_data)
+
+    @classmethod
+    def get_welcome_art(cls) -> str:
+        return cls.HAPPY
+
+
+# ==================== 果冻团 ASCII Art ====================
+class SlimeASCII:
+    """果冻团 ASCII Art - 最稳的 Q 版圆润预设"""
+
+    HAPPY = r"""
+      ______
+    /  o  o \
+   /    --   \
+  |   \____/  |
+  |  /_____\  |
+   \________/
+"""
+
+    THINKING = r"""
+      ______
+    /  ?  ? \
+   /    ..   \
+  |   \____/  |
+  |  /_____\  |
+   \________/
+"""
+
+    WORKING = r"""
+      ______
+    /  *  * \
+   /    <<   \
+  |   \____/  |
+  |  /_____\  |
+   \________/
+"""
+
+    SLEEPING = r"""
+      ______
+    /  -  - \
+   /    ~~   \
+  |   \____/  |
+  |  /_____\  |
+   \________/
+"""
+
+    SURPRISED = r"""
+      ______
+    /  O  O \
+   /    !!   \
+  |   \____/  |
+  |  /_____\  |
+   \________/
+"""
+
+    SUCCESS = r"""
+      ______
+    /  ^  ^ \
+   /    ww   \
+  |   \____/  |
+  |  /_____\  |
+   \________/ *
+"""
+
+    SAD = r"""
+      ______
+    /  ;  ; \
+   /    ..   \
+  |   \____/  |
+  |  /_____\  |
+   \________/
+"""
+
+    LOVE = r"""
+      ______
+    /  <  > \
+   /    ww   \
+  |   \____/  |
+  |  /_____\  |
+   \________/ *
+"""
+
+    DIVIDER = "~" * 35
+
+    @classmethod
+    def get_status_art(cls, status: str) -> str:
+        status_map = {
+            "happy": cls.HAPPY,
+            "thinking": cls.THINKING,
+            "working": cls.WORKING,
+            "sleeping": cls.SLEEPING,
+            "surprised": cls.SURPRISED,
+            "success": cls.SUCCESS,
+            "sad": cls.SAD,
+            "error": cls.SAD,
+            "love": cls.LOVE,
+        }
+        return status_map.get(status.lower(), cls.HAPPY)
+
+    @classmethod
+    def get_pose_art(
+        cls,
+        pose: str,
+        direction: str = "right",
+        frame_index: int = 0,
+        variant: str | None = None,
+    ) -> str:
+        return _generic_pose_from_status(cls, pose, direction, frame_index)
+
+    @classmethod
+    def get_banner(cls, name: str = "Baby", version: str = "v1.0", pet_data: dict = None) -> str:
+        return _make_simple_banner(name, version, pet_data)
+
+    @classmethod
+    def get_welcome_art(cls) -> str:
+        return cls.HAPPY
+
+
+# ==================== 企鹅 ASCII Art ====================
+class PenguinASCII:
+    """企鹅 ASCII Art - 直立 Q 版预设"""
+
+    HAPPY = r"""
+      .--.
+     |o_o |
+     |:_/ |
+    //   \ \
+   (|     | )
+  /'\_   _/`\
+  \___)=(___/
+"""
+
+    THINKING = r"""
+      .--.
+     |? ? |
+     |:./ |
+    //   \ \
+   (|     | )
+  /'\_   _/`\
+  \___)=(___/
+"""
+
+    WORKING = r"""
+      .--.
+     |* * |
+     |:<> |
+    //   \ \
+   (|     | )
+  /'\_   _/`\
+  \___)=(___/
+"""
+
+    SLEEPING = r"""
+      .--.
+     |-_- |
+     |:~  |
+    //   \ \
+   (|     | )
+  /'\_   _/`\
+  \___)=(___/
+"""
+
+    SURPRISED = r"""
+      .--.
+     |O O |
+     |:!: |
+    //   \ \
+   (|     | )
+  /'\_   _/`\
+  \___)=(___/
+"""
+
+    SUCCESS = r"""
+      .--.
+     |^ ^ |
+     |:w: |
+    //   \ \
+   (|     | )
+  /'\_   _/`\ *
+  \___)=(___/
+"""
+
+    SAD = r"""
+      .--.
+     |; ; |
+     |:.: |
+    //   \ \
+   (|     | )
+  /'\_   _/`\
+  \___)=(___/
+"""
+
+    LOVE = r"""
+      .--.
+     |< > |
+     |:w: |
+    //   \ \
+   (|     | )
+  /'\_   _/`\ *
+  \___)=(___/
+"""
+
+    DIVIDER = "~" * 35
+
+    @classmethod
+    def get_status_art(cls, status: str) -> str:
+        status_map = {
+            "happy": cls.HAPPY,
+            "thinking": cls.THINKING,
+            "working": cls.WORKING,
+            "sleeping": cls.SLEEPING,
+            "surprised": cls.SURPRISED,
+            "success": cls.SUCCESS,
+            "sad": cls.SAD,
+            "error": cls.SAD,
+            "love": cls.LOVE,
+        }
+        return status_map.get(status.lower(), cls.HAPPY)
+
+    @classmethod
+    def get_pose_art(
+        cls,
+        pose: str,
+        direction: str = "right",
+        frame_index: int = 0,
+        variant: str | None = None,
+    ) -> str:
+        return _generic_pose_from_status(cls, pose, direction, frame_index)
+
+    @classmethod
+    def get_banner(cls, name: str = "Baby", version: str = "v1.0", pet_data: dict = None) -> str:
+        return _make_simple_banner(name, version, pet_data)
+
+    @classmethod
+    def get_welcome_art(cls) -> str:
+        return cls.HAPPY
+
+
+# ==================== Moose ASCII Art ====================
+class MooseASCII:
+    """Moose ASCII Art - cowsay 风格驼鹿头像"""
+
+    POSE_ART = {
+        ("idle", "left"): [
+            r"""
+      \   ^__^
+       \  (oo)\_______
+          (__)\       )\/\
+              ||----w |
+              ||     ||
+""",
+        ],
+        ("idle", "right"): [
+            r"""
+          ^__^
+  _______/(oo)
+/\/(       (__)
+   ||----w |
+   ||     ||
+""",
+        ],
+        ("walk", "left"): [
+            r"""
+      \   ^__^
+       \  (oo)\_______
+          (__)\       )\/\
+              ||----w |
+              //     \\
+""",
+            r"""
+      \   ^__^
+       \  (oo)\_______
+          (__)\       )\/\
+              //----w |
+              ||     \\
+""",
+        ],
+        ("walk", "right"): [
+            r"""
+          ^__^
+  _______/(oo)
+/\/(       (__)
+   ||----w |
+   //     \\
+""",
+            r"""
+          ^__^
+  _______/(oo)
+/\/(       (__)
+   //----w |
+   ||     \\
+""",
+        ],
+        ("turn", "left"): [
+            r"""
+         \  ^__^
+          \ (oo)\__
+            (__)\  \__
+                ||---\_
+                ||    ||
+""",
+            r"""
+      \   ^__^
+       \  (oo)\_______
+          (__)\       )\/\
+              ||----w |
+              ||     ||
+""",
+        ],
+        ("turn", "right"): [
+            r"""
+       ^__^  /
+   __/(oo) /  
+__/  /(__)
+_/---||
+||    ||
+""",
+            r"""
+        ^__^   /
+_______/(oo)  / 
+/\/(       /(__)
+ | w----||
+ ||     ||
+""",
+        ],
+        ("think", "left"): [
+            r"""
+      \   ^__^
+       \  (??)\_______
+          (__)\       )\/\
+              ||----w |
+              ||     ||
+""",
+        ],
+        ("think", "right"): [
+            r"""
+          ^__^
+  _______/(??)
+/\/(       (__)
+   ||----w |
+   ||     ||
+""",
+        ],
+        ("sleep", "left"): [
+            r"""
+        zZ ^__^
+          (--)\_______
+          (__)\       )\/\
+              ||----w |
+              ||     ||
+""",
+        ],
+        ("sleep", "right"): [
+            r"""
+          ^__^ zZ
+  _______/(--)
+/\/(       (__)
+   ||----w |
+   ||     ||
+""",
+        ],
+        ("success", "left"): [
+            r"""
+      \   ^__^
+       \  (^^)\_______
+          (__)\       )\/\
+              ||----w | *
+              //     \\
+""",
+        ],
+        ("success", "right"): [
+            r"""
+          ^__^
+  _______/(^^)
+/\/(       (__)
+ * ||----w |
+   //     \\
+""",
+        ],
+        ("sad", "left"): [
+            r"""
+      \   ^__^
+       \  (;;)\_______
+          (__)\       )\/\
+              ||----w |
+              ||     ||
+""",
+        ],
+        ("sad", "right"): [
+            r"""
+          ^__^
+  _______/(;;)
+/\/(       (__)
+   ||----w |
+   ||     ||
+""",
+        ],
+        ("confused", "left"): [
+            r"""
+      \   ^__^
+       \  (OO)\_______
+          (__)\   ?   )\/\
+              ||----w |
+              ||     ||
+""",
+        ],
+        ("confused", "right"): [
+            r"""
+          ^__^
+  _______/(OO)
+/\/(  ?    (__)
+   ||----w |
+   ||     ||
+""",
+        ],
+        ("tired", "left"): [
+            r"""
+      \   ^__^
+       \  (--)\_______
+          (__)\       )\/\
+              ||----w |
+              ||     ||
+""",
+        ],
+        ("tired", "right"): [
+            r"""
+          ^__^
+  _______/(--)
+/\/(       (__)
+   ||----w |
+   ||     ||
+""",
+        ],
+    }
+
+    HAPPY = r"""
+      \   ^__^
+       \  (oo)\_______
+          (__)\       )\/\
+              ||----w |
+              ||     ||
+"""
+
+    THINKING = r"""
+      \   ^__^
+       \  (??)\_______
+          (__)\       )\/\
+              ||----w |
+              ||     ||
+"""
+
+    WORKING = r"""
+      \   ^__^
+       \  (oo)\_______
+          (__)\       )\/\
+              //----w |
+              ||     \\
+"""
+
+    SLEEPING = r"""
+        zZ ^__^
+          (--)\_______
+          (__)\       )\/\
+              ||----w |
+              ||     ||
+"""
+
+    SURPRISED = r"""
+      \   ^__^
+       \  (OO)\_______
+          (__)\   !   )\/\
+              ||----w |
+              ||     ||
+"""
+
+    SUCCESS = r"""
+      \   ^__^
+       \  (^^)\_______
+          (__)\       )\/\
+              ||----w | *
+              //     \\
+"""
+
+    SAD = r"""
+      \   ^__^
+       \  (;;)\_______
+          (__)\       )\/\
+              ||----w |
+              ||     ||
+"""
+
+    LOVE = r"""
+      \   ^__^
+       \  (<<)\_______
+          (__)\  w    )\/\
+              ||----w | *
+              ||     ||
+"""
+
+    DIVIDER = "~" * 35
+
+    @classmethod
+    def get_status_art(cls, status: str) -> str:
+        status_map = {
+            "happy": cls.HAPPY,
+            "thinking": cls.THINKING,
+            "working": cls.WORKING,
+            "sleeping": cls.SLEEPING,
+            "surprised": cls.SURPRISED,
+            "success": cls.SUCCESS,
+            "sad": cls.SAD,
+            "error": cls.SAD,
+            "love": cls.LOVE,
+        }
+        return status_map.get(status.lower(), cls.HAPPY)
+
+    @classmethod
+    def get_pose_art(
+        cls,
+        pose: str,
+        direction: str = "right",
+        frame_index: int = 0,
+        variant: str | None = None,
+    ) -> str:
+        sprites = cls.POSE_ART.get((pose, direction))
+        if not sprites:
+            sprites = cls.POSE_ART.get(("idle", direction)) or cls.POSE_ART[("idle", "right")]
+        index = frame_index % len(sprites)
+        return sprites[index]
+
+    @classmethod
     def get_banner(cls, name: str = "Baby", version: str = "v1.0", pet_data: dict = None) -> str:
         return _make_simple_banner(name, version, pet_data)
 
@@ -624,6 +1506,10 @@ class AvatarManager:
         "crab": CrabASCII,
         "cat": CatASCII,
         "chick": ChickASCII,
+        "bunny": BunnyASCII,
+        "slime": SlimeASCII,
+        "penguin": PenguinASCII,
+        "moose": MooseASCII,
     }
 
     PRESET_INFO = {
@@ -632,6 +1518,10 @@ class AvatarManager:
         "crab": {"name": "小螃蟹", "icon": "🦀", "desc": "简洁卡通螃蟹"},
         "cat": {"name": "猫猫", "icon": "🐱", "desc": "可爱猫猫机器人"},
         "chick": {"name": "小鸡", "icon": "🐣", "desc": "圆润温暖小鸡"},
+        "bunny": {"name": "兔兔", "icon": "🐰", "desc": "长耳朵 Q 版头像"},
+        "slime": {"name": "果冻团", "icon": "🟢", "desc": "圆润稳定的果冻团"},
+        "penguin": {"name": "企鹅", "icon": "🐧", "desc": "直立可爱的企鹅"},
+        "moose": {"name": "Moose", "icon": "🫎", "desc": "cowsay 风格驼鹿"},
     }
 
     def __init__(self, preset: str = "lobster"):
@@ -641,6 +1531,35 @@ class AvatarManager:
     def get_art(self, status: str) -> str:
         """根据状态获取 ASCII Art"""
         return self.current.get_status_art(status)
+
+    def get_pose_art(
+        self,
+        pose: str,
+        direction: str = "right",
+        frame_index: int = 0,
+        variant: str | None = None,
+    ) -> str:
+        """根据姿态、朝向与帧索引获取 ASCII Art。"""
+        if hasattr(self.current, "get_pose_art"):
+            return self.current.get_pose_art(
+                pose=pose,
+                direction=direction,
+                frame_index=frame_index,
+                variant=variant,
+            )
+
+        pose_to_status = {
+            "idle": "happy",
+            "walk": "working",
+            "turn": "surprised",
+            "think": "thinking",
+            "sleep": "sleeping",
+            "success": "success",
+            "sad": "sad",
+            "confused": "surprised",
+            "tired": "sleeping",
+        }
+        return self.current.get_status_art(pose_to_status.get(pose, "happy"))
 
     def get_banner(self, name: str = None, version: str = "v1.0", pet_data: dict = None) -> str:
         """生成 Banner"""

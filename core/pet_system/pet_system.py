@@ -81,6 +81,15 @@ class PetSystem:
     """
 
     _instance: Optional['PetSystem'] = None
+    _TOKENS_PER_EXP: int = 200
+    _VALIDATION_EXP_REWARDS: Dict[str, int] = {
+        "lint": 1,
+        "compile": 1,
+        "tests": 3,
+        "validation": 2,
+        "environment": 2,
+    }
+    _TASK_COMPLETION_EXP: int = 5
 
     def __new__(cls, config: Optional[PetConfig] = None):
         if cls._instance is None:
@@ -146,8 +155,13 @@ class PetSystem:
             input_tokens: 输入 token 数
             output_tokens: 输出 token 数
         """
+        total_tokens = max(0, int(input_tokens or 0)) + max(0, int(output_tokens or 0))
         self.hunger_system.record_tokens(input_tokens, output_tokens)
         self.health_system._update_metrics()
+        if total_tokens > 0:
+            exp_gain = max(1, total_tokens // self._TOKENS_PER_EXP)
+            self.add_exp(exp_gain)
+            self.save()
 
     def update_context_window(self, max_context: int):
         """
@@ -185,6 +199,25 @@ class PetSystem:
 
         if self.data.attributes.level >= 10:
             self.skin_system.check_achievement("level_10")
+        self.add_exp(self._TASK_COMPLETION_EXP)
+        self.save()
+
+    def reward_task_completion(self, task_type: str = "task") -> int:
+        """轻量记录任务完成并给予经验，不依赖完整日记链路。"""
+        self.data.attributes.total_tasks += 1
+        self.personality_system.record_behavior(task_type)
+        self.add_exp(self._TASK_COMPLETION_EXP)
+        self.save()
+        return self._TASK_COMPLETION_EXP
+
+    def reward_validation(self, kind: str = "validation", passed: bool = True) -> int:
+        """对通过的验证给予小额经验奖励。"""
+        if not passed:
+            return 0
+        reward = self._VALIDATION_EXP_REWARDS.get(kind, self._VALIDATION_EXP_REWARDS["validation"])
+        self.add_exp(reward)
+        self.save()
+        return reward
 
     def add_exp(self, amount: int) -> bool:
         """

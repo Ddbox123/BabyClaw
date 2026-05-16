@@ -19,6 +19,7 @@
 """
 
 import json
+import logging
 import os
 import time
 from typing import Optional, List, Dict, Any, Tuple, Callable
@@ -26,6 +27,11 @@ from dataclasses import dataclass, field
 from collections import deque
 from datetime import datetime
 from enum import IntEnum
+
+from core.infrastructure.runtime_input import (
+    build_runtime_notice_message,
+    is_external_request_message,
+)
 
 
 # ============================================================================
@@ -43,9 +49,9 @@ def _load_token_defaults() -> dict:
             "MAX_SYSTEM_PROMPT_TOKENS": 2000,
             "MAX_TOOL_RESULT_TOKENS": 400,
             "MAX_HISTORY_PAIRS": cfg.context_compression.keep_recent_steps,
-            "MAX_AI_RESPONSE_CHARS": cfg.context_compression.summary_chars.standard,
+            "MAX_AI_RESPONSE_CHARS": 300,
             "MAX_TOOL_NAME_CHARS": 40,
-            "MAX_USER_INPUT_CHARS": 400,
+            "MAX_EXTERNAL_REQUEST_CHARS": 400,
             "COMPRESSION_TRIGGER_RATIO": cfg.context_compression.levels.light,
             "COMPRESSION_WARNING_RATIO": 0.5,
             "COMPRESSION_CRITICAL_RATIO": cfg.context_compression.levels.standard,
@@ -84,7 +90,7 @@ DEEP_SUMMARY_CHARS = _token_defaults.get("DEEP_SUMMARY_CHARS", 2000)
 # 截断配置
 MAX_AI_RESPONSE_CHARS = _token_defaults.get("MAX_AI_RESPONSE_CHARS", 300)
 MAX_TOOL_NAME_CHARS = _token_defaults.get("MAX_TOOL_NAME_CHARS", 40)
-MAX_USER_INPUT_CHARS = _token_defaults.get("MAX_USER_INPUT_CHARS", 400)
+MAX_EXTERNAL_REQUEST_CHARS = _token_defaults.get("MAX_EXTERNAL_REQUEST_CHARS", 400)
 
 # 预压缩 Buffer（百分比）
 PRECOMPRESSION_BUFFER = 0.10
@@ -110,7 +116,7 @@ class MessagePriority(IntEnum):
 @dataclass
 class TokenBudget:
     """Token 预算追踪器（增强版）"""
-    total_budget: int = field(default=DEFAULT_TOKEN_BUDGET)
+    total_budget: int = 8000
     system_prompt_tokens: int = 0
     reserved_tokens: int = 0  # 预留空间
     
@@ -124,6 +130,31 @@ class TokenBudget:
         """可用 Token"""
         return self.effective_budget - self.system_prompt_tokens
 
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (int, float)):
+            return self.total_budget == other
+        return super().__eq__(other)
+
+    def __gt__(self, other: object) -> bool:
+        if isinstance(other, (int, float)):
+            return self.total_budget > other
+        return NotImplemented
+
+    def __lt__(self, other: object) -> bool:
+        if isinstance(other, (int, float)):
+            return self.total_budget < other
+        return NotImplemented
+
+    def __ge__(self, other: object) -> bool:
+        if isinstance(other, (int, float)):
+            return self.total_budget >= other
+        return NotImplemented
+
+    def __le__(self, other: object) -> bool:
+        if isinstance(other, (int, float)):
+            return self.total_budget <= other
+        return NotImplemented
+
 
 @dataclass
 class CompressionRecord:
@@ -135,6 +166,78 @@ class CompressionRecord:
     pairs_compressed: int
     summary_preview: str
     compression_type: str = "incremental"  # incremental, forced, emergency
+
+    def __post_init__(self) -> None:
+        self.compression_ratio = (
+            (self.before_tokens - self.after_tokens) / max(self.before_tokens, 1)
+        )
+
+
+@dataclass
+class CompressionResult:
+    """单次压缩结果；兼容旧调用方把它当摘要字符串使用。"""
+    summary: str
+    tokens_before: int
+    tokens_after: int
+    pairs_compressed: int = 0
+    compression_type: str = "none"
+
+    @property
+    def tokens_saved(self) -> int:
+        return self.tokens_before - self.tokens_after
+
+    @property
+    def compression_ratio(self) -> float:
+        return self.tokens_saved / max(self.tokens_before, 1)
+
+    def __str__(self) -> str:
+        return self.summary
+
+    def __bool__(self) -> bool:
+        return bool(self.summary)
+
+    def __contains__(self, item: object) -> bool:
+        return item in self.summary
+
+    def __len__(self) -> int:
+        return len(self.summary)
+
+
+@dataclass
+class CompressionOutput:
+    """压缩返回值；支持 `(messages, stats)` 解包，也支持直接读取统计字段。"""
+    messages: List[Any]
+    result: CompressionResult
+
+    def __iter__(self):
+        yield self.messages
+        yield self.result
+
+    def __getitem__(self, index: int):
+        return (self.messages, self.result)[index]
+
+    def __len__(self) -> int:
+        return 2
+
+    @property
+    def tokens_before(self) -> int:
+        return self.result.tokens_before
+
+    @property
+    def tokens_after(self) -> int:
+        return self.result.tokens_after
+
+    @property
+    def tokens_saved(self) -> int:
+        return self.result.tokens_saved
+
+    @property
+    def compression_ratio(self) -> float:
+        return self.result.compression_ratio
+
+    @property
+    def summary(self) -> str:
+        return self.result.summary
 
 
 @dataclass
@@ -230,6 +333,8 @@ def estimate_tokens_precise(text: str) -> int:
     """
     if not text:
         return 0
+    if not isinstance(text, str):
+        return 0
     
     # 中文字符
     chinese = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
@@ -279,6 +384,10 @@ def get_message_priority(msg: Any) -> MessagePriority:
     content = getattr(msg, 'content', '')
     msg_type = getattr(msg, 'type', '')
     
+    # 外部任务输入（协议头标记）
+    if is_external_request_message(msg):
+        return MessagePriority.MEDIUM
+
     # 系统消息最高优先级
     if msg_type == 'system':
         return MessagePriority.CRITICAL
@@ -296,10 +405,6 @@ def get_message_priority(msg: Any) -> MessagePriority:
         # 有工具调用的通常更重要
         if hasattr(msg, 'tool_calls') and msg.tool_calls:
             return MessagePriority.MEDIUM
-        return MessagePriority.LOW
-    
-    # 用户输入
-    if msg_type == 'human':
         return MessagePriority.MEDIUM
     
     return MessagePriority.MEDIUM
@@ -315,47 +420,60 @@ def truncate_tool_result(result: str, max_chars: int = None) -> str:
     
     采用保守策略，优先保留开头和结尾。
     """
+    if result is None:
+        return ""
+    if not isinstance(result, str):
+        result = str(result)
     if max_chars is None:
-        max_chars = MAX_TOOL_RESULT_TOKENS * 2
+        max_chars = MAX_TOOL_RESULT_TOKENS
+    if max_chars <= 0:
+        return ""
     
     if len(result) <= max_chars:
         return result
     
     # 智能截断：保留开头、重要结尾
-    preserve_end_ratio = 0.3
-    start_chars = int(max_chars * (1 - preserve_end_ratio)) - 20
-    end_chars = int(max_chars * preserve_end_ratio)
+    marker = "\n[...已截断...]\n"
+    if max_chars <= len(marker) + 2:
+        return result[:max_chars]
+
+    available = max_chars - len(marker)
+    end_chars = int(available * 0.4)
+    start_chars = available - end_chars
     
-    if start_chars < 50:
-        # 内容太短，直接截断
-        return result[:max_chars] + f"\n[...截断 {len(result) - max_chars} 字符]"
-    
-    truncated = (
-        result[:start_chars] + 
-        f"\n\n[...省略 {len(result) - start_chars - end_chars} 字符...]\n\n" +
-        result[-end_chars:] if end_chars > 0 else ""
-    )
-    
-    return truncated
+    return (result[:start_chars] + marker + result[-end_chars:])[:max_chars]
 
 
 def truncate_ai_response(response: str, max_chars: int = None) -> str:
     """截断 AI 响应"""
+    if response is None:
+        return ""
+    if not isinstance(response, str):
+        response = str(response)
     if max_chars is None:
         max_chars = MAX_AI_RESPONSE_CHARS
+    if max_chars <= 0:
+        return ""
     
     if len(response) <= max_chars:
         return response
     
     # AI 响应通常开头是结论，保留开头
-    return response[:max_chars] + "\n[...已截断]"
+    marker = "\n[...已截断]"
+    if max_chars <= len(marker):
+        return response[:max_chars]
+    return response[:max_chars - len(marker)] + marker
 
 
-def smart_compress_message(msg: Any, max_chars: int) -> str:
+def smart_compress_message(msg: Any, max_chars: int = CORE_SUMMARY_CHARS) -> str:
     """
     根据消息类型智能压缩。
     """
     content = getattr(msg, 'content', str(msg))
+    if content is None:
+        return ""
+    if not isinstance(content, str):
+        content = str(content)
     msg_type = getattr(msg, 'type', '')
     
     if len(content) <= max_chars:
@@ -395,6 +513,8 @@ class EnhancedTokenCompressor:
         compression_llm: Any = None,
         enable_preemptive: bool = True,
         summary_prompt_path: str = None,
+        preemptive_threshold: float = None,
+        forced_threshold: float = None,
     ):
         self.token_budget = TokenBudget(
             total_budget=token_budget,
@@ -403,6 +523,8 @@ class EnhancedTokenCompressor:
         self.max_history_pairs = max_history_pairs
         self.compression_llm = compression_llm
         self.enable_preemptive = enable_preemptive
+        self.preemptive_threshold = preemptive_threshold
+        self.forced_threshold = forced_threshold
         self.stats = TokenCompressionStats()
         
         # 压缩历史
@@ -418,12 +540,14 @@ class EnhancedTokenCompressor:
     @property
     def warning_threshold(self) -> int:
         """警告阈值"""
-        return int(self.token_budget.effective_budget * COMPRESSION_WARNING_RATIO)
+        ratio = self.preemptive_threshold if self.preemptive_threshold is not None else COMPRESSION_WARNING_RATIO
+        return int(self.token_budget.effective_budget * ratio)
     
     @property
     def trigger_threshold(self) -> int:
         """触发阈值"""
-        return int(self.token_budget.effective_budget * COMPRESSION_TRIGGER_RATIO)
+        ratio = self.forced_threshold if self.forced_threshold is not None else COMPRESSION_TRIGGER_RATIO
+        return int(self.token_budget.effective_budget * ratio)
     
     @property
     def critical_threshold(self) -> int:
@@ -476,28 +600,49 @@ class EnhancedTokenCompressor:
         messages: List[Any],
         max_chars: int = CORE_SUMMARY_CHARS,
         reason: str = "",
-    ) -> Tuple[List[Any], str]:
+        keep_count: int = 3,
+        preserve_errors: bool = True,
+        use_llm_summary: bool = True,
+    ) -> CompressionOutput:
         """
-        执行压缩：保留最近3条原始AI回复 + 压缩旧消息为摘要。
-        
+        执行压缩：保留最近 N 条原始AI回复 + 压缩旧消息为摘要。
+
         策略：
-        - 最近 3 条 AI 消息及其上下文保持原始不变
-        - 3 条之前的消息压缩成一条摘要
-        
+        - 最近 N 条 AI 消息及其上下文保持原始不变
+        - N 条之前的消息压缩成一条摘要
+        - 包含错误信息的消息始终保留（不受 keep_count 限制）
+
+        Args:
+            messages: 消息列表
+            max_chars: 摘要最大字符数
+            reason: 压缩原因
+            keep_count: 保留的最近 AI 消息数量
+            preserve_errors: 是否强制保留错误消息
+            use_llm_summary: 是否使用 LLM 生成摘要（False 时用规则提取）
+
         Returns:
-            (压缩后的消息, 摘要)
+            (压缩后的消息, 压缩统计/摘要对象)
         """
-        from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
+        from langchain_core.messages import SystemMessage, AIMessage
         
         current_tokens = estimate_messages_tokens(messages)
         compression_type = self.get_compression_level(current_tokens)
         
         # 分离消息类型
-        system_msgs = [m for m in messages if isinstance(m, SystemMessage)]
-        human_msgs = [m for m in messages if isinstance(m, HumanMessage)]
+        system_msgs = [
+            m for m in messages
+            if isinstance(m, SystemMessage) and not is_external_request_message(m)
+        ]
+        external_request_msgs = [
+            m for m in messages
+            if is_external_request_message(m)
+        ]
         
-        # 提取所有非系统、非人类的普通消息
-        other_msgs = [m for m in messages if not isinstance(m, (SystemMessage, HumanMessage))]
+        # 提取所有非系统、非外部输入的普通消息
+        other_msgs = [
+            m for m in messages
+            if not isinstance(m, SystemMessage) and not is_external_request_message(m)
+        ]
         
         # 找出所有 AI 消息（带 tool_calls 或纯文本回复）
         ai_indices = []
@@ -506,25 +651,40 @@ class EnhancedTokenCompressor:
                 ai_indices.append(i)
         
         if not ai_indices:
-            return messages, ""
+            return CompressionOutput(
+                messages,
+                CompressionResult("", current_tokens, current_tokens, 0, "none"),
+            )
         
-        # 保留最近 3 条 AI 消息及其上下文
-        keep_count = 3
         if len(ai_indices) <= keep_count:
-            # AI 消息太少，全部保留，只压缩 SystemMessage
-            kept_msgs = other_msgs
+            kept_msgs = list(other_msgs)
             old_msgs = []
         else:
-            # 分割点：保留最后 3 条 AI 及其后续消息
-            cutoff_idx = ai_indices[-keep_count]  # 第 N-2 条 AI 消息的索引
-            kept_msgs = other_msgs[cutoff_idx:]    # 从这里开始保留
-            old_msgs = other_msgs[:cutoff_idx]    # 之前的全部压缩
-        
-        # 生成旧消息的摘要
+            cutoff_idx = ai_indices[-keep_count]
+            kept_msgs = list(other_msgs[cutoff_idx:])
+            old_msgs = list(other_msgs[:cutoff_idx])
+
+        # 错误消息强制保留
+        if preserve_errors:
+            ERROR_KEYWORDS = ['error', 'exception', 'traceback', 'failed',
+                            '错误', '异常', '失败', '超时', '权限']
+            still_old = []
+            for msg in old_msgs:
+                content = getattr(msg, 'content', '')
+                if isinstance(content, str) and any(kw in content.lower() for kw in ERROR_KEYWORDS):
+                    kept_msgs.insert(0, msg)
+                else:
+                    still_old.append(msg)
+            old_msgs = still_old
+
         summary = ""
         if old_msgs:
-            summary = self._generate_summary(old_msgs, max_chars)
-        
+            summary = self._generate_summary(old_msgs, max_chars, use_llm=use_llm_summary)
+        if not old_msgs and not summary:
+            return CompressionOutput(
+                messages,
+                CompressionResult("", current_tokens, current_tokens, 0, compression_type),
+            )
         # 重建消息结构
         compressed = []
         
@@ -532,15 +692,13 @@ class EnhancedTokenCompressor:
         if system_msgs:
             compressed.append(system_msgs[0])
         
-        # 2. 最新的 HumanMessage
-        if human_msgs:
-            compressed.append(human_msgs[-1])
+        # 2. 最新的外部任务输入
+        if external_request_msgs:
+            compressed.append(external_request_msgs[-1])
         
         # 3. 历史摘要（如果有）
         if summary:
-            compressed.append(HumanMessage(
-                content=f"\n[历史摘要] {summary}\n"
-            ))
+            compressed.append(build_runtime_notice_message(f"历史摘要:\n{summary}"))
         
         # 4. 保留的最近 3 条 AI 及上下文（原始不变）
         compressed.extend(kept_msgs)
@@ -554,7 +712,16 @@ class EnhancedTokenCompressor:
             compression_type
         )
         
-        return compressed, summary
+        return CompressionOutput(
+            compressed,
+            CompressionResult(
+                summary=summary,
+                tokens_before=old_tokens,
+                tokens_after=new_tokens,
+                pairs_compressed=len(old_msgs),
+                compression_type=compression_type,
+            ),
+        )
     
     def _pair_messages(self, messages: List[Any]) -> List[List[Any]]:
         """将消息配对"""
@@ -613,18 +780,13 @@ class EnhancedTokenCompressor:
         messages: List[Any],
         max_chars: int,
         reason: str = "",
+        use_llm: bool = True,
     ) -> str:
-        """
-        生成摘要。
-
-        如果配置了 compression_llm，则使用 LLM 生成摘要；
-        否则回退到基于规则的摘要生成。
-        """
+        """生成摘要。use_llm=False 时跳过 LLM，直接用规则提取。"""
         if not messages:
             return ""
 
-        # 如果有 LLM，尝试用 LLM 生成摘要
-        if self.compression_llm:
+        if self.compression_llm and use_llm:
             try:
                 return self._generate_llm_summary(messages, max_chars, reason)
             except Exception as e:
@@ -668,16 +830,17 @@ class EnhancedTokenCompressor:
             unique_tools = list(dict.fromkeys(tool_calls))[:10]  # 去重，最多10个
             summary_parts.append(f"使用的工具: {', '.join(unique_tools)}")
 
-        # 收集用户消息
-        user_msgs = []
+        # 收集外部任务输入
+        external_request_msgs = []
         for msg in messages:
-            if hasattr(msg, 'type') and msg.type == 'human':
-                content = getattr(msg, 'content', '')[:100]
+            content_text = str(getattr(msg, 'content', '') or '')
+            if is_external_request_message(msg):
+                content = content_text[:100]
                 if content:
-                    user_msgs.append(content)
+                    external_request_msgs.append(content)
 
-        if user_msgs:
-            summary_parts.append(f"用户目标: {user_msgs[-1][:80]}")
+        if external_request_msgs:
+            summary_parts.append(f"外部任务: {external_request_msgs[-1][:80]}")
 
         # 收集 AI 消息
         ai_contents = []
@@ -704,7 +867,7 @@ class EnhancedTokenCompressor:
         reason: str = "",
     ) -> str:
         """使用 LLM 生成摘要"""
-        from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
+        from langchain_core.messages import SystemMessage
         from langchain_core.prompts import ChatPromptTemplate
         
         # 构建消息历史文本
@@ -740,10 +903,10 @@ class EnhancedTokenCompressor:
             msg_type = getattr(msg, 'type', 'unknown')
             content = getattr(msg, 'content', str(msg))
             
-            if msg_type == 'system':
+            if is_external_request_message(msg):
+                lines.append(f"[外部输入] {content[:300]}...")
+            elif msg_type == 'system':
                 lines.append(f"[系统] {content[:200]}...")
-            elif msg_type == 'human':
-                lines.append(f"[用户] {content[:300]}...")
             elif msg_type == 'ai':
                 tool_calls = getattr(msg, 'tool_calls', None)
                 if tool_calls:
@@ -783,23 +946,52 @@ class EnhancedTokenCompressor:
 
 def create_compressor(
     token_budget: int = DEFAULT_TOKEN_BUDGET,
+    max_history_pairs: int = MAX_HISTORY_PAIRS,
     compression_llm: Any = None,
     enable_preemptive: bool = True,
 ) -> EnhancedTokenCompressor:
     """创建压缩器"""
     return EnhancedTokenCompressor(
         token_budget=token_budget,
+        max_history_pairs=max_history_pairs,
         compression_llm=compression_llm,
         enable_preemptive=enable_preemptive,
     )
 
 
 def truncate_by_priority(
-    content: str,
-    priority: MessagePriority,
+    content: Any,
+    priority: MessagePriority = None,
     max_chars: int = None,
 ) -> str:
     """根据优先级截断内容"""
+    if isinstance(content, list) and priority is None:
+        if not content:
+            return ""
+        budget = max_chars if max_chars is not None else 1000
+        ordered = sorted(content, key=lambda item: item[0])
+        parts: List[str] = []
+        used = 0
+        for item_priority, item_content in ordered:
+            text = "" if item_content is None else str(item_content)
+            separator = "\n" if parts else ""
+            remaining = budget - used - len(separator)
+            if remaining <= 0:
+                break
+            if len(text) > remaining:
+                if item_priority <= MessagePriority.HIGH and remaining > 0:
+                    parts.append(separator + text[:remaining])
+                    used = budget
+                continue
+            parts.append(separator + text)
+            used += len(separator) + len(text)
+        return "".join(parts)[:budget]
+
+    if content is None:
+        return ""
+    content = str(content)
+    if priority is None:
+        priority = MessagePriority.MEDIUM
     if max_chars is None:
         max_chars = {
             MessagePriority.CRITICAL: 99999,  # 几乎不截断
@@ -808,24 +1000,42 @@ def truncate_by_priority(
             MessagePriority.LOW: 200,
             MessagePriority.TRIVIAL: 100,
         }.get(priority, 300)
+    if max_chars <= 0:
+        return ""
     
     if len(content) <= max_chars:
         return content
     
-    return content[:max_chars] + "\n[...已截断]"
+    marker = "\n[...已截断]"
+    if max_chars <= len(marker):
+        return content[:max_chars]
+    return content[:max_chars - len(marker)] + marker
 
 
-def format_compression_report(compressor: EnhancedTokenCompressor) -> str:
+def format_compression_report(compressor: Any) -> str:
     """格式化压缩报告"""
-    stats = compressor.stats.get_stats()
+    if isinstance(compressor, TokenCompressionStats):
+        stats_obj = compressor
+        stats = stats_obj.get_stats()
+        total_budget = DEFAULT_TOKEN_BUDGET
+        effective_budget = DEFAULT_TOKEN_BUDGET
+        warning_threshold = trigger_threshold = critical_threshold = 0
+    else:
+        stats_obj = compressor.stats
+        stats = stats_obj.get_stats()
+        total_budget = compressor.token_budget.total_budget
+        effective_budget = compressor.token_budget.effective_budget
+        warning_threshold = compressor.warning_threshold
+        trigger_threshold = compressor.trigger_threshold
+        critical_threshold = compressor.critical_threshold
     
     lines = [
         "=" * 50,
         "[Token压缩] 状态报告",
         "=" * 50,
-        f"总预算: {compressor.token_budget.total_budget}",
-        f"有效预算: {compressor.token_budget.effective_budget}",
-        f"阈值: 警告={compressor.warning_threshold} 触发={compressor.trigger_threshold} 紧急={compressor.critical_threshold}",
+        f"总预算: {total_budget}",
+        f"有效预算: {effective_budget}",
+        f"阈值: 警告={warning_threshold} 触发={trigger_threshold} 紧急={critical_threshold}",
         "",
         f"压缩次数: {stats.get('total_compressions', 0)}",
         f"节省Token: {stats.get('total_tokens_saved', 0)}",
@@ -834,5 +1044,58 @@ def format_compression_report(compressor: EnhancedTokenCompressor) -> str:
         f"峰值: {stats.get('peak_tokens', 0)}",
         "=" * 50,
     ]
-    
+    records = getattr(stats_obj, "compressions", [])
+    if records:
+        latest = records[-1]
+        lines.insert(-1, f"最近: {latest.before_tokens} -> {latest.after_tokens}")
+        compression_types = ", ".join(dict.fromkeys(record.compression_type for record in records))
+        lines.insert(-1, f"类型: {compression_types}")
+
     return "\n".join(lines)
+
+
+# ============================================================================
+# 主动压缩工具 — 模型感知到疲惫时可主动调用
+# ============================================================================
+
+# 模块级标志：工具设置，agent 主循环检查并执行
+_compression_requested: bool = False
+_compression_reason: str = ""
+
+
+def request_compression(reason: str = "主动压缩") -> str:
+    """请求上下文压缩（由 compress_context_tool 调用）"""
+    global _compression_requested, _compression_reason
+    _compression_requested = True
+    _compression_reason = reason
+    return f"已请求上下文压缩: {reason}。压缩将在下一次迭代时执行。"
+
+
+def is_compression_requested() -> bool:
+    """检查是否有待执行的压缩请求（由 agent 主循环调用）"""
+    return _compression_requested
+
+
+def consume_compression_request() -> str:
+    """消费压缩请求并返回原因（由 agent 主循环调用）"""
+    global _compression_requested, _compression_reason
+    reason = _compression_reason
+    _compression_requested = False
+    _compression_reason = ""
+    return reason
+
+
+def compress_context_tool(reason: str = "主动压缩") -> str:
+    """
+    主动压缩上下文，释放思维空间。
+
+    当你感到思绪拥挤、上下文混乱、或需要更多空间思考时调用。
+    压缩会保留最近的关键对话，将旧内容压缩为摘要。
+
+    Args:
+        reason: 压缩原因（如"上下文太长"、"需要更多空间"）
+
+    Returns:
+        确认信息
+    """
+    return request_compression(reason)

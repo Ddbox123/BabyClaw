@@ -36,3 +36,8 @@ from core.infrastructure.mental_model import (
     MentalModel, CognitiveState, Diagnosis, ToolRecord,
     get_mental_model, reset_mental_model,
 )
+from core.infrastructure.workspace_cleaner import (
+    classify_file, scan_workspace_debris, clean_debris,
+    auto_clean_session_debris,
+    list_workspace_debris_tool, clean_workspace_debris_tool, get_session_files_tool,
+)

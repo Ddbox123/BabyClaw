@@ -118,6 +118,19 @@ class EventNames:
     USER_INPUT = "user:input"
     USER_OUTPUT = "user:output"
 
+    # 工作区文件事件
+    WORKSPACE_FILE_CREATED = "workspace:file_created"
+    WORKSPACE_FILE_MODIFIED = "workspace:file_modified"
+    WORKSPACE_FILE_DELETED = "workspace:file_deleted"
+    WORKSPACE_DEBRIS_DETECTED = "workspace:debris_detected"
+
+    # Git / 进化记忆事件
+    GIT_SCAN_COMPLETED = "git:scan_completed"
+    GIT_INDEX_UPDATED = "git:index_updated"
+    EVOLUTION_TXN_OPENED = "evolution:txn_opened"
+    EVOLUTION_TXN_CLOSED = "evolution:txn_closed"
+    VALIDATION_COMPLETED = "validation:completed"
+
 
 # ============================================================================
 # 事件总线

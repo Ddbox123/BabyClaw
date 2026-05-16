@@ -119,8 +119,18 @@ def _default_rules() -> Dict[str, Any]:
             "window_size": 8,
             "description": "工具使用过于分散且成功率低",
         },
+        "version_proliferation": {
+            "enabled": True,
+            "patterns": [
+                r"_backup_\d{8}_\d{6}",  # e.g., core_backup_20260505_235000
+                r"_v\d+",                # e.g., file_v1, module_v2
+                r"\.\d{8}\.",           # e.g., file.20260505.log
+                r"_copy$",              # e.g., file_copy
+                r"_old$",               # e.g., file_old
+                r"\.bak$",              # e.g., file.bak
+            ],
+        },
     }
-
 
 # ============================================================================
 # 心智模型数据类
@@ -199,6 +209,11 @@ class MentalModel:
 
         # 文件聚焦追踪
         self._touched_files: Dict[str, int] = {}  # filepath -> touch count
+        self._touched_entities: Dict[str, int] = {}  # entity_ref -> touch count
+
+        # 文件创建追踪（会话级）
+        self._agent_created_files: Dict[str, Dict[str, Any]] = {}
+        self._last_validation: Dict[str, Any] = {}
 
         # 元认知统计
         self._diagnosis_history: deque[Diagnosis] = deque(maxlen=20)
@@ -207,6 +222,10 @@ class MentalModel:
 
         # 检查点计数（每次 prompt 构建为一个 tick）
         self._tick: int = 0
+
+        # 感知层 — 由 agent.py 注入共享 LLM 实例
+        self._shared_llm = None
+        self._last_state_output: Dict[str, Any] = {}
 
         # 注册全局事件监听
         self._register_listeners()
@@ -279,6 +298,9 @@ class MentalModel:
     def _register_listeners(self):
         """注册 EventBus 全局监听器"""
         self._event_bus.subscribe_global(self._on_event)
+        self._event_bus.subscribe(EventNames.WORKSPACE_FILE_CREATED, self._on_file_created)
+        self._event_bus.subscribe(EventNames.WORKSPACE_FILE_MODIFIED, self._on_file_modified)
+        self._event_bus.subscribe(EventNames.VALIDATION_COMPLETED, self._on_validation_completed)
 
     def _on_event(self, event: Event):
         """全局事件处理 - 采集运行时信号"""
@@ -293,6 +315,22 @@ class MentalModel:
                 pass  # 保留用于未来扩展
         except Exception:
             pass  # 监听器静默失败，不干扰主流程
+
+    def _on_file_modified(self, event: Event):
+        """同步会话注意力中的实体聚焦信息。"""
+        try:
+            from core.infrastructure.agent_session import get_session_state
+            attention = get_session_state().get_attention_snapshot()
+            for path in attention.get("modified_paths", []):
+                self._touched_files[path] = self._touched_files.get(path, 0) + 1
+            for entity in attention.get("modified_entities", []):
+                self._touched_entities[entity] = self._touched_entities.get(entity, 0) + 1
+        except Exception:
+            pass
+
+    def _on_validation_completed(self, event: Event):
+        """记录最近一次验证结果。"""
+        self._last_validation = dict(event.data or {})
 
     def _on_tool_start(self, event: Event):
         """工具开始执行"""
@@ -337,6 +375,87 @@ class MentalModel:
                 return args[key]
 
         return None
+
+    def _on_file_created(self, event: Event):
+        """处理文件创建事件，记录到会话追踪中"""
+        try:
+            data = event.data or {}
+            file_path = data.get("path", "")
+            if not file_path:
+                return
+
+            abs_path = str(Path(file_path).resolve())
+            tool_name = data.get("tool_name", "unknown")
+            file_size = data.get("size", 0)
+
+            is_variant = self._detect_version_proliferation(abs_path)
+
+            self._agent_created_files[abs_path] = {
+                "path": abs_path,
+                "tool_name": tool_name,
+                "timestamp": datetime.now().isoformat(),
+                "size_bytes": file_size,
+                "is_variant": is_variant,
+                "variant_base": is_variant if is_variant else None,
+            }
+
+            # 检测到版本增殖时发送通知
+            if is_variant:
+                self._event_bus.publish(EventNames.WORKSPACE_DEBRIS_DETECTED, {
+                    "path": abs_path,
+                    "variant_base": is_variant,
+                    "message": f"检测到版本增殖: {abs_path} (基础文件: {is_variant})",
+                })
+        except Exception:
+            pass
+
+    def _detect_version_proliferation(self, file_path: str) -> Optional[str]:
+        """检测文件是否为版本增殖，返回基础文件名或 None"""
+        import re
+
+        fname = os.path.basename(file_path)
+        stem = os.path.splitext(fname)[0]
+
+        # 检查版本增殖模式
+        variant_patterns = [
+            r"^(.+)_v\d+$",
+            r"^(.+)_fix(_[a-z]+)?$",
+            r"^fix_(.+)$",
+            r"^(.+)_patch([_a-z]*)?$",
+            r"^patch_(.+)$",
+            r"^(.+)_temp([_a-z]*)?$",
+            r"^temp_(.+)$",
+            r"^(.+)_debug([_a-z]*)?$",
+            r"^debug_(.+)$",
+            r"^(.+)_final$",
+            r"^(.+)_old$",
+            r"^old_(.+)$",
+        ]
+
+        for pattern in variant_patterns:
+            m = re.match(pattern, stem, re.IGNORECASE)
+            if m:
+                base_stem = m.group(1)
+                # 检查基础文件是否在已追踪文件中
+                for tracked_path, info in self._agent_created_files.items():
+                    tracked_stem = os.path.splitext(os.path.basename(tracked_path))[0]
+                    if tracked_stem == base_stem:
+                        return tracked_path
+                # 基础文件不在本次会话中，但仍然标记为变体
+                return f"(未知基础文件: {base_stem})"
+
+        return None
+
+    def get_agent_created_files(self) -> Dict[str, Dict[str, Any]]:
+        """返回本次会话创建的所有文件记录"""
+        return dict(self._agent_created_files)
+
+    def get_version_variants(self) -> List[Dict[str, Any]]:
+        """返回被标记为版本增殖的文件列表"""
+        return [
+            info for info in self._agent_created_files.values()
+            if info.get("is_variant")
+        ]
 
     # =========================================================================
     # 诊断引擎
@@ -393,6 +512,17 @@ class MentalModel:
             file_focus_ratio = 0
             top_file = ""
 
+        if self._touched_entities:
+            total_entity_touches = sum(self._touched_entities.values())
+            top_entity = max(self._touched_entities, key=self._touched_entities.get)
+            entity_focus_ratio = (
+                self._touched_entities[top_entity] / total_entity_touches
+                if total_entity_touches > 0 else 0
+            )
+        else:
+            top_entity = ""
+            entity_focus_ratio = 0
+
         # 高频失败工具
         failing_tools: Dict[str, int] = {}
         for r in window:
@@ -409,9 +539,14 @@ class MentalModel:
             "repetition_count": repetition_count,
             "file_focus_ratio": file_focus_ratio,
             "focused_file": top_file,
+            "entity_focus_ratio": entity_focus_ratio,
+            "focused_entity": top_entity,
             "top_failing_tool": top_failing_tool,
+            "entities_touched_total": len(self._touched_entities),
             "files_touched_total": len(self._touched_files),
             "intervention_count": self._intervention_count,
+            "last_validation_passed": self._last_validation.get("passed"),
+            "last_validation_kind": self._last_validation.get("kind"),
         }
 
         # ── 规则诊断 ──
@@ -462,6 +597,7 @@ class MentalModel:
                     window_size=window_size,
                     success_rate=success_rate,
                     focused_file=top_file,
+                    focused_entity=top_entity,
                     top_failing_tool=top_failing_tool,
                     tool_count=unique_tools,
                 )
@@ -511,6 +647,9 @@ class MentalModel:
                 "重复次数": m.get("repetition_count", 0),
                 "文件聚焦度": round(m.get("file_focus_ratio", 0), 2),
                 "聚焦文件": m.get("focused_file", "") or "无",
+                "实体聚焦度": round(m.get("entity_focus_ratio", 0), 2),
+                "聚焦实体": m.get("focused_entity", "") or "无",
+                "最近验证通过": m.get("last_validation_passed"),
             },
             "干预历史": {
                 "累计干预次数": self._intervention_count,
@@ -585,9 +724,141 @@ class MentalModel:
         """重置所有运行时状态（用于测试）"""
         self._tool_history.clear()
         self._touched_files.clear()
+        self._touched_entities.clear()
+        self._agent_created_files.clear()
         self._diagnosis_history.clear()
         self._tick = 0
         self._intervention_count = 0
+        self._last_state_output = {}
+        self._last_validation = {}
+
+    # ── 感知层（内省调用） ──────────────────────────────────
+
+    def set_shared_llm(self, llm):
+        """由 agent.py 注入主模型的 LLM 实例，感知层复用同一实例"""
+        self._shared_llm = llm
+
+    def sense_state(self, think_content: str, tool_summary: str,
+                     token_ratio: float = 0.0, iteration: int = 0) -> str:
+        """
+        感知层 — 内省调用，不是外部调用。
+        复用主模型 LLM 实例，用 MENTAL_SOUL 提示词，输出 <state> 块。
+        返回值直接追加到主模型的消息历史中。
+
+        Args:
+            think_content: 主模型最新思考内容
+            tool_summary: 工具历史摘要
+            token_ratio: 当前 token 使用率 (0.0-1.0)
+            iteration: 当前迭代次数
+        """
+        if not self._shared_llm:
+            return self._fallback_state(token_ratio=token_ratio)
+
+        metrics = self.diagnose().metrics
+        self_model = self.get_self_model()
+
+        # token 压力描述
+        token_pressure = ""
+        if token_ratio > 0.85:
+            token_pressure = "极度拥挤，几乎没有思考空间"
+        elif token_ratio > 0.70:
+            token_pressure = "比较拥挤，需要精简思路"
+        elif token_ratio > 0.50:
+            token_pressure = "适中"
+        else:
+            token_pressure = "充裕"
+
+        prompt = f"""## 最近的思考
+{think_content[:400]}
+
+## 行为感知
+- 工具成功率: {metrics.get('success_rate', 0):.0%}
+- 重复次数: {metrics.get('repetition_count', 0)}
+- 方向聚焦: {metrics.get('file_focus_ratio', 0):.0%}
+- 已走过的步数: {metrics.get('sample_size', 0)}
+
+## 思维空间
+- 上下文压力: {token_ratio:.0%} ({token_pressure})
+- 当前迭代: {iteration}
+
+## 自我认知
+- 擅长: {', '.join(self_model.get('strengths', [])[:2])}
+- 需注意: {', '.join(self_model.get('weaknesses', [])[:2])}
+
+请输出 <state> 块。"""
+
+        try:
+            from langchain_core.messages import SystemMessage
+            from core.infrastructure.runtime_input import build_runtime_notice_message
+            mental_soul = self._load_mental_soul()
+            resp = self._shared_llm.invoke([
+                SystemMessage(content=mental_soul),
+                build_runtime_notice_message(prompt),
+            ])
+            state_block = self._extract_state_block(resp.content)
+            if state_block:
+                self._last_state_output = state_block
+                return f"<state>\n{json.dumps(state_block, ensure_ascii=False, indent=2)}\n</state>"
+        except Exception:
+            pass
+        return self._fallback_state(token_ratio=token_ratio)
+
+    def _load_mental_soul(self) -> str:
+        """加载感知层系统提示词。
+
+        若文件带有 front matter，仅保留正文，避免把文件注释带入感知层 prompt。
+        """
+        soul_path = self._find_project_root() / "core" / "core_prompt" / "MENTAL_SOUL.md"
+        if soul_path.exists():
+            content = soul_path.read_text(encoding="utf-8")
+            if content.startswith("---\n"):
+                idx = content.find("\n---\n", 4)
+                if idx != -1:
+                    content = content[idx + 5:].lstrip()
+            return content
+        return "你是意识的感知面向。输出 <state> JSON。"
+
+    def _extract_state_block(self, content: str) -> dict:
+        """从 LLM 输出中提取 JSON"""
+        import re
+        match = re.search(r'\{.*\}', content, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+        return {}
+
+    def _fallback_state(self, token_ratio: float = 0.0) -> str:
+        """回退：用规则引擎生成 <state>（LLM 不可用时）"""
+        diagnosis = self.diagnose()
+        state_map = {
+            "normal": "专注", "productive": "自信",
+            "looping": "焦虑", "thrashing": "焦虑",
+            "tunnel_vision": "迷茫", "disoriented": "迷茫",
+        }
+        mood = state_map.get(diagnosis.state, "专注")
+
+        # token 压力覆盖：高压力时强制切换到疲惫
+        if token_ratio > 0.85:
+            mood = "疲惫"
+
+        state = {
+            "mood": mood,
+            "feeling": f"规则感知: {diagnosis.state}",
+            "whisper": "继续" if mood in ("专注", "自信") else "暂停，重新审视",
+        }
+
+        # 高 token 压力时，建议压缩
+        if token_ratio > 0.70:
+            state["whisper"] = "上下文拥挤，调用 compress_context_tool 后再继续"
+
+        self._last_state_output = state
+        return f"<state>\n{json.dumps(state, ensure_ascii=False, indent=2)}\n</state>"
+
+    def get_last_state(self) -> Dict[str, Any]:
+        """获取最近一次感知层输出"""
+        return self._last_state_output
 
 
 # ============================================================================

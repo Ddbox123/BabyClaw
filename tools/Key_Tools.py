@@ -18,9 +18,22 @@ from tools.memory_tools import (
     task_update_tool as _task_update_impl,
     task_list_tool as _task_list_impl,
 )
+from tools.memory_tools import (
+    record_learning_tool as _record_learning_impl,
+    search_memory_tool as _search_memory_impl,
+    search_error_archive_tool as _search_error_archive_impl,
+)
 from tools.search_tools import grep_search_tool as _grep_search_impl
 from tools.web_search_tool import (
     web_search_tool as _web_search_impl,
+)
+from tools.git_tools import (
+    get_git_status_summary_tool as _get_git_status_summary_impl,
+    get_recent_changes_tool as _get_recent_changes_impl,
+    get_entity_history_tool as _get_entity_history_impl,
+    explain_current_worktree_tool as _explain_current_worktree_impl,
+    open_evolution_transaction_tool as _open_evolution_transaction_impl,
+    close_evolution_transaction_tool as _close_evolution_transaction_impl,
 )
 from core.infrastructure.mental_model import (
     get_mental_state_tool as _get_mental_state_impl,
@@ -28,6 +41,17 @@ from core.infrastructure.mental_model import (
     update_self_model_tool as _update_self_model_impl,
     get_self_model_tool as _get_self_model_impl,
     record_evolution_tool as _record_evolution_impl,
+)
+from core.infrastructure.workspace_cleaner import (
+    list_workspace_debris_tool as _list_workspace_debris_impl,
+    clean_workspace_debris_tool as _clean_workspace_debris_impl,
+    get_session_files_tool as _get_session_files_impl,
+)
+from tools.agent_tools import spawn_agent as _spawn_agent_impl
+from tools.token_manager import compress_context_tool as _compress_context_impl
+from tools.python_intelligence_tools import (
+    python_symbol_tool as _python_symbol_impl,
+    python_lint_tool as _python_lint_impl,
 )
 
 _CLI_TOOL_DOCSTRING = """
@@ -37,11 +61,14 @@ _CLI_TOOL_DOCSTRING = """
 
 === 核心纪律 ===
 1. 禁止交互式命令 (vim, top, less) 和无休止命令 (ping, tail -f)
-2. 长输出必须截断: | head -n 20 或 | tail -n 30
-3. 超过 500 行的文件禁止全量读取
+2. 谨慎使用命令链与管道: `&&`、`||`、`|`、`;`、`` ` ``、`$()`
+3. 长输出尽量不要用 pipe 截断；优先专用工具分页、缩小 pytest 目标，或直接读取结果文件
+4. 超过 500 行的文件禁止全量读取，优先 read_file_tool / grep_search_tool
 
 === 闭环 ===
-修改代码后: python -m py_compile <file>.py && python -m pytest tests/ -x -q
+修改代码后按顺序分开执行:
+1. python -m py_compile <file>.py
+2. python -m pytest <target> -x -q
 
 Args:
     command: Shell 命令
@@ -205,6 +232,49 @@ def create_key_tools() -> List[BaseTool]:
         return get_code_entity(file_path, entity_name)
 
     @tool
+    def python_symbol_tool(file_path: str, line: int, column: int, action: str = "definition", max_results: int = 20) -> str:
+        """
+        【Python 结构感知】像语言服务器一样查询符号定义、引用或悬浮信息。
+
+        适合跨模块定位真实入口、查看波及面、确认某个调用最终落点。
+        当前基于 Jedi；若环境未安装 Jedi，会返回结构化降级结果。
+
+        Args:
+            file_path: Python 文件路径
+            line: 1-based 行号
+            column: 0-based 列号
+            action: definition / references / hover
+            max_results: 最多返回多少条结果
+
+        Returns:
+            JSON 格式的符号查询结果
+        """
+        return _python_symbol_impl(
+            file_path=file_path,
+            line=line,
+            column=column,
+            action=action,
+            max_results=max_results,
+        )
+
+    @tool
+    def python_lint_tool(target: str = ".", max_issues: int = 100) -> str:
+        """
+        【Python 静态守门】运行 Ruff lint，只读诊断，不自动修复。
+
+        适合在修改后、测试前先做一轮低成本静态检查，减少无意义回合。
+        当前基于 Ruff；若环境未安装 Ruff，会返回结构化降级结果。
+
+        Args:
+            target: 文件或目录，默认当前项目
+            max_issues: 最多返回多少条问题
+
+        Returns:
+            JSON 格式的 lint 结果
+        """
+        return _python_lint_impl(target=target, max_issues=max_issues)
+
+    @tool
     def web_search_tool(query: str, max_results: int = 10) -> str:
         """
         网络搜索工具 - 基于 AutoGLM Web Search API。
@@ -238,6 +308,108 @@ def create_key_tools() -> List[BaseTool]:
         from tools.web_search_tool import web_fetch as _web_fetch
         return _web_fetch(url=url, max_chars=max_chars)
 
+    @tool
+    def get_git_status_summary_tool(limit: int = 5) -> str:
+        """
+        【Git 感知】读取当前工作区状态、最近注意力和最近验证结果。
+
+        每轮关键修改前优先调用此工具，建立项目变化上下文。
+
+        Args:
+            limit: 最近变化摘要条数，默认 5，用于控制首轮感知长度
+
+        Returns:
+            JSON 格式的状态摘要
+        """
+        return _get_git_status_summary_impl(limit=limit)
+
+    @tool
+    def get_recent_changes_tool(limit: int = 10) -> str:
+        """
+        【Git 历史】读取最近提交变化摘要。
+
+        Args:
+            limit: 返回最近多少条变化，默认 10
+
+        Returns:
+            JSON 格式的最近变化列表
+        """
+        return _get_recent_changes_impl(limit=limit)
+
+    @tool
+    def get_entity_history_tool(entity_ref: str, limit: int = 10) -> str:
+        """
+        【实体历史】读取某个函数/类/方法的最近变化历史。
+
+        Args:
+            entity_ref: 实体标识，如 "PromptManager.build" 或 "refresh_git_memory"
+            limit: 最多返回多少条历史
+
+        Returns:
+            JSON 格式的实体变化列表
+        """
+        return _get_entity_history_impl(entity_ref=entity_ref, limit=limit)
+
+    @tool
+    def explain_current_worktree_tool() -> str:
+        """
+        【Git 脏区详解】详细读取当前 working tree 的变化。
+
+        Returns:
+            JSON 格式的 working tree 快照
+        """
+        return _explain_current_worktree_impl()
+
+    @tool
+    def open_evolution_transaction_tool(summary: str = "") -> str:
+        """
+        【演化开账】为当前高风险演化打开一条事务记录。
+
+        在修改 `agent.py`、`core/infrastructure/`、`core/prompt_manager/` 等高风险区域前优先调用。
+
+        Args:
+            summary: 本轮演化意图摘要
+
+        Returns:
+            包含 txn_id 的 JSON
+        """
+        return _open_evolution_transaction_impl(summary=summary)
+
+    @tool
+    def close_evolution_transaction_tool(txn_id: str, status: str = "success", summary: str = "") -> str:
+        """
+        【演化关账】关闭一条演化事务记录。
+
+        Args:
+            txn_id: 要关闭的事务 ID
+            status: success / failed / cancelled
+            summary: 本轮演化结果摘要
+
+        Returns:
+            关闭结果 JSON
+        """
+        return _close_evolution_transaction_impl(txn_id=txn_id, status=status, summary=summary)
+
+    @tool
+    def get_evolution_fitness_tool(recent_limit: int = 5) -> str:
+        """
+        【演化体征】读取审计日志并汇总当前自进化 fitness 指标。
+
+        适合在一轮演化后快速看：
+        - 事务成功率
+        - 验证通过率
+        - 被拦截的越界修改
+        - 最近几笔事务的结果
+
+        Args:
+            recent_limit: 最近返回多少笔事务摘要，默认 5
+
+        Returns:
+            JSON 格式的 fitness 摘要
+        """
+        from tools.git_tools import get_evolution_fitness_tool as _get_evolution_fitness_impl
+        return _get_evolution_fitness_impl(recent_limit=recent_limit)
+
     # ── 文件操作工具 ────────────────────────────────────────────────────────
 
     def _cli_tool_impl(command: str = "", timeout: int = 60) -> str:
@@ -255,7 +427,7 @@ def create_key_tools() -> List[BaseTool]:
     # ── 文件读写工具 ──────────────────────────────────────────────────────
 
     @tool
-    def read_file_tool(file_path: str, max_lines: int = 0, offset: int = 0) -> str:
+    def read_file_tool(file_path: str, max_lines: int = 80, offset: int = 0) -> str:
         """
         【读取文件】读取本地文件的全部或部分内容。
 
@@ -264,7 +436,7 @@ def create_key_tools() -> List[BaseTool]:
 
         Args:
             file_path: 文件路径（相对或绝对）
-            max_lines: 最大读取行数，0 表示读取全部
+            max_lines: 最大读取行数，默认分页读取 80 行；0 表示读取全部
             offset: 从第几行开始读取，0 表示从头开始
 
         Returns:
@@ -504,6 +676,165 @@ def create_key_tools() -> List[BaseTool]:
         """
         return _record_evolution_impl(change=change, result=result)
 
+    # ── 工作区碎片管理工具 ──────────────────────────────────────────────────
+
+    @tool
+    def list_workspace_debris_tool(directory: str = "workspace") -> str:
+        """
+        【工作区扫描】扫描 workspace/ 目录中的碎片文件（只读）。
+
+        返回按类别分组的碎片清单：孤儿脚本、版本增殖、镜像子树、未知目录。
+        此工具不会删除任何文件，仅做扫描报告。
+
+        Args:
+            directory: 要扫描的目录，默认 "workspace"
+
+        Returns:
+            JSON 格式的分类扫描报告
+        """
+        return _list_workspace_debris_impl(directory=directory)
+
+    @tool
+    def clean_workspace_debris_tool(confirm: bool = False, target_categories: str = "all") -> str:
+        """
+        【工作区清理】删除 workspace/ 中的碎片文件。
+
+        confirm=False 时仅扫描预览不删除。confirm=True 执行实际删除。
+        可选按类别清理：root_py, variant, mirror, unknown。
+
+        Args:
+            confirm: 必须为 True 才执行删除
+            target_categories: 要清理的类别，逗号分隔，"all" 为全部
+
+        Returns:
+            JSON 格式的清理报告
+        """
+        return _clean_workspace_debris_impl(confirm=confirm, target_categories=target_categories)
+
+    @tool
+    def get_session_files_tool() -> str:
+        """
+        【会话文件查询】查看本次 Agent 会话创建的所有文件。
+
+        包含文件路径、创建时间、大小、是否版本增殖等信息。
+        用于自我监控——了解自己在本次会话中创造了哪些文件。
+
+        Returns:
+            JSON 格式的文件清单
+        """
+        return _get_session_files_impl()
+
+    @tool
+    def spawn_agent_tool(
+        task: str = "",
+        timeout: int = 120,
+        task_type: str = "",
+        goal: str = "",
+        scope: str = "",
+        constraints: str = "",
+        deliverables: str = "",
+        context_pack: str = "",
+    ) -> str:
+        """
+        【子 Agent 委托】启动子 Agent 执行指定任务并返回结果。
+
+        将重任务（如检查测试覆盖率、分析代码库结构、批量验证）外包给子 Agent，
+        主 Agent 只阅读返回的摘要，保持主上下文轻量。
+
+        子 Agent 运行在只读分析模式，深度限制 2 层。
+
+        Args:
+            task: 兼容旧接口的任务描述（自然语言）
+            timeout: 超时时间（秒），默认 120
+            task_type: inspect | diagnose | verify | summarize
+            goal: 当前唯一目标
+            scope: 任务范围，可传路径、目录、日志文件或 JSON 字符串
+            constraints: JSON 字符串，描述只读/最大步数/输出长度等约束
+            deliverables: JSON 数组或逗号分隔字符串，指定需要返回的字段
+            context_pack: 主 Agent 压缩后的最小上下文
+
+        Returns:
+            JSON 格式的结构化结果
+        """
+        return _spawn_agent_impl(
+            task=task,
+            timeout=timeout,
+            task_type=task_type,
+            goal=goal,
+            scope=scope,
+            constraints=constraints,
+            deliverables=deliverables,
+            context_pack=context_pack,
+        )
+
+    # ── 学习卸载工具 (P2) ──────────────────────────────────────────────────
+
+    @tool
+    def record_learning_tool(category: str, title: str, content: str, importance: int = 1) -> str:
+        """
+        【学习卸载】将关键发现写入跨代长期记忆。
+
+        类别: TECH_PATTERN / BUG_FIX / SYSTEM_INSIGHT / REFACTOR / BEST_PRACTICE。
+        写入后可通过 search_memory_tool 检索，重启后新 Agent 也能读取。
+
+        Args:
+            category: 类别
+            title: 简短标题
+            content: 完整内容（不超过 500 字符）
+            importance: 重要性 1-5
+
+        Returns:
+            写入结果
+        """
+        return _record_learning_impl(category=category, title=title, content=content, importance=importance)
+
+    @tool
+    def search_memory_tool(query: str, category: str = "") -> str:
+        """
+        【记忆搜索】搜索跨代长期记忆。
+
+        遇到问题时先调用此工具，避免重复踩坑。
+
+        Args:
+            query: 搜索关键词
+            category: 按类别过滤，留空搜索全部
+
+        Returns:
+            JSON 格式的匹配记忆列表
+        """
+        return _search_memory_impl(query=query, category=category)
+
+    @tool
+    def search_error_archive_tool(error_type: str = "") -> str:
+        """
+        【错误查询】搜索历史上遇到的错误及解决方案。
+
+        当遇到报错时先查此工具，可找到前代的修复方案。
+
+        Args:
+            error_type: 错误类型关键词，留空返回最近错误列表
+
+        Returns:
+            JSON 格式的错误记录列表
+        """
+        return _search_error_archive_impl(error_type=error_type)
+
+    @tool
+    def compress_context_tool(reason: str = "主动压缩") -> str:
+        """
+        【上下文压缩】主动压缩上下文，释放思维空间。
+
+        当你感到思绪拥挤、上下文混乱、或需要更多空间思考时调用。
+        压缩会保留最近的关键对话，将旧内容压缩为摘要。
+
+        Args:
+            reason: 压缩原因（如"上下文太长"、"需要更多空间"）
+
+        Returns:
+            确认信息
+        """
+        return _compress_context_impl(reason=reason)
+
     return [
         # SOUL.md 核心
         commit_compressed_memory_tool,
@@ -516,8 +847,16 @@ def create_key_tools() -> List[BaseTool]:
         apply_diff_edit_tool,
         list_file_entities_tool,
         get_code_entity_tool,
+        python_symbol_tool,
+        python_lint_tool,
         web_search_tool,
         web_fetch_tool,
+        get_git_status_summary_tool,
+        get_recent_changes_tool,
+        get_entity_history_tool,
+        explain_current_worktree_tool,
+        open_evolution_transaction_tool,
+        close_evolution_transaction_tool,
         # 文件操作
         cli_tool,
         read_file_tool,
@@ -539,4 +878,37 @@ def create_key_tools() -> List[BaseTool]:
         update_self_model_tool,
         get_self_model_tool,
         record_evolution_tool,
+        # 工作区碎片管理
+        list_workspace_debris_tool,
+        clean_workspace_debris_tool,
+        get_session_files_tool,
+        # 学习卸载 (P2)
+        record_learning_tool,
+        search_memory_tool,
+        search_error_archive_tool,
+        # 上下文压缩
+        compress_context_tool,
     ]
+
+
+def create_llm_facing_tools() -> List[BaseTool]:
+    """返回默认暴露给 LLM 的精简工具集。"""
+    all_tools = create_key_tools()
+    excluded_names = {
+        # 长尾后台/维护型工具容易把普通诊断带偏，保留到底层执行器即可
+        "task_start_tool",
+        "task_output_tool",
+        "task_stop_tool",
+        "list_workspace_debris_tool",
+        "clean_workspace_debris_tool",
+        "get_session_files_tool",
+        # 自我建模/长期学习类工具默认不常驻，避免在普通轮次抢占操作面
+        "update_diagnosis_rules_tool",
+        "update_self_model_tool",
+        "get_self_model_tool",
+        "record_evolution_tool",
+        "record_learning_tool",
+        "search_memory_tool",
+        "search_error_archive_tool",
+    }
+    return [tool for tool in all_tools if getattr(tool, "name", "") not in excluded_names]

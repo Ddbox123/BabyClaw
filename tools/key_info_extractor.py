@@ -15,6 +15,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
+from core.infrastructure.runtime_input import is_external_request_message
+
 
 class KeyInfoExtractor:
     """
@@ -109,22 +111,22 @@ class KeyInfoExtractor:
             决策列表，每项包含 decision, reason, context
         """
         decisions = []
-        last_human_msg = None
+        last_external_request = None
 
         for msg in messages:
             msg_type = getattr(msg, 'type', 'unknown')
             content = getattr(msg, 'content', '')
 
-            # 记录最后一条用户消息作为上下文
-            if msg_type == 'human':
-                last_human_msg = content[:200]
+            # 记录最后一条外部任务输入作为上下文
+            if is_external_request_message(msg):
+                last_external_request = content[:200]
 
             # 检查决策关键词
             if content and self._decision_pattern.search(content):
                 decisions.append({
                     'decision': content[:300],
                     'reason': self._extract_reason(content),
-                    'context': last_human_msg or 'unknown',
+                    'context': last_external_request or 'unknown',
                 })
 
         return decisions

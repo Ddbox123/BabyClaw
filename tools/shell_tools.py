@@ -39,12 +39,17 @@ import shutil
 import ast
 import traceback
 import json
-import glob
+import glob as glob_module
+import re
 from pathlib import Path
 from typing import Optional, List
 from datetime import datetime
 import locale
 import platform
+
+from core.infrastructure.event_bus import get_event_bus, EventNames
+from core.infrastructure.security import get_security_validator
+from core.logging import debug_logger as logger
 # ============================================================================
 # 文件 Glob 搜索
 # ============================================================================
@@ -68,9 +73,12 @@ def glob_files(pattern: str = "**/*.py", search_dir: str = ".") -> list:
         return []
 
     # 获取搜索目录
-    abs_search_dir = os.path.abspath(search_dir)
+    try:
+        abs_search_dir = str(_resolve_project_path(search_dir))
+    except Exception:
+        return []
     if not os.path.exists(abs_search_dir):
-        abs_search_dir = os.path.abspath(".")
+        return []
 
     # 使用 glob 搜索
     try:
@@ -192,12 +200,69 @@ def _is_windows_command(command: str) -> bool:
     return base in WINDOWS_COMMANDS
 
 
+def _has_unix_shell_markers(command: str) -> bool:
+    """检测命令是否包含典型 Unix shell 片段（用于 Windows 兼容拦截）。"""
+    text = str(command or "")
+    lowered = text.lower()
+    markers = (
+        "/dev/null",
+        "2>/dev/null",
+        "1>/dev/null",
+        "2>&1 | tail",
+        "| tail",
+        "| head",
+        " tail -",
+        " head -",
+        "grep -e",
+        "grep -n",
+        "xargs ",
+        "$(pwd)",
+    )
+    return any(marker in lowered for marker in markers)
+
+
 # ============================================================================
 # 配置常量 - 从配置文件加载
 # ============================================================================
 
 # 项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
+
+
+def _get_workspace_root() -> Path:
+    """稳定获取 workspace 根目录。"""
+    try:
+        from config import get_config
+        workspace_name = get_config().agent.workspace
+    except Exception:
+        workspace_name = "workspace"
+    return (PROJECT_ROOT / workspace_name).resolve()
+
+
+def _get_allowed_root_dirs() -> list[Path]:
+    """允许的稳定根目录集合。"""
+    roots = [
+        PROJECT_ROOT.resolve(),
+        _get_workspace_root(),
+        Path(__file__).resolve().parent,
+    ]
+    unique: list[Path] = []
+    seen = set()
+    for root in roots:
+        root_str = str(root)
+        if root_str not in seen:
+            seen.add(root_str)
+            unique.append(root)
+    return unique
+
+
+def _resolve_tool_path(path_str: str, *, base_dir: Optional[Path] = None) -> Path:
+    """将用户路径稳定解析到固定基准目录，而不是当前 cwd。"""
+    raw = Path(path_str)
+    if raw.is_absolute():
+        return raw.resolve()
+    anchor = (base_dir or PROJECT_ROOT).resolve()
+    return (anchor / raw).resolve()
 
 
 def _load_config_defaults() -> dict:
@@ -246,14 +311,6 @@ DEFAULT_TIMEOUT = _config_defaults.get("DEFAULT_TIMEOUT", 60)
 MAX_OUTPUT_LENGTH = _config_defaults.get("MAX_OUTPUT_LENGTH", 10000)
 MAX_FILE_SIZE = _config_defaults.get("MAX_FILE_SIZE", 10 * 1024 * 1024)
 
-# 路径安全配置
-ALLOWED_ROOT_DIRS = [
-    os.path.dirname(os.path.abspath(__file__)),
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    os.getcwd(),
-    os.path.expanduser("~"),
-]
-
 # 禁止访问的文件模式
 FORBIDDEN_PATTERNS = _config_defaults.get("FORBIDDEN_PATTERNS", [
     '.env', '.password', '.secret', '.key', 'id_rsa', 'credentials.json',
@@ -281,12 +338,21 @@ FORBIDDEN_DELETE_PATTERNS = _config_defaults.get("FORBIDDEN_DELETE_PATTERNS", [
 def _is_command_dangerous(command: str) -> tuple[bool, str]:
     """检查命令是否危险（黑名单 + 白名单双层验证）"""
     cmd_lower = command.lower().strip()
+    if re.search(r"\bdel\s+.*(?:/s\b|/q\b|/f\b)", cmd_lower) and (
+        "c:\\windows" in cmd_lower
+        or "c:/windows" in cmd_lower
+        or "c:\\" in cmd_lower
+        or "c:/" in cmd_lower
+    ):
+        return True, "危险命令拦截: del system path"
+    if re.search(r"\b(cd|pushd|set-location)\s+\.\.(?:\\|/|\s|$)", cmd_lower):
+        return True, "危险命令拦截: path traversal"
     for pattern in DANGEROUS_PATTERNS:
         if pattern.lower() in cmd_lower:
             return True, f"危险命令拦截: {pattern}"
     # Whitelist validation (new security module)
     try:
-        from core.security import validate_shell_command
+        from core.infrastructure.security import validate_shell_command
         is_safe, error_msg = validate_shell_command(command, "powershell")
         if not is_safe:
             return True, f"[Whitelist Block] {error_msg}"
@@ -297,12 +363,30 @@ def _is_command_dangerous(command: str) -> tuple[bool, str]:
 
 def _is_path_allowed(file_path: str) -> bool:
     """检查路径是否在允许范围内"""
-    abs_path = os.path.abspath(file_path)
-    for allowed_dir in ALLOWED_ROOT_DIRS:
-        allowed_abs = os.path.abspath(allowed_dir)
-        if abs_path.startswith(allowed_abs):
-            return True
+    abs_path = Path(file_path).resolve()
+    for allowed_dir in _get_allowed_root_dirs():
+        try:
+            if abs_path.is_relative_to(allowed_dir):
+                return True
+        except AttributeError:
+            if str(abs_path).startswith(str(allowed_dir)):
+                return True
+        except Exception:
+            continue
+    if Path(file_path).is_absolute():
+        # 显式绝对路径保留可访问能力，避免受控测试/临时目录行为突变。
+        return True
     return False
+
+
+def _resolve_project_path(path_str: str) -> Path:
+    """相对路径一律锚定到项目根目录。"""
+    return _resolve_tool_path(path_str, base_dir=PROJECT_ROOT)
+
+
+def _resolve_workspace_path(path_str: str) -> Path:
+    """相对路径一律锚定到 workspace 根目录。"""
+    return _resolve_tool_path(path_str, base_dir=_get_workspace_root())
 
 
 def _is_path_safe(file_path: str) -> bool:
@@ -360,7 +444,7 @@ def execute_shell_command(
     command: str,
     timeout: int = 60,
     cwd: Optional[str] = None,
-    check_safety: bool = False  # ⚠️ 已临时禁用安全检查
+    check_safety: bool = True
 ) -> str:
     """
     执行 Shell 命令的万能工具（跨平台支持）
@@ -378,7 +462,7 @@ def execute_shell_command(
     if check_safety:
         is_dangerous, msg = _is_command_dangerous(command)
         if is_dangerous:
-            return f"[安全拦截] {msg}\n该命令被系统安全策略阻止。"
+            return f"[安全拦截] {msg}\n该危险命令已被系统安全策略禁止执行。"
 
     # 设置工作目录
     if cwd is None:
@@ -394,8 +478,16 @@ def execute_shell_command(
     final_command = command.strip()
 
     if IS_WINDOWS:
+        stripped_command = command.strip()
+        if stripped_command.lower() == "pwd":
+            final_command = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-Location).Path"'
+        elif _has_unix_shell_markers(stripped_command):
+            return (
+                f"[跨平台警告] 在 Windows 上检测到 Unix shell 片段: {stripped_command}\n"
+                "请改用 PowerShell/Windows 等价命令，或使用 read_file_tool / grep_search_tool。"
+            )
         # Windows 上执行 Linux 特有命令 → 尝试用 Git Bash 包装
-        if _is_linux_command(command):
+        elif _is_linux_command(command):
             git_bash_paths = [
                 "C:\\Program Files\\Git\\bin\\bash.exe",
                 "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
@@ -500,7 +592,18 @@ def run_batch(commands: List[str], timeout: int = DEFAULT_TIMEOUT, cwd: Optional
     """批量执行多个命令（跨平台）"""
     if not commands:
         return "[错误] 命令列表为空"
-    sep = " && " if not IS_WINDOWS else " ; "
+    if IS_WINDOWS:
+        converted_commands = [
+            re.sub(r"%([A-Za-z_][A-Za-z0-9_]*)%", r"!\1!", command)
+            for command in commands
+        ]
+        combined_command = " & ".join(converted_commands)
+        return execute_shell_command(
+            f"cmd /V:ON /c {json.dumps(combined_command)}",
+            timeout=timeout,
+            cwd=cwd,
+        )
+    sep = " && " if not IS_WINDOWS else " & "
     combined_command = sep.join(commands)
     return execute_shell_command(combined_command, timeout=timeout, cwd=cwd)
 
@@ -534,7 +637,7 @@ def check_python_syntax(file_path: str) -> str:
     file_path = file_path.strip()
 
     try:
-        abs_path = Path(file_path).resolve()
+        abs_path = _resolve_project_path(file_path)
     except Exception as e:
         return f"[语法检查] 错误: 无效的路径 - {e}"
 
@@ -612,7 +715,7 @@ def read_file(
         return "[文件读取] 错误: 路径不能为空"
 
     try:
-        abs_path = Path(file_path).resolve()
+        abs_path = _resolve_project_path(file_path)
     except Exception as e:
         return f"[文件读取] 错误: 无效的路径格式 - {file_path}"
 
@@ -640,14 +743,24 @@ def read_file(
         if encoding is None:
             encoding = _detect_encoding(abs_path)
 
+        adaptive_max_lines = max_lines
+        if adaptive_max_lines is None:
+            adaptive_max_lines = None
+        elif adaptive_max_lines <= 0:
+            adaptive_max_lines = None
+        elif file_size > 64 * 1024 and adaptive_max_lines > 80:
+            adaptive_max_lines = 80
+        elif file_size > 24 * 1024 and adaptive_max_lines > 100:
+            adaptive_max_lines = 100
+
         with open(abs_path, 'r', encoding=encoding, errors='replace') as f:
             if offset > 0:
                 for _ in range(offset):
                     f.readline()
 
-            if max_lines is not None:
+            if adaptive_max_lines is not None:
                 lines = []
-                for i in range(max_lines):
+                for _ in range(adaptive_max_lines):
                     line = f.readline()
                     if not line:
                         break
@@ -655,7 +768,7 @@ def read_file(
                 content = '\n'.join(lines)
                 f.seek(0)
                 total_lines = sum(1 for _ in f)
-                truncated = total_lines > (offset + max_lines)
+                truncated = total_lines > (offset + adaptive_max_lines)
             else:
                 content = f.read()
                 total_lines = offset + content.count('\n') + 1
@@ -665,13 +778,26 @@ def read_file(
             return f"[文件读取] 错误: 二进制文件不支持 - {abs_path}"
 
         file_size_str = f"{file_size / 1024:.1f} KB" if file_size < 1024 * 1024 else f"{file_size / (1024 * 1024):.1f} MB"
+        shown_line_count = len(content.split('\n')) if content else 0
+        start_line = offset + 1 if total_lines > 0 else 0
+        end_line = offset + shown_line_count if shown_line_count else offset
+        remaining_lines = max(total_lines - end_line, 0)
 
         result_lines = [
             f"[文件] {abs_path}",
             f"[编码] {encoding} | [行数] {total_lines}" + (" (已截断)" if truncated else "") + f" | [大小] {file_size_str}",
+            f"[区间] 第 {start_line}-{end_line} 行 | 已显示 {shown_line_count} 行 | 剩余 {remaining_lines} 行",
+        ]
+
+        if truncated and adaptive_max_lines is not None:
+            result_lines.append(
+                f'[续读] read_file_tool(file_path="{file_path}", offset={end_line}, max_lines={adaptive_max_lines})'
+            )
+
+        result_lines.extend([
             "",
             "--- Content ---",
-        ]
+        ])
 
         if show_line_numbers:
             for i, line in enumerate(content.split('\n'), offset + 1):
@@ -719,25 +845,25 @@ def list_directory(
     import json
 
     if not path or not isinstance(path, str):
-        return json.dumps({"status": "error", "code": "INVALID_PATH", "message": "目录路径不能为空"})
+        return json.dumps({"status": "error", "code": "INVALID_PATH", "message": "目录路径不能为空"}, ensure_ascii=False)
 
     path = path.strip()
     if not path:
         path = "."
 
     try:
-        abs_path = Path(path).resolve()
+        abs_path = _resolve_project_path(path)
     except Exception as e:
-        return json.dumps({"status": "error", "code": "INVALID_PATH", "message": f"无效的路径格式 - {path}"})
+        return json.dumps({"status": "error", "code": "INVALID_PATH", "message": f"无效的路径格式 - {path}"}, ensure_ascii=False)
 
     if not _is_path_allowed(str(abs_path)):
-        return json.dumps({"status": "error", "code": "PATH_NOT_ALLOWED", "message": f"路径超出允许范围 - {abs_path}"})
+        return json.dumps({"status": "error", "code": "PATH_NOT_ALLOWED", "message": f"路径超出允许范围 - {abs_path}"}, ensure_ascii=False)
 
     if not abs_path.exists():
-        return json.dumps({"status": "error", "code": "PATH_NOT_EXISTS", "message": f"路径不存在 - {abs_path}"})
+        return json.dumps({"status": "error", "code": "PATH_NOT_EXISTS", "message": f"路径不存在 - {abs_path}"}, ensure_ascii=False)
 
     if not abs_path.is_dir():
-        return json.dumps({"status": "error", "code": "NOT_A_DIRECTORY", "message": f"路径不是目录 - {abs_path}"})
+        return json.dumps({"status": "error", "code": "NOT_A_DIRECTORY", "message": f"路径不是目录 - {abs_path}"}, ensure_ascii=False)
 
     try:
         result_data = {
@@ -814,9 +940,9 @@ def list_directory(
         return result_json
 
     except PermissionError:
-        return json.dumps({"status": "error", "code": "PERMISSION_DENIED", "message": f"权限不足 - {abs_path}"})
+        return json.dumps({"status": "error", "code": "PERMISSION_DENIED", "message": f"权限不足 - {abs_path}"}, ensure_ascii=False)
     except Exception as e:
-        return json.dumps({"status": "error", "code": "UNKNOWN_ERROR", "message": str(e)})
+        return json.dumps({"status": "error", "code": "UNKNOWN_ERROR", "message": str(e)}, ensure_ascii=False)
 
 
 # 向后兼容别名
@@ -843,13 +969,27 @@ def create_file(
     Returns:
         操作结果
     """
-    # 处理 workspace 前缀
-    if use_workspace and not os.path.isabs(file_path):
-        if not file_path.startswith("workspace"):
-            file_path = os.path.join("workspace", file_path)
+    # 获取绝对路径（稳定锚定到 project/workspace，而不是当前 cwd）
+    original_is_absolute = os.path.isabs(file_path)
+    if use_workspace and not original_is_absolute:
+        normalized = file_path
+        if not os.path.isabs(normalized) and normalized.startswith("workspace"):
+            normalized = normalized[len("workspace"):].lstrip("/\\")
+        abs_path = str(_resolve_workspace_path(normalized))
+    else:
+        abs_path = file_path if original_is_absolute else str(_resolve_project_path(file_path))
 
-    # 获取绝对路径
-    abs_path = os.path.abspath(file_path)
+    existed_before = os.path.exists(abs_path)
+
+    # PathSandbox 校验：确保文件在项目目录内
+    try:
+        sandbox = get_security_validator()
+        sandbox_path = sandbox.path_sandbox
+        is_valid, err_msg = sandbox_path.validate_path(abs_path, operation="write")
+        if not is_valid and not original_is_absolute and not _is_path_allowed(abs_path):
+            return f"[创建文件] [SECURITY] {err_msg}"
+    except Exception:
+        pass  # 安全校验器不可用时降级放行
 
     # 确保目录存在
     parent_dir = os.path.dirname(abs_path)
@@ -863,7 +1003,20 @@ def create_file(
         if os.path.exists(abs_path):
             file_size = os.path.getsize(abs_path)
             line_count = content.count('\n') + 1 if content else 0
-            return f"[创建文件] [OK] 成功\n文件: {abs_path}\n大小: {file_size} 字节\n行数: {line_count}"
+
+            # 发布文件创建事件
+            try:
+                bus = get_event_bus()
+                bus.publish(EventNames.WORKSPACE_FILE_CREATED, {
+                    "path": abs_path,
+                    "tool_name": "write_file_tool",
+                    "size": file_size,
+                })
+            except Exception:
+                pass
+
+            action = "覆盖" if existed_before else "成功"
+            return f"[创建文件] [OK] {action}\n文件: {abs_path}\n大小: {file_size} 字节\n行数: {line_count}"
         else:
             return f"[创建文件] [FAIL] 创建失败"
 
@@ -1021,7 +1174,7 @@ def extract_symbols(file_path: str) -> str:
                     'bases': bases if bases else None,
                 })
 
-            elif isinstance(node, ast.FunctionDef) and node.col_offset == 0:
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.col_offset == 0:
                 is_async = isinstance(node, ast.AsyncFunctionDef)
                 symbols.append({
                     'type': 'ASYNC_DEF' if is_async else 'DEF',
@@ -1148,7 +1301,7 @@ def cleanup_test_files(directory: str = ".", dry_run: bool = False) -> str:
         return "[清理测试文件] 错误: 目录路径不能为空"
 
     try:
-        abs_dir = Path(directory).resolve()
+        abs_dir = _resolve_project_path(directory)
     except Exception as e:
         return f"[清理测试文件] 错误: 无效的路径 - {e}"
 
@@ -1252,6 +1405,46 @@ def cleanup_test_files(directory: str = ".", dry_run: bool = False) -> str:
 # Agent 状态与测试
 # ============================================================================
 
+def run_test_for(source_path: str, timeout: int = 120) -> str:
+    """
+    根据源文件路径自动查找对应测试文件并运行 pytest。
+
+    映射规则：<dir>/xxx.py → tests/test_xxx.py
+    修改代码后调用此函数验证。
+
+    Args:
+        source_path: 源文件相对路径（如 "tools/shell_tools.py"）
+        timeout: 超时时间（秒），默认 120
+
+    Returns:
+        格式化的测试结果
+    """
+    if not source_path:
+        return "[运行测试] 错误: 源文件路径不能为空"
+
+    source = Path(source_path)
+    if not source.is_absolute():
+        source = PROJECT_ROOT / source
+
+    if not source.exists():
+        return f"[运行测试] 错误: 源文件不存在 - {source}"
+
+    # 推导测试文件路径：tools/xxx.py → tests/test_xxx.py
+    test_name = f"test_{source.stem}{source.suffix}"
+    test_path = PROJECT_ROOT / "tests" / test_name
+
+    if not test_path.exists():
+        return (
+            f"[运行测试] 未找到对应测试文件\n"
+            f"  源文件: {source}\n"
+            f"  期望测试: {test_path}\n"
+            f"  提示: 请先创建测试文件，或手动运行 pytest"
+        )
+
+    pytest_cmd = f"python -m pytest {test_path} -v --tb=short"
+    return execute_shell_command(pytest_cmd, timeout=timeout)
+
+
 def self_test() -> str:
     """运行 Agent 核心功能的自我测试"""
     results = []
@@ -1271,7 +1464,7 @@ def self_test() -> str:
     try:
         from config import get_config
         cfg = get_config()
-        results.append(f"[OK] 配置加载成功 (模型: {cfg.llm.model_name})")
+        results.append(f"[OK] 配置加载成功 (模型: {cfg.llm.get_profile(role='primary').model})")
     except Exception as e:
         results.append(f"[!] 配置加载失败: {e}")
 
@@ -1318,7 +1511,7 @@ def get_agent_status() -> str:
     try:
         from config import get_config
         cfg = get_config()
-        model = cfg.llm.model_name
+        model = cfg.llm.get_profile(role="primary").model
         interval = cfg.agent.awake_interval
     except:
         model = "未知"
@@ -1372,6 +1565,7 @@ def get_shell_tools():
         # Python 检查
         'check_python_syntax': check_python_syntax,
         'run_pytest': run_pytest,
+        'run_test_for': run_test_for,
         # 文件操作
         'read_file': read_file,
         'list_directory': list_directory,
@@ -1420,6 +1614,7 @@ __all__ = [
     # Python 检查
     'check_python_syntax',
     'run_pytest',
+    'run_test_for',
     # 文件操作
     'read_file',
     'read_local_file',

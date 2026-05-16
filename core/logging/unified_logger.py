@@ -74,19 +74,21 @@ class UnifiedLogger:
 
     # ==================== 会话管理 ====================
 
-    def start_session(self, system_prompt: str = None):
+    def start_session(self, system_prompt: str = None, metadata: dict = None):
         """开始新的会话（同时初始化两个日志系统）"""
         self._current_turn = 0
         self._system_prompt_written = False
 
         # TranscriptLogger: 创建新文件
-        self._transcript.start_session(system_prompt)
+        self._transcript.start_session(system_prompt if isinstance(system_prompt, str) else None)
 
         # ConversationLogger: 开始新会话
         self._conversation.new_session()
+        if metadata:
+            self._conversation.start_session(metadata)
 
         # 如果有 System Prompt，写入
-        if system_prompt:
+        if isinstance(system_prompt, str) and system_prompt:
             self.write_system_prompt(system_prompt)
 
     def write_system_prompt(self, system_prompt: str):
@@ -98,6 +100,9 @@ class UnifiedLogger:
         # TranscriptLogger: 写入 Markdown
         self._transcript.write_system_prompt(system_prompt)
 
+        # ConversationLogger: 记录完整系统提示词
+        self._conversation.log_system_prompt(system_prompt)
+
     # ==================== 对话轮次 ====================
 
     def start_turn(self, turn: int, timestamp: str = None):
@@ -107,25 +112,29 @@ class UnifiedLogger:
         # TranscriptLogger: 写入轮次标题
         self._transcript.start_turn(turn, timestamp)
 
-    def log_user_input(self, content: str):
-        """记录用户输入（宿主指令）"""
+    def log_external_request(self, content: str):
+        """记录外部任务输入"""
         # ConversationLogger: JSON 日志
-        self._conversation.log_user_input(content)
+        self._conversation.log_external_request(content)
 
         # TranscriptLogger: Markdown 格式
-        self._transcript.write_user_input(content)
+        self._transcript.write_external_request(content)
 
     # ==================== LLM 交互 ====================
 
-    def log_llm_request(self, messages: list, model: str = None):
+    def log_llm_request(self, messages: list, model: str = None, iteration: int = 0):
         """记录发送给 LLM 的请求"""
         # ConversationLogger: JSON 日志
-        self._conversation.log_llm_request(messages, model=model)
+        self._conversation.log_llm_request(messages, model=model, iteration=iteration)
 
-    def log_llm_response(self, content: str, raw_response: str = None):
+    def log_llm_response(self, content: str, raw_response: str = None,
+                         input_tokens: int = 0, output_tokens: int = 0, tool_call_count: int = 0):
         """记录 LLM 的响应"""
         # ConversationLogger: JSON 日志
-        self._conversation.log_llm_response(content, raw_response)
+        self._conversation.log_llm_response(content, raw_response,
+                                            input_tokens=input_tokens,
+                                            output_tokens=output_tokens,
+                                            tool_call_count=tool_call_count)
 
         # TranscriptLogger: Markdown 格式
         self._transcript.write_llm_response(content)
@@ -147,11 +156,12 @@ class UnifiedLogger:
         tool_name: str,
         args: dict,
         result: str = None,
-        status: str = "success"
+        status: str = "success",
+        tool_call_id: str = None,
     ):
         """记录工具调用"""
         # ConversationLogger: JSON 日志
-        self._conversation.log_tool_call(tool_name, args, result, status)
+        self._conversation.log_tool_call(tool_name, args, result, status, tool_call_id=tool_call_id)
 
         # TranscriptLogger: Markdown 格式
         self._transcript.write_tool_call(tool_name, args, result, status)
@@ -162,6 +172,8 @@ class UnifiedLogger:
         """记录上下文压缩"""
         # ConversationLogger: JSON 日志
         self._conversation.log_compression(before_tokens, after_tokens, saved_tokens)
+        # TranscriptLogger: Markdown 格式
+        self._transcript.write_compression(before_tokens, after_tokens, saved_tokens)
 
     def log_action(self, action: str, details: dict = None):
         """记录特殊动作（restart/hibernated/skip 等）"""
@@ -171,10 +183,12 @@ class UnifiedLogger:
         # TranscriptLogger: Markdown 格式
         self._transcript.write_action(action, details)
 
-    def log_error(self, error_type: str, error_msg: str, traceback: str = None):
+    def log_error(self, error_type: str, error_msg: str, traceback: str = None, details: dict = None):
         """记录错误"""
         # ConversationLogger: JSON 日志
-        self._conversation.log_error(error_type, error_msg, traceback)
+        self._conversation.log_error(error_type, error_msg, traceback, details=details)
+        # TranscriptLogger: Markdown 格式
+        self._transcript.write_error(error_type, error_msg)
 
     # ==================== 会话管理 ====================
 
@@ -182,6 +196,20 @@ class UnifiedLogger:
         """结束会话"""
         # ConversationLogger: JSON 日志
         self._conversation.end_session(summary)
+
+    # ==================== 新增事件转发 ====================
+
+    def log_system_prompt(self, prompt_text: str):
+        """记录完整系统提示词"""
+        self._conversation.log_system_prompt(prompt_text)
+
+    def log_token_usage(self, input_tokens: int, output_tokens: int, turn: int = 0):
+        """记录 token 用量"""
+        self._conversation.log_token_usage(input_tokens, output_tokens, turn)
+
+    def log_turn_end(self, turn: int, stats: dict = None):
+        """记录轮次汇总"""
+        self._conversation.log_turn_end(turn, stats)
 
     # ==================== 便捷属性（向后兼容） ====================
 
@@ -203,14 +231,3 @@ logger = UnifiedLogger()
 def get_logger() -> UnifiedLogger:
     """获取全局 UnifiedLogger 实例"""
     return logger
-
-
-# 向后兼容：保留原有的 conversation_logger 引用
-def get_conversation_logger() -> ConversationLogger:
-    """获取 ConversationLogger 实例（向后兼容）"""
-    return logger.conversation
-
-
-def get_transcript_logger() -> TranscriptLogger:
-    """获取 TranscriptLogger 实例（向后兼容）"""
-    return logger.transcript

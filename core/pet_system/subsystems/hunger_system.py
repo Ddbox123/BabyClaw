@@ -8,6 +8,7 @@ Token 作为食物，饭量 = 上下文窗口
 from typing import Dict, Any
 from datetime import datetime
 from .base import PetSubsystem
+from core.ui.token_display import format_token_count
 
 
 class HungerSystem(PetSubsystem):
@@ -158,9 +159,9 @@ class HungerSystem(PetSubsystem):
 
         return f"""
 🍽️ 饥饿: {food_emoji}
-   饭量: {hunger.meal_size} tokens/餐
-   今日: {hunger.daily_tokens}/{hunger.meal_size} [{progress}]
-   累计: {hunger.total_tokens:,} tokens | {hunger.total_llm_calls:,} 次调用
+   饭量: {format_token_count(hunger.meal_size)} tokens/餐
+   今日: {format_token_count(hunger.daily_tokens)}/{format_token_count(hunger.meal_size)} [{progress}]
+   累计: {format_token_count(hunger.total_tokens)} tokens | {hunger.total_llm_calls:,} 次调用
 """
 
     def get_status_dict(self) -> Dict[str, Any]:

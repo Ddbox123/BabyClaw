@@ -250,17 +250,21 @@ session: {self._session_id}
         self._current_turn = turn
         self._enqueue_write(self._generate_turn_header(turn, timestamp))
 
-    def write_user_input(self, content: str, timestamp: str = None):
-        """写入用户/宿主指令"""
+    def write_external_request(self, content: str, timestamp: str = None):
+        """写入外部任务输入"""
         ts = timestamp or self._timestamp()
         escaped_content = self._escape_markdown(content)
 
-        content_md = f"""### 👤 宿主指令
+        content_md = f"""### 外部任务输入
 
 > [{ts}] {escaped_content}
 
 """
         self._enqueue_write(content_md)
+
+    def write_user_input(self, content: str, timestamp: str = None):
+        """兼容旧调用：外部输入不再写成用户/宿主指令。"""
+        return self.write_external_request(content, timestamp)
 
     def write_llm_response(self, content: str, thinking: str = None):
         """写入 LLM 回复（异步写入，不阻塞主循环）"""
@@ -463,8 +467,8 @@ def generate_sample_transcript() -> str:
 [... 9000+ 字符的系统提示词内容 ...]
 """
 
-    # 模拟用户指令
-    user_input = """【META 协议：第十阶段——全息对话实录与 Markdown 优雅渲染】
+    # 模拟外部任务输入
+    external_request = """【META 协议：第十阶段——全息对话实录与 Markdown 优雅渲染】
 
 开发一个"优雅对话渲染器"。在不破坏原有 JSON 日志逻辑的前提下，实现一套自动生成 .md 格式对话实录的机制。"""
 
@@ -472,14 +476,14 @@ def generate_sample_transcript() -> str:
     thinking = """我需要设计一个优雅的 Markdown 渲染器。首先，让我分析需求：
 
 1. System Prompt 需要折叠显示
-2. 用户指令需要醒目的引用块
+2. 外部任务输入需要醒目的引用块
 3. 工具调用需要列表形式
 4. 代码块需要语言高亮
 
 接下来，我将开始实现这个功能。"""
 
     # 模拟 LLM 回复
-    llm_response = """根据您的需求，我将创建一个优雅的对话渲染器。
+    llm_response = """根据当前任务要求，我将创建一个优雅的对话渲染器。
 
 ## 第一步：创建核心模块
 
@@ -496,10 +500,10 @@ class TranscriptLogger:
 
 ```python
 # 原有 JSONL 逻辑
-conversation_logger.log_user_input(content)
+conversation_logger.log_external_request(content)
 
 # 新增 Markdown 逻辑
-transcript_logger.write_user_input(content)
+transcript_logger.write_external_request(content)
 ```
 
 这样就可以同时维护两种格式的日志了。"""
@@ -514,7 +518,7 @@ transcript_logger.write_user_input(content)
     # 生成示例
     logger.start_session(system_prompt)
     logger.start_turn(1)
-    logger.write_user_input(user_input)
+    logger.write_external_request(external_request)
     logger.write_llm_response(llm_response, thinking)
     logger.write_tool_call(
         tool_call["name"],

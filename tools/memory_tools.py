@@ -32,6 +32,10 @@ from core.orchestration.task_planner import get_task_manager
 
 def _get_memory_index_path() -> str:
     """获取记忆索引文件路径"""
+    override = os.getenv("VIBELUTION_MEMORY_INDEX_PATH", "").strip()
+    if override:
+        os.makedirs(os.path.dirname(override), exist_ok=True)
+        return override
     ws = get_workspace()
     return str(ws.memory_index)
 
@@ -54,7 +58,7 @@ def _get_default_memory() -> dict:
     """获取默认的记忆结构"""
     return {
         "core_wisdom": "初始状态",
-        "current_goal": "熟悉环境",
+        "current_goal": "",
         "last_archive_time": None,
     }
 
@@ -185,14 +189,16 @@ def commit_compressed_memory_tool(new_core_context: str, next_goal: str) -> str:
         new_core_context = new_core_context[:297] + "..."
     
     memory = _load_memory()
-    memory["core_wisdom"] = new_core_context
+    memory["core_wisdom"] = new_core_context  # DEPRECATED: 保留兼容，新代码使用 state_memory
     memory["current_goal"] = next_goal
     memory["last_archive_time"] = datetime.now().isoformat()
 
-    # 同步到 PromptManager 内存（current_goal 不再从文件加载）
+    # 同步到 PromptManager 内存
     try:
         from core.prompt_manager import get_prompt_manager
-        get_prompt_manager().update_current_goal(next_goal)
+        pm = get_prompt_manager()
+        pm.update_current_goal(next_goal)
+        pm.update_state_memory(new_core_context)
     except Exception:
         pass
 
@@ -384,8 +390,7 @@ def write_dynamic_prompt_tool(content: str) -> str:
 def check_restart_block() -> tuple[bool, str]:
     """检查是否允许重启，供 rebirth_tools.py 调用。
 
-    检查 Agent 通过 task_create_tool 创建的轻量任务清单（_light_tasks），
-    而非复杂计划系统（TaskPlan），因为 Agent 实际使用的是前者。
+    检查 Agent 通过 task_create_tool 创建的任务清单。
     """
     tm = get_task_manager()
     tasks = tm.task_list()
@@ -428,7 +433,46 @@ def _get_task_manager_impl():
     return get_task_manager()
 
 
-def task_create_tool(task_list: List[Dict], goal: str = "") -> str:
+def _normalize_task_list_input(task_list: Any) -> List[Dict[str, Any]]:
+    """容忍 LLM 把 task_list 作为 JSON 字符串传入。"""
+    normalized = task_list
+    if isinstance(normalized, str):
+        normalized = json.loads(normalized)
+    if not isinstance(normalized, list):
+        raise TypeError("task_list 必须是任务对象列表")
+    coerced: List[Dict[str, Any]] = []
+    for item in normalized:
+        if not isinstance(item, dict):
+            raise TypeError("task_list 中的每一项都必须是对象")
+        coerced.append(item)
+    return coerced
+
+
+def _coerce_bool_like(value: Any) -> Any:
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "off"}:
+            return False
+    return value
+
+
+def _coerce_int_like(value: Any) -> Any:
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized.isdigit():
+            return int(normalized)
+    return value
+
+
+def task_create_tool(task_list: List[Dict] | str, goal: str = "") -> str:
     """
     【初始化任务清单】将子任务列表注册到系统内存并持久化。
 
@@ -440,10 +484,10 @@ def task_create_tool(task_list: List[Dict], goal: str = "") -> str:
         成功创建的任务数量摘要
     """
     tm = _get_task_manager_impl()
-    return tm.task_create(task_list, goal)
+    return tm.task_create(_normalize_task_list_input(task_list), goal)
 
 
-def task_update_tool(task_id: int, is_completed: bool = None, result_summary: str = None, description: str = None) -> str:
+def task_update_tool(task_id: int | str, is_completed: bool | str = None, result_summary: str = None, description: str = None) -> str:
     """
     【更新任务】可修改任务内容、标记完成状态或追加结果摘要。
 
@@ -457,7 +501,9 @@ def task_update_tool(task_id: int, is_completed: bool = None, result_summary: st
         更新结果描述
     """
     tm = _get_task_manager_impl()
-    return tm.task_update(task_id, is_completed, result_summary, description)
+    normalized_task_id = _coerce_int_like(task_id)
+    normalized_completed = _coerce_bool_like(is_completed)
+    return tm.task_update(normalized_task_id, normalized_completed, result_summary, description)
 
 
 def task_list_tool() -> str:
@@ -478,3 +524,75 @@ def task_list_tool() -> str:
             f"| {t['id']} | {t['description']} | {status} | {t.get('result_summary') or '—'} |"
         )
     return "\n".join(lines)
+
+
+# ============================================================================
+# 学习卸载工具 (P2) — SQLite 长期记忆 / 错误归档 / 代码库认知
+# ============================================================================
+
+def record_learning_tool(category: str, title: str, content: str, importance: int = 1) -> str:
+    """
+    将关键发现写入跨代长期记忆 (LongTermMemory)。
+
+    用于卸载会话中积累的重要认知，使主上下文保持轻量。
+    重启后新 Agent 可通过 search_memory_tool 检索这些记忆。
+
+    Args:
+        category: 类别 — TECH_PATTERN / BUG_FIX / SYSTEM_INSIGHT / REFACTOR / BEST_PRACTICE
+        title: 简短标题
+        content: 完整内容（不超过 500 字符）
+        importance: 重要性 1-5，默认 1
+
+    Returns:
+        写入结果
+    """
+    wm = get_workspace()
+    ok = wm.add_long_term_memory(generation=1, category=category, content=content, title=title, importance=importance)
+    if ok:
+        return json.dumps({"status": "ok", "message": f"记忆已持久化: [{category}] {title}"}, ensure_ascii=False)
+    return json.dumps({"status": "error", "message": "写入长期记忆失败"}, ensure_ascii=False)
+
+
+def search_memory_tool(query: str, category: str = "") -> str:
+    """
+    搜索跨代长期记忆 (LongTermMemory)。
+
+    检索之前写入的长期记忆，按重要性降序排列。
+    当遇到问题时先查此工具，避免重复踩坑。
+
+    Args:
+        query: 搜索关键词
+        category: 按类别过滤，留空则搜索全部
+
+    Returns:
+        JSON 格式的匹配记忆列表
+    """
+    wm = get_workspace()
+    cat = category if category else None
+    results = wm.search_long_term_memory(query=query, category=cat, limit=20)
+    if not results:
+        return json.dumps({"status": "ok", "count": 0, "results": []}, ensure_ascii=False)
+    return json.dumps({"status": "ok", "count": len(results), "results": results}, ensure_ascii=False, default=str)
+
+
+def search_error_archive_tool(error_type: str = "") -> str:
+    """
+    搜索错误归档 (ErrorArchive)。
+
+    查询历史上遇到的致命错误及其解决方案。
+    当遇到报错时先查此工具，可找到前代的修复方案。
+
+    Args:
+        error_type: 错误类型关键词，如 "ImportError"、"SyntaxError"。留空返回最近错误列表。
+
+    Returns:
+        JSON 格式的错误记录列表
+    """
+    wm = get_workspace()
+    if error_type:
+        results = wm.search_error_archive(error_type=error_type, limit=20)
+    else:
+        results = wm.get_recent_errors(limit=20)
+    if not results:
+        return json.dumps({"status": "ok", "count": 0, "results": []}, ensure_ascii=False)
+    return json.dumps({"status": "ok", "count": len(results), "results": results}, ensure_ascii=False, default=str)

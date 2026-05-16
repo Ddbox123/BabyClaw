@@ -11,6 +11,7 @@
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -46,6 +47,22 @@ MAX_WAIT_TIME = 60
 # 日志格式
 LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def configure_console_encoding() -> None:
+    """仅在真实 CLI 启动路径修复 Windows 控制台编码。"""
+    if sys.platform != "win32":
+        return
+
+    import io
+
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        buffer = getattr(stream, "buffer", None)
+        if buffer is None:
+            continue
+        wrapped = io.TextIOWrapper(buffer, encoding="utf-8", errors="replace")
+        setattr(sys, stream_name, wrapped)
 
 
 # ============================================================================
@@ -181,6 +198,53 @@ def wait_for_process_death(
     return False
 
 
+# 日志过滤：过滤 Rich UI 帧噪音，只保留有意义的日志行
+_BOX_CHARS = set('─│┌┐└┘├┤┬┴┼═╬▀▄█▌▐░▒▓━┃┏┓┗┛┣┫┳┻╋')
+
+_MAX_LOG_SIZE = 10 * 1024 * 1024  # 10MB
+
+
+class _LogFilter:
+    """过滤 Rich UI 帧，只写入有意义的日志行到日志文件"""
+
+    def __init__(self, fp):
+        self._fp = fp
+        self._in_frame = False
+
+    def write(self, s):
+        if not s:
+            return
+        for line in s.split('\n'):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # Rich 帧: 以 box-drawing 字符开头的行
+            if stripped[0] in _BOX_CHARS:
+                self._in_frame = True
+                continue
+            # Rich 帧内的状态行（非 [TAG] 开头）跳过
+            if self._in_frame and not stripped.startswith('['):
+                continue
+            self._in_frame = False
+            self._fp.write(line + '\n')
+        self._fp.flush()
+
+    def flush(self):
+        self._fp.flush()
+
+
+def _rotate_log_if_needed(log_path: str):
+    """日志超过 10MB 时轮转: .log -> .log.1"""
+    try:
+        if os.path.exists(log_path) and os.path.getsize(log_path) > _MAX_LOG_SIZE:
+            rotated = log_path + '.1'
+            if os.path.exists(rotated):
+                os.remove(rotated)
+            os.rename(log_path, rotated)
+    except OSError:
+        pass
+
+
 def spawn_new_process(
     script_path: str,
     env: Optional[dict] = None,
@@ -207,20 +271,29 @@ def spawn_new_process(
         process_env = os.environ.copy()
         if env:
             process_env.update(env)
+        restart_args: list[str] = []
+        raw_restart_args = process_env.get("AGENT_RESTART_ARGS", "")
+        if raw_restart_args:
+            try:
+                parsed = json.loads(raw_restart_args)
+                if isinstance(parsed, list):
+                    restart_args = [str(item) for item in parsed]
+            except Exception:
+                restart_args = []
 
         log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'logs')
         os.makedirs(log_dir, exist_ok=True)
         log_file = os.path.join(log_dir, 'agent_realtime.log')
 
+        _rotate_log_if_needed(log_file)
+
         import subprocess
 
         if IS_WINDOWS:
-            # DETACHED_PROCESS 分离控制台关联
-            # CREATE_NEW_PROCESS_GROUP 使进程完全脱离父进程组
             creation_flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
             with open(log_file, 'a', encoding='utf-8') as f:
                 process = subprocess.Popen(
-                    [sys.executable, script_abs],
+                    [sys.executable, script_abs, *restart_args],
                     env=process_env,
                     creationflags=creation_flags,
                     stdout=f,
@@ -241,7 +314,7 @@ def spawn_new_process(
                         with open(log_file, 'a') as f:
                             os.dup2(f.fileno(), 1)
                             os.dup2(f.fileno(), 2)
-                        os.execvp(sys.executable, [sys.executable, script_abs])
+                        os.execvp(sys.executable, [sys.executable, script_abs, *restart_args])
                     else:
                         os._exit(0)
                 except OSError as e:
@@ -320,4 +393,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    configure_console_encoding()
     sys.exit(main())

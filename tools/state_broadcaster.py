@@ -176,6 +176,20 @@ class StateBroadcaster:
         with self._state_lock:
             return self._get_default_state()
 
+    def _rotate_log_if_needed(self):
+        """日志超过 10MB 时轮转: .log -> .log.1"""
+        try:
+            if self.log_file.exists() and self.log_file.stat().st_size > 10 * 1024 * 1024:
+                if self._log_handle:
+                    self._log_handle.close()
+                    self._log_handle = None
+                rotated = self.log_file.with_suffix('.log.1')
+                if rotated.exists():
+                    rotated.unlink()
+                self.log_file.rename(rotated)
+        except OSError:
+            pass
+
     def log(self, message: str, tag: str = "INFO"):
         """
         写入实时日志
@@ -184,6 +198,7 @@ class StateBroadcaster:
             message: 日志消息
             tag: 日志标签
         """
+        self._rotate_log_if_needed()
         self._open_log_file()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         log_line = f"[{timestamp}] [{tag}] {message}\n"

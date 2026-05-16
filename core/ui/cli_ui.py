@@ -1,42 +1,89 @@
 # -*- coding: utf-8 -*-
 """
-Vibelution CLI UI — 流式输出引擎
+Vibelution CLI UI — 统一终端工作台渲染引擎
 
-基于 rich 库的简洁终端界面：
-- 流式内联输出（无固定面板布局）
-- 工具调用分组显示
-- 状态行 Live 刷新
-- 代码/Markdown/表格直接渲染
+布局：
+- 左侧：宠物区 + 思考气泡
+- 中间：主任务流
+- 底部：系统日志
 """
 
+from __future__ import annotations
+
+import json
+import re
 import sys
 import threading
-from datetime import datetime
-from typing import Optional, List, Dict, Any
+import time
 from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from rich.console import Console
+from rich.box import ASCII2, ROUNDED
+from rich.cells import cell_len
+from rich.console import Console, Group
+from rich.layout import Layout
 from rich.live import Live
-from rich.panel import Panel
-from rich.table import Table
-from rich.tree import Tree
 from rich.markdown import Markdown
+from rich.panel import Panel
 from rich.syntax import Syntax
+from rich.table import Table
 from rich.text import Text
-from rich.box import ROUNDED, ASCII2
-from rich.align import Align
+from rich.tree import Tree
 
-# 全局 Console 实例
+from core.pet_system import get_pet_system as get_pet
+from core.infrastructure.tool_intents import (
+    humanize_reading_task,
+    humanize_tool_intent,
+    humanize_tool_name,
+    humanize_tool_chain,
+)
+from core.ui.ascii_art import get_avatar_manager
+from core.ui.token_display import format_token_count
+from core.ui.theme import get_style, get_theme
+
 _console = Console(stderr=False, force_terminal=True)
 _stderr_console = Console(stderr=True, force_terminal=True)
 
-from core.ui.ascii_art import get_avatar_manager
-from core.ui.theme import LobsterTheme, get_theme, get_style
-from core.pet_system import get_pet_system as get_pet
+
+@dataclass
+class PetExpressionState:
+    mental_mood: str = ""
+    mental_feeling: str = ""
+    mental_whisper: str = ""
+    work_state: str = "idle"
+    pose: str = "idle"
+    direction: str = "right"
+    frame_index: int = 0
+    target_zone: str = "center_zone"
+    turn_progress: int = 0
+    pending_direction: str = "right"
+
+
+@dataclass
+class RuntimeTelemetry:
+    current_turn: int = 0
+    tool_starts: int = 0
+    tool_successes: int = 0
+    tool_errors: int = 0
+    validation_passes: int = 0
+    validation_failures: int = 0
+    completed_rounds: int = 0
+    successful_rounds: int = 0
+    failed_rounds: int = 0
+    last_tool_name: str = ""
+    last_tool_success: Optional[bool] = None
+    last_validation_kind: str = ""
+    last_validation_passed: Optional[bool] = None
+    last_status: str = "IDLE"
+    last_error: str = ""
+    missing_usage_rounds: int = 0
 
 
 class UIManager:
-    """终端 UI 管理器 — 流式输出"""
+    """统一终端工作台 UI 管理器。"""
 
     _instance = None
     _lock = threading.Lock()
@@ -58,124 +105,1631 @@ class UIManager:
         self.console = _console
         self._stderr_console = _stderr_console
         self._live: Optional[Live] = None
-        self._status_line = ""
-        self._current_goal = ""
-        self._status = "IDLE"
-        self._thinking = False
-        self._tool_count = 0
-        self._iterations = 0
-        self._input_tokens = 0
-        self._output_tokens = 0
-
-        self._content_buffer: List[str] = []
-        self._buffer_max_lines = 200
 
         self.theme = get_theme()
         self.style = get_style()
         self.avatar = get_avatar_manager()
         self.pet = get_pet()
 
-    # ======================== 全屏渲染 ========================
+        self._status = "IDLE"
+        self._current_goal = ""
+        self._tool_count = 0
+        self._iterations = 0
+        self._turn_input_tokens = 0
+        self._turn_output_tokens = 0
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
+        self._current_context_tokens = 0
+        self._context_token_limit = 0
+        self._last_request_input_tokens = 0
+        self._completed_evolutions = 0
+        self._seen_closed_evolution_txns: set[str] = set()
+        self._runtime_state_path = Path("workspace") / "ui_runtime_state.json"
+        self._load_runtime_totals()
+        self._shell_mode = "chat"
 
-    def _build_pet_panel(self):
-        """构建宠物状态面板 — 固定在 Live 区域底部常驻"""
-        bar_w = 10
+        self._conversation_events: List[str] = []
+        self._tool_activity_events: List[str] = []
+        self._system_logs: List[str] = []
+        self._thought_history: List[str] = []
+        self._delegation_events: List[str] = []
+        self._subagent_process_events: List[str] = []
+        self._subagent_thought_events: List[str] = []
+        self._current_thought_stream = ""
+        self._current_subagent_thought_stream = ""
 
-        # 宠物数据
-        pet_name = "Baby Claw"
-        pet_level = 1
-        pet_age = 0
-        mood = hunger = energy = health = love = 100
-        exp = 0
-        exp_max = 100
+        self._conversation_max = 400
+        self._tool_activity_max = 120
+        self._logs_max = 200
+        self._thought_history_max = 6
+        self._subagent_process_max = 24
+        self._subagent_thought_max = 12
+        self._pet_walk_offset = 0
+        self._pet_walk_direction = 1
+        self._pet_anim_running = False
+        self._pet_anim_thread: Optional[threading.Thread] = None
+        self._pet_pose_tick = 0
+        self._pet_state = PetExpressionState()
+        self._runtime = RuntimeTelemetry()
+        self._runtime_lock = threading.Lock()
+        self._subscribe_runtime_events()
+
+    # ======================== 内部状态 ========================
+
+    def reset_workspace(self):
+        self._conversation_events.clear()
+        self._tool_activity_events.clear()
+        self._system_logs.clear()
+        self._thought_history.clear()
+        self._delegation_events.clear()
+        self._subagent_process_events.clear()
+        self._subagent_thought_events.clear()
+        self._current_thought_stream = ""
+        self._current_subagent_thought_stream = ""
+        self._tool_count = 0
+        self._iterations = 0
+        self._turn_input_tokens = 0
+        self._turn_output_tokens = 0
+        self._current_context_tokens = 0
+        self._context_token_limit = 0
+        self._last_request_input_tokens = 0
+        self._current_goal = ""
+        self._status = "IDLE"
+        self._shell_mode = "chat"
+        self._pet_walk_offset = 0
+        self._pet_walk_direction = 1
+        self._pet_pose_tick = 0
+        self._pet_state = PetExpressionState()
+        self._runtime = RuntimeTelemetry()
+        self._update_status_line()
+
+    def _load_runtime_totals(self):
         try:
-            p = get_pet()
-            a = p.data.attributes
-            pet_name = a.name or pet_name
-            pet_level = a.level
-            pet_age = pet_level - 1
-            mood = a.mood
-            hunger = a.hunger
-            energy = int(a.energy)
-            health = a.health
-            love = a.love
-            exp = a.exp
-            exp_max = a.exp_to_next
+            if not self._runtime_state_path.exists():
+                self._load_completed_evolutions_from_db()
+                return
+            data = json.loads(self._runtime_state_path.read_text(encoding="utf-8"))
+            self._total_input_tokens = max(0, int(data.get("total_input_tokens") or 0))
+            self._total_output_tokens = max(0, int(data.get("total_output_tokens") or 0))
+            if "completed_evolutions" in data:
+                self._completed_evolutions = max(0, int(data.get("completed_evolutions") or 0))
+            else:
+                self._load_completed_evolutions_from_db()
+            seen = data.get("seen_closed_evolution_txns")
+            if isinstance(seen, list):
+                self._seen_closed_evolution_txns = {str(item) for item in seen if item}
+        except Exception:
+            self._total_input_tokens = 0
+            self._total_output_tokens = 0
+            self._completed_evolutions = 0
+            self._seen_closed_evolution_txns = set()
+
+    def _load_completed_evolutions_from_db(self):
+        try:
+            from core.infrastructure.workspace_manager import get_workspace
+
+            with get_workspace().get_db_connection() as conn:
+                rows = conn.cursor().execute(
+                    """
+                    SELECT txn_id
+                    FROM EvolutionTransaction
+                    WHERE status = 'success' AND closed_at IS NOT NULL
+                    ORDER BY closed_at
+                    """
+                ).fetchall()
+            txn_ids = [str(row["txn_id"]) for row in rows if row["txn_id"]]
+            self._completed_evolutions = len(txn_ids)
+            self._seen_closed_evolution_txns = set(txn_ids)
+        except Exception:
+            self._completed_evolutions = 0
+
+    def _save_runtime_state(self):
+        try:
+            self._runtime_state_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "total_input_tokens": max(0, int(self._total_input_tokens or 0)),
+                "total_output_tokens": max(0, int(self._total_output_tokens or 0)),
+                "completed_evolutions": max(0, int(self._completed_evolutions or 0)),
+                "seen_closed_evolution_txns": sorted(self._seen_closed_evolution_txns)[-200:],
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            self._runtime_state_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         except Exception:
             pass
 
-        def _bar(val, color):
-            b = self._make_bar(val, 100, bar_w)
-            return f"[{color}]{b}[/{color}]"
+    def _save_runtime_totals(self):
+        self._save_runtime_state()
 
-        def _attr(label, value, color, icon):
-            bar = _bar(value, color)
-            return f"  {icon} {label} {bar} {value:>3}/100"
-
-        exp_pct = exp / exp_max if exp_max > 0 else 0
-        exp_bar = f"[dim]{self._make_bar(exp, exp_max, bar_w)}[/dim]"
-
-        art = self.avatar.get_art("happy")
-
-        # Agent 状态行
-        agent_line = f"{self._status}"
-        if self._current_goal:
-            goal_preview = self._current_goal[:40].replace("\n", " ")
-            agent_line += f" | {goal_preview}"
-        agent_line += f" | Turn {self._iterations}"
-        if self._input_tokens or self._output_tokens:
-            agent_line += f" | Tok {self._input_tokens}+{self._output_tokens}"
-
-        content = (
-            f"[cyan]{art}[/cyan]\n"
-            f"  [bold]{pet_name}[/bold]  [dim]Lv.{pet_level} ({pet_age}岁)[/dim]\n\n"
-            f"{_attr('Mood  ', mood, 'yellow', 'M')}    "
-            f"{_attr('Hunger', hunger, 'green', 'H')}\n"
-            f"{_attr('Energy', energy, 'cyan', 'E')}    "
-            f"{_attr('Health', health, 'red', '❤ ')}\n"
-            f"{_attr('Love  ', love, 'magenta', '♥ ')}    "
-            f"  ⭐ EXP     {exp_bar} {int(exp_pct * 100):>3}%\n\n"
-            f"  [dim]{agent_line}[/dim]"
-        )
-
-        return Panel(
-            content,
-            title="[bold]Vibelution[/bold]",
-            border_style="dim",
-            box=ROUNDED,
-            padding=(0, 1),
-        )
-
-    def _full_screen_renderable(self):
-        """宠物面板(上) + 内容缓冲(下) — 全屏重绘"""
-        pet_panel = self._build_pet_panel()
-
-        # 取 buffer 最后 40 行
-        visible = self._content_buffer[-40:] if self._content_buffer else []
-        if visible:
-            content_text = Text("\n".join(visible), style="dim")
-            from rich.table import Table
-            grid = Table.grid(padding=0)
-            grid.add_row(pet_panel)
-            grid.add_row(Text(""))  # spacer
-            grid.add_row(content_text)
-            return grid
-        return pet_panel
-
-    def _status_renderable(self):
-        return self._full_screen_renderable()
-
-    def _append_to_buffer(self, text: str):
-        """写入内容缓冲区并触发刷新；Live 未激活时直接 console.print"""
-        if not self._live or UIManager._test_mode:
-            self.console.print(text)
+    def _subscribe_runtime_events(self):
+        try:
+            from core.infrastructure.event_bus import EventNames, get_event_bus
+        except Exception:
             return
-        self._content_buffer.append(text)
-        if len(self._content_buffer) > self._buffer_max_lines:
-            self._content_buffer = self._content_buffer[-self._buffer_max_lines:]
+
+        bus = get_event_bus()
+        bus.subscribe(EventNames.TOOL_START, self._on_tool_start, callback_id="ui_tool_start")
+        bus.subscribe(EventNames.TOOL_SUCCESS, self._on_tool_success, callback_id="ui_tool_success")
+        bus.subscribe(EventNames.TOOL_ERROR, self._on_tool_error, callback_id="ui_tool_error")
+        bus.subscribe(
+            EventNames.VALIDATION_COMPLETED,
+            self._on_validation_completed,
+            callback_id="ui_validation_completed",
+        )
+        bus.subscribe(
+            EventNames.EVOLUTION_TXN_CLOSED,
+            self._on_evolution_txn_closed,
+            callback_id="ui_evolution_txn_closed",
+        )
+
+    def set_shell_mode(self, mode: str):
+        self._shell_mode = (mode or "chat").lower()
         self._update_status_line()
 
-    # ======================== Live 管理 ========================
+    def set_avatar_preset(self, preset: str):
+        if not preset:
+            return
+        try:
+            self.avatar = get_avatar_manager(preset)
+        except Exception:
+            self.avatar = get_avatar_manager()
+        self._update_status_line()
+
+    def _append_conversation(self, text: str):
+        if UIManager._test_mode:
+            plain = re.sub(r"\[/?[^\]]+\]", "", text)
+            sys.__stdout__.write(plain + "\n")
+            sys.__stdout__.flush()
+            return
+        if not self._live:
+            self._conversation_events.append(text)
+            if len(self._conversation_events) > self._conversation_max:
+                self._conversation_events = self._conversation_events[-self._conversation_max :]
+            return
+        self._conversation_events.append(text)
+        if len(self._conversation_events) > self._conversation_max:
+            self._conversation_events = self._conversation_events[-self._conversation_max :]
+        self._update_status_line()
+
+    def _append_tool_activity(self, text: str):
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return
+        self._tool_activity_events.append(cleaned)
+        if len(self._tool_activity_events) > self._tool_activity_max:
+            self._tool_activity_events = self._tool_activity_events[-self._tool_activity_max :]
+        self._update_status_line()
+
+    def _write_plain_console_fallback(self, text: str):
+        plain = re.sub(r"\[/?[^\]]+\]", "", str(text or ""))
+        plain = plain.strip("\n")
+        if not plain:
+            return
+        try:
+            sys.__stdout__.write(plain + "\n")
+            sys.__stdout__.flush()
+        except Exception:
+            pass
+
+    def _safe_console_render(self, renderable: Any, *, fallback_text: str = ""):
+        try:
+            self.console.print(renderable)
+        except Exception:
+            self._write_plain_console_fallback(fallback_text)
+
+    def _append_log(self, text: str):
+        if UIManager._test_mode:
+            plain = re.sub(r"\[/?[^\]]+\]", "", text)
+            sys.__stdout__.write(plain + "\n")
+            sys.__stdout__.flush()
+            return
+        self._system_logs.append(text)
+        if len(self._system_logs) > self._logs_max:
+            self._system_logs = self._system_logs[-self._logs_max :]
+        self._update_status_line()
+
+    def _agent_badge(self, source: str) -> str:
+        normalized = (source or "main").strip().lower()
+        if normalized in {"sub", "subagent", "child"}:
+            return "[bold cyan][子][/bold cyan]"
+        return "[bold steel_blue1][主][/bold steel_blue1]"
+
+    def _prefixed_agent_lines(self, source: str, text: str) -> List[str]:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return []
+        badge = self._agent_badge(source)
+        continuation_prefix = "    [dim]|[/dim] "
+        lines: List[str] = []
+        for idx, raw in enumerate(cleaned.splitlines()):
+            line = raw.rstrip()
+            if not line:
+                continue
+            prefix = f"{badge} [dim]|[/dim] " if idx == 0 else continuation_prefix
+            lines.append(f"{prefix}{line}")
+        return lines
+
+    def _append_agent_block(self, source: str, text: str):
+        for line in self._prefixed_agent_lines(source, text):
+            self._append_conversation(line)
+
+    def add_delegation_evidence(self, summary: str, next_action: str = "", confidence: str = ""):
+        text = (summary or "").strip()
+        if not text:
+            return
+        parts = [f"[bold cyan]证据[/bold cyan] {text}"]
+        meta: List[str] = []
+        if confidence:
+            meta.append(f"置信度 {confidence}")
+        if next_action:
+            meta.append(f"下一步 {next_action}")
+        if meta:
+            parts.append("[dim]" + " | ".join(meta) + "[/dim]")
+        block = "\n".join(parts)
+        self._delegation_events.append(block)
+        if len(self._delegation_events) > 8:
+            self._delegation_events = self._delegation_events[-8:]
+        self._append_agent_block("sub", block)
+        self._update_status_line()
+
+    def start_subagent_activity(self, task_type: str, goal: str, scope: Any = None):
+        self._current_subagent_thought_stream = ""
+        task = (task_type or "inspect").strip()
+        goal_text = self._compact_sentence(goal or "分析当前问题", limit=44)
+        lines = [f"[bold cyan]启动[/bold cyan] {task} | {goal_text}"]
+        if scope not in (None, "", {}, []):
+            lines.append(f"[dim]范围 {self._compact_value(scope, 52)}[/dim]")
+        lines.append("[dim]状态 已派发，等待子 agent 回传[/dim]")
+        if isinstance(scope, dict):
+            scope_text = json.dumps(scope, ensure_ascii=False)
+            if "log_info" in scope_text and "conversation_" in scope_text:
+                lines.append("[dim]路径 先尝试快速日志诊断，必要时再拉起真实子 agent[/dim]")
+        block = "\n".join(lines)
+        self._subagent_process_events.append(block)
+        if len(self._subagent_process_events) > self._subagent_process_max:
+            self._subagent_process_events = self._subagent_process_events[-self._subagent_process_max:]
+        self._append_agent_block("sub", block)
+        self._update_status_line()
+
+    def add_subagent_process(self, text: str):
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return
+        self._subagent_process_events.append(cleaned)
+        if len(self._subagent_process_events) > self._subagent_process_max:
+            self._subagent_process_events = self._subagent_process_events[-self._subagent_process_max:]
+        self._append_agent_block("sub", cleaned)
+        self._update_status_line()
+
+    def set_subagent_thought(self, text: str):
+        cleaned = self._sanitize_thought_text(text)
+        if not cleaned:
+            return
+        lines = []
+        for raw in cleaned.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            wrapped = self._wrap_text_cells(line, 68)
+            lines.extend(wrapped if wrapped else [line])
+        compact = "\n".join(lines).strip()
+        if not compact:
+            return
+        self._subagent_thought_events.append(compact)
+        if len(self._subagent_thought_events) > self._subagent_thought_max:
+            self._subagent_thought_events = self._subagent_thought_events[-self._subagent_thought_max:]
+        self._append_agent_block("sub", "[yellow]思路[/yellow]\n" + compact)
+        self._update_status_line()
+
+    def stream_subagent_thought(self, text: str, done: bool = False):
+        cleaned = self._sanitize_thought_text(text)
+        self._current_subagent_thought_stream = cleaned
+        if done and cleaned:
+            self.set_subagent_thought(cleaned)
+            self._current_subagent_thought_stream = ""
+        self._update_status_line()
+
+    def _format_subagent_thought_block(self, text: str, *, width: int = 68, max_lines: int = 8) -> str:
+        cleaned = self._sanitize_thought_text(text)
+        if not cleaned:
+            return ""
+        lines = ["[yellow]思路[/yellow]"]
+        used = 0
+        for raw in cleaned.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            wrapped = self._wrap_text_cells(line, width)
+            wrapped = wrapped if wrapped else [line]
+            for chunk in wrapped:
+                lines.append(chunk)
+                used += 1
+                if used >= max_lines:
+                    return "\n".join(lines).strip()
+        return "\n".join(lines).strip()
+
+    def _format_subagent_process_block(self, text: str, *, width: int = 68, max_lines: int = 10) -> str:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return ""
+        lines = ["[cyan]回传过程[/cyan]"]
+        used = 0
+        for raw in cleaned.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            wrapped = self._wrap_text_cells(line, width)
+            wrapped = wrapped if wrapped else [line]
+            for chunk in wrapped:
+                lines.append(chunk)
+                used += 1
+                if used >= max_lines:
+                    return "\n".join(lines).strip()
+        return "\n".join(lines).strip()
+
+    def finish_subagent_activity(
+        self,
+        *,
+        status: str,
+        summary: str = "",
+        findings: Optional[List[Any]] = None,
+        evidence: Optional[List[Any]] = None,
+        next_action: str = "",
+        process: str = "",
+        thought: str = "",
+        mode_hint: str = "",
+    ):
+        verdict = (status or "completed").strip().lower()
+        label = {
+            "completed": "完成",
+            "success": "完成",
+            "ok": "完成",
+            "timeout": "超时",
+            "error": "异常",
+            "failed": "失败",
+        }.get(verdict, verdict or "完成")
+        lines = [f"[bold cyan]{label}[/bold cyan] {self._compact_sentence(summary or '子 agent 已返回', limit=52)}"]
+        findings = findings or []
+        evidence = evidence or []
+        if findings:
+            first = self._compact_sentence(str(findings[0]), limit=44)
+            lines.append(f"[dim]发现 {first}[/dim]")
+        elif evidence:
+            first = self._compact_sentence(str(evidence[0]), limit=44)
+            lines.append(f"[dim]证据 {first}[/dim]")
+        if next_action:
+            lines.append(f"[dim]建议 {self._compact_sentence(next_action, limit=44)}[/dim]")
+        if mode_hint:
+            lines.append(f"[dim]路径 {self._compact_sentence(mode_hint, limit=48)}[/dim]")
+        self.add_subagent_process("\n".join(lines))
+        if process:
+            process_block = self._format_subagent_process_block(process)
+            if process_block:
+                self.add_subagent_process(process_block)
+        if thought:
+            thought_block = self._format_subagent_thought_block(thought)
+            if thought_block:
+                self.add_subagent_process(thought_block)
+            self.stream_subagent_thought(thought, done=True)
+        else:
+            self._current_subagent_thought_stream = ""
+            self._update_status_line()
+
+    def _sanitize_thought_text(self, text: str) -> str:
+        cleaned = text or ""
+        cleaned = re.sub(r"</?(?:think|thinking)[^>]*>", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"<(?:think|thinking)?/?[^>\n]*$", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"<state>.*?</state>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+        cleaned = re.sub(r"<state>\s*.*$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+        cleaned = re.sub(r"</?[\w:-]*tool_call[^>]*>", "", cleaned, flags=re.IGNORECASE)
+        return cleaned.strip()
+
+    def stream_thought(self, text: str, done: bool = False):
+        cleaned = self._sanitize_thought_text(text)
+        self._current_thought_stream = cleaned
+        if done and cleaned:
+            self._thought_history.append(cleaned)
+            if len(self._thought_history) > self._thought_history_max:
+                self._thought_history = self._thought_history[-self._thought_history_max :]
+        self._update_status_line()
+
+    def clear_thought_stream(self):
+        self._current_thought_stream = ""
+        self._update_status_line()
+
+    def set_pet_mental_state(self, mood: str = "", feeling: str = "", whisper: str = ""):
+        self._pet_state.mental_mood = mood or ""
+        self._pet_state.mental_feeling = feeling or ""
+        self._pet_state.mental_whisper = whisper or ""
+        self._update_status_line()
+
+    def note_token_usage(self, input_tokens: int = 0, output_tokens: int = 0, observed: bool = True):
+        if observed:
+            input_count = max(0, int(input_tokens or 0))
+            output_count = max(0, int(output_tokens or 0))
+            self._turn_input_tokens += input_count
+            self._turn_output_tokens += output_count
+            self._total_input_tokens += input_count
+            self._total_output_tokens += output_count
+            self._save_runtime_totals()
+        else:
+            with self._runtime_lock:
+                self._runtime.missing_usage_rounds += 1
+        self._update_status_line()
+
+    def note_turn_result(self, success: bool, had_progress: bool = True):
+        with self._runtime_lock:
+            self._runtime.completed_rounds += 1
+            if success:
+                self._runtime.successful_rounds += 1
+            else:
+                self._runtime.failed_rounds += 1
+        if had_progress:
+            self._status = "SUCCESS" if success else "ERROR"
+        self._update_status_line()
+
+    def note_turn_start(self, turn: int):
+        with self._runtime_lock:
+            self._runtime.current_turn = max(0, int(turn or 0))
+        self._turn_input_tokens = 0
+        self._turn_output_tokens = 0
+        self._last_request_input_tokens = 0
+        self._update_status_line()
+
+    def _on_evolution_txn_closed(self, event):
+        data = event.data or {}
+        if str(data.get("status") or "").strip().lower() != "success":
+            return
+        txn_id = str(data.get("txn_id") or "").strip()
+        if txn_id and txn_id in self._seen_closed_evolution_txns:
+            return
+        if txn_id:
+            self._seen_closed_evolution_txns.add(txn_id)
+        self._completed_evolutions += 1
+        self._save_runtime_state()
+        self._update_status_line()
+
+    def note_context_window(self, current_tokens: int = 0, total_tokens: int = 0):
+        self._current_context_tokens = max(0, int(current_tokens or 0))
+        self._last_request_input_tokens = self._current_context_tokens
+        self._context_token_limit = max(0, int(total_tokens or 0))
+        self._update_status_line()
+
+    def _on_tool_start(self, event):
+        data = event.data or {}
+        with self._runtime_lock:
+            self._runtime.tool_starts += 1
+            self._runtime.last_tool_name = str(data.get("name") or "")
+            self._runtime.last_status = "ACTING"
+        if self._status not in {"THINKING", "PLANNING"}:
+            self._status = "ACTING"
+        self._update_status_line()
+
+    def _on_tool_success(self, event):
+        data = event.data or {}
+        with self._runtime_lock:
+            self._runtime.tool_successes += 1
+            self._runtime.last_tool_name = str(data.get("name") or "")
+            self._runtime.last_tool_success = True
+            self._runtime.last_status = "WORKING"
+            self._runtime.last_error = ""
+        if self._status not in {"THINKING", "PLANNING"}:
+            self._status = "WORKING"
+        self._update_status_line()
+
+    def _on_tool_error(self, event):
+        data = event.data or {}
+        with self._runtime_lock:
+            self._runtime.tool_errors += 1
+            self._runtime.last_tool_name = str(data.get("name") or "")
+            self._runtime.last_tool_success = False
+            self._runtime.last_status = "ERROR"
+            self._runtime.last_error = str(data.get("error") or "")[:120]
+        if self._status not in {"THINKING", "PLANNING"}:
+            self._status = "ERROR"
+        self._update_status_line()
+
+    def _on_validation_completed(self, event):
+        data = event.data or {}
+        passed = bool(data.get("passed"))
+        with self._runtime_lock:
+            if passed:
+                self._runtime.validation_passes += 1
+            else:
+                self._runtime.validation_failures += 1
+            self._runtime.last_validation_kind = str(data.get("kind") or "")
+            self._runtime.last_validation_passed = passed
+        self._update_status_line()
+
+    @staticmethod
+    def _contains_any(text: str, words: List[str]) -> bool:
+        lowered = (text or "").lower()
+        return any(word.lower() in lowered for word in words)
+
+    def _get_pet_stage_status(self) -> str:
+        mood = self._pet_state.mental_mood
+        feeling = self._pet_state.mental_feeling
+        whisper = self._pet_state.mental_whisper
+
+        if self._contains_any(whisper, ["compress", "拥挤", "暂停"]):
+            return "tired"
+        if mood == "疲惫":
+            return "tired"
+        if mood == "焦虑":
+            return "confused"
+        if mood == "迷茫":
+            return "confused"
+        if mood == "自信":
+            return "success"
+        if mood == "专注":
+            return "thinking"
+        if self._contains_any(feeling, ["thrashing", "looping", "焦虑", "重复"]):
+            return "confused"
+        if self._contains_any(feeling, ["productive", "confident", "顺畅"]):
+            return "success"
+        if self._current_thought_stream or self._status in {"THINKING", "PLANNING"}:
+            return "thinking"
+        if self._status in {"ERROR", "FAILED"}:
+            return "sad"
+        if self._status in {"SUCCESS", "DONE"}:
+            return "success"
+        if self._status in {"SLEEPING", "PAUSED"}:
+            return "sleeping"
+        if self._status in {"WORKING", "ACTING", "RUNNING"}:
+            return "working"
+        return "idle"
+
+    def _derive_pet_behavior(self) -> Dict[str, Any]:
+        status = self._get_pet_stage_status()
+        feeling = self._pet_state.mental_feeling
+        whisper = self._pet_state.mental_whisper
+        stage_width = 18
+
+        profile = {
+            "pose": "idle",
+            "target_zone": "center_zone",
+            "interval": 0.45,
+            "step": 1,
+            "wander": 1,
+        }
+
+        if status == "thinking":
+            profile.update({"pose": "think", "target_zone": "bubble_zone", "interval": 0.55, "step": 1, "wander": 0})
+        elif status == "success":
+            profile.update({"pose": "walk", "target_zone": "center_zone", "interval": 0.30, "step": 2, "wander": 3})
+        elif status == "working":
+            profile.update({"pose": "walk", "target_zone": "center_zone", "interval": 0.28, "step": 2, "wander": 2})
+        elif status == "sleeping":
+            profile.update({"pose": "sleep", "target_zone": "rest_zone", "interval": 0.85, "step": 1, "wander": 0})
+        elif status == "tired":
+            profile.update({"pose": "tired", "target_zone": "rest_zone", "interval": 0.72, "step": 1, "wander": 0})
+        elif status == "confused":
+            profile.update({"pose": "confused", "target_zone": "bubble_zone", "interval": 0.40, "step": 1, "wander": 2})
+        elif status == "sad":
+            profile.update({"pose": "sad", "target_zone": "rest_zone", "interval": 0.65, "step": 1, "wander": 0})
+
+        if self._contains_any(feeling, ["disoriented", "tunnel", "迷茫"]):
+            profile["wander"] = max(profile["wander"], 2)
+            profile["interval"] = max(profile["interval"], 0.52)
+        if self._contains_any(feeling, ["productive", "confident", "顺畅"]):
+            profile["step"] = max(profile["step"], 2)
+            profile["interval"] = min(profile["interval"], 0.30)
+        if self._contains_any(whisper, ["暂停", "重新审视"]):
+            profile["pose"] = "confused"
+            profile["step"] = 0
+        if self._contains_any(whisper, ["compress", "拥挤"]):
+            profile["pose"] = "tired"
+            profile["target_zone"] = "rest_zone"
+
+        base_targets = {
+            "rest_zone": 2,
+            "center_zone": stage_width // 2,
+            "bubble_zone": stage_width - 2,
+        }
+        target = base_targets[profile["target_zone"]]
+        if profile["wander"] > 0:
+            wobble = ((self._pet_pose_tick // 2) % (profile["wander"] * 2 + 1)) - profile["wander"]
+            target = max(0, min(stage_width, target + wobble))
+
+        return {
+            "status": status,
+            "pose": profile["pose"],
+            "target_zone": profile["target_zone"],
+            "target_offset": target,
+            "interval": profile["interval"],
+            "step": profile["step"],
+            "stage_width": stage_width,
+        }
+
+    def _step_pet_animation(self):
+        behavior = self._derive_pet_behavior()
+        self._pet_pose_tick = (self._pet_pose_tick + 1) % 1000
+        self._pet_state.work_state = self._status.lower()
+        self._pet_state.target_zone = behavior["target_zone"]
+
+        target = behavior["target_offset"]
+        current = self._pet_walk_offset
+        desired_direction = self._pet_state.direction
+        if target > current:
+            desired_direction = "right"
+        elif target < current:
+            desired_direction = "left"
+
+        if self._pet_state.turn_progress > 0:
+            self._pet_state.pose = "turn"
+            self._pet_state.frame_index = (self._pet_state.frame_index + 1) % 2
+            self._pet_state.turn_progress -= 1
+            if self._pet_state.turn_progress == 0:
+                self._pet_state.direction = self._pet_state.pending_direction
+                self._pet_walk_direction = 1 if self._pet_state.direction == "right" else -1
+            return
+
+        if desired_direction != self._pet_state.direction and abs(target - current) > 0:
+            self._pet_state.pending_direction = desired_direction
+            self._pet_state.turn_progress = 2
+            self._pet_state.pose = "turn"
+            self._pet_state.frame_index = 0
+            return
+
+        step = behavior["step"]
+        moved = False
+        if step > 0 and abs(target - current) > 0:
+            delta = min(step, abs(target - current))
+            self._pet_walk_offset += delta if target > current else -delta
+            moved = True
+
+        self._pet_state.direction = desired_direction
+        self._pet_walk_direction = 1 if self._pet_state.direction == "right" else -1
+
+        if behavior["pose"] == "sleep":
+            self._pet_state.pose = "sleep"
+            self._pet_state.frame_index = 0 if (self._pet_pose_tick % 6 < 3) else 1
+        elif moved:
+            self._pet_state.pose = "walk" if behavior["pose"] not in {"think", "confused", "tired", "sad"} else behavior["pose"]
+            self._pet_state.frame_index = (self._pet_state.frame_index + 1) % 2
+        else:
+            self._pet_state.pose = behavior["pose"]
+            self._pet_state.frame_index = (self._pet_pose_tick // 2) % 2 if behavior["pose"] in {"success", "confused"} else 0
+
+    def _animation_loop(self):
+        while self._pet_anim_running:
+            self._step_pet_animation()
+            self._update_status_line()
+            interval = self._derive_pet_behavior()["interval"]
+            time.sleep(interval)
+
+    def _start_pet_animation(self):
+        if UIManager._test_mode or self._pet_anim_running:
+            return
+        self._pet_anim_running = True
+        self._pet_anim_thread = threading.Thread(target=self._animation_loop, name="pet-ui-anim", daemon=True)
+        self._pet_anim_thread.start()
+
+    def _stop_pet_animation(self):
+        self._pet_anim_running = False
+        if self._pet_anim_thread and self._pet_anim_thread.is_alive():
+            self._pet_anim_thread.join(timeout=1.0)
+        self._pet_anim_thread = None
+
+    @staticmethod
+    def _compact_value(value: Any, limit: int = 36) -> str:
+        if isinstance(value, bool):
+            text = "true" if value else "false"
+        elif value is None:
+            text = "null"
+        elif isinstance(value, (int, float)):
+            text = str(value)
+        elif isinstance(value, (list, tuple)):
+            text = f"[{len(value)} items]"
+        elif isinstance(value, dict):
+            text = f"{{{len(value)} keys}}"
+        else:
+            text = str(value).replace("\n", " ").strip()
+        if cell_len(text) <= limit:
+            return text
+        fitted = UIManager._fit_text_cells(text, max(1, limit - 1))
+        return fitted if fitted else text
+
+    def _format_tool_args(self, args: Dict[str, Any] | None) -> str:
+        if not args:
+            return ""
+        parts = []
+        for key, value in list(args.items())[:3]:
+            parts.append(f"{key}={self._compact_value(value, 28)}")
+        extra = len(args) - len(parts)
+        if extra > 0:
+            parts.append(f"+{extra} more")
+        return " | ".join(parts)
+
+    def _format_tool_result_lines(self, result: Any) -> List[str]:
+        if result is None:
+            return ["No result"]
+
+        raw = result if isinstance(result, str) else str(result)
+        text = raw.strip()
+        if not text:
+            return ["Empty result"]
+
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = None
+
+        if isinstance(parsed, dict):
+            lines: List[str] = []
+            headline_parts = []
+            for key in ("status", "message", "summary", "subject"):
+                value = parsed.get(key)
+                if value not in (None, "", [], {}):
+                    headline_parts.append(f"{key}: {self._compact_value(value, 72)}")
+            if headline_parts:
+                lines.append(" | ".join(headline_parts[:2]))
+
+            for key in ("count", "path", "change_type", "txn_id", "transaction_status", "dirty_summary"):
+                if key in parsed and parsed[key] not in (None, "", [], {}):
+                    lines.append(f"{key}: {self._compact_value(parsed[key], 72)}")
+
+            remaining_keys = [
+                key for key in parsed.keys()
+                if key not in {"status", "message", "summary", "subject", "count", "path", "change_type", "txn_id", "transaction_status", "dirty_summary"}
+            ]
+            if remaining_keys and len(lines) < 5:
+                lines.append("fields: " + ", ".join(remaining_keys[:6]))
+            return lines[:5] or ["Object result"]
+
+        if isinstance(parsed, list):
+            lines = [f"{len(parsed)} items"]
+            if parsed:
+                first = parsed[0]
+                if isinstance(first, dict):
+                    preview_keys = [key for key in ("path", "summary", "subject", "name", "status") if key in first]
+                    if preview_keys:
+                        lines.append("first: " + " | ".join(
+                            f"{key}={self._compact_value(first[key], 48)}" for key in preview_keys[:3]
+                        ))
+                    else:
+                        lines.append(f"first item: {{{len(first)} keys}}")
+                else:
+                    lines.append("first: " + self._compact_value(first, 72))
+            return lines[:4]
+
+        cleaned_lines = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped:
+                cleaned_lines.append(stripped)
+        if not cleaned_lines:
+            return ["Text result"]
+        return [self._compact_value(line, 96) for line in cleaned_lines[:4]]
+
+    def _summarize_tool_result(self, result: Any) -> str:
+        lines = self._format_tool_result_lines(result)
+        if not lines:
+            return "done"
+        first = lines[0]
+        if len(lines) > 1 and not first.startswith("status:") and not first.startswith("message:"):
+            return f"{first} | {lines[1]}"
+        return first
+
+    def _humanize_work_state(self) -> str:
+        mapping = {
+            "IDLE": "待机",
+            "THINKING": "思考中",
+            "PLANNING": "规划中",
+            "WORKING": "执行中",
+            "ACTING": "行动中",
+            "RUNNING": "运行中",
+            "SUCCESS": "顺利",
+            "DONE": "完成",
+            "ERROR": "异常",
+            "FAILED": "失败",
+            "SLEEPING": "休眠",
+            "PAUSED": "暂停",
+        }
+        return mapping.get(self._status, self._status.title())
+
+    def _compact_sentence(self, text: str, limit: int = 18) -> str:
+        cleaned = (text or "").replace("\n", " ").strip()
+        if not cleaned:
+            return ""
+        return self._fit_text_cells(cleaned, limit)
+
+    @staticmethod
+    def _fit_text_cells(text: str, width: int) -> str:
+        if width <= 0:
+            return ""
+        text = (text or "").strip()
+        if not text:
+            return ""
+
+        current = ""
+        for ch in text:
+            if cell_len(current + ch) > width:
+                break
+            current += ch
+
+        if current == text or width < 2:
+            return current
+
+        ellipsis = "…"
+        while current and cell_len(current + ellipsis) > width:
+            current = current[:-1]
+        return current + ellipsis if current else ellipsis
+
+    def _wrap_text_cells(self, text: str, width: int) -> List[str]:
+        if width <= 0:
+            return []
+        text = (text or "").strip()
+        if not text:
+            return []
+
+        lines: List[str] = []
+        current = ""
+        for ch in text:
+            if ch == "\n":
+                if current.strip():
+                    lines.append(current.rstrip())
+                current = ""
+                continue
+            if cell_len(current + ch) > width:
+                if current.strip():
+                    lines.append(current.rstrip())
+                current = ch
+            else:
+                current += ch
+        if current.strip():
+            lines.append(current.rstrip())
+        return lines
+
+    def _build_mental_bubble_lines(self, width: int = 14, max_lines: int = 4) -> List[str]:
+        snippets: List[str] = []
+        if self._pet_state.mental_mood:
+            snippets.append(self._pet_state.mental_mood)
+        if self._pet_state.mental_whisper:
+            snippets.append(self._pet_state.mental_whisper)
+        if self._pet_state.mental_feeling:
+            snippets.append(self._pet_state.mental_feeling)
+
+        cleaned: List[str] = []
+        for snippet in snippets:
+            wrapped = self._wrap_text_cells(snippet, width)
+            cleaned.extend(wrapped[:max_lines])
+            if len(cleaned) >= max_lines:
+                return cleaned[:max_lines]
+
+        stream = self._sanitize_thought_text(self._current_thought_stream)
+        if stream:
+            wrapped = []
+            for raw_line in stream.splitlines():
+                wrapped.extend(self._wrap_text_cells(raw_line, width))
+            wrapped = [line for line in wrapped if line.strip()]
+            if wrapped:
+                return wrapped[-max_lines:]
+
+        return cleaned[:max_lines]
+
+    @staticmethod
+    def _get_subagent_companion_art(direction: str = "right") -> List[str]:
+        if direction == "left":
+            return [
+                r" /\_",
+                r"(oo )",
+                r" / \ ",
+            ]
+        return [
+            r"_/\ ",
+            r"( oo)",
+            r" / \ ",
+        ]
+
+    @staticmethod
+    def _merge_stage_line(existing: str, companion_markup: str, companion_offset: int) -> str:
+        if not existing:
+            return " " * max(0, companion_offset) + companion_markup
+        plain_existing = re.sub(r"\[[^\]]+\]", "", existing)
+        existing_indent = len(plain_existing) - len(plain_existing.lstrip(" "))
+        if companion_offset <= existing_indent:
+            companion_width = len(re.sub(r"\[[^\]]+\]", "", companion_markup))
+            gap = max(1, existing_indent - companion_offset - companion_width)
+            return " " * max(0, companion_offset) + companion_markup + " " * gap + existing.lstrip(" ")
+        return existing + " " * max(1, companion_offset - len(plain_existing)) + companion_markup
+
+    def _render_pet_stage(self) -> str:
+        canvas_width = 46
+        stage_height = 13
+        art = self.avatar.get_pose_art(
+            pose=self._pet_state.pose,
+            direction=self._pet_state.direction,
+            frame_index=self._pet_state.frame_index,
+            variant=self._pet_state.mental_mood or None,
+        ).strip("\n").splitlines()
+        sprite_width = max(len(line) for line in art) if art else 0
+        stage_width = max(6, canvas_width - sprite_width - 2)
+        offset = min(self._pet_walk_offset, stage_width)
+        bubble_lines = self._build_mental_bubble_lines(width=14, max_lines=4)
+        bubble_width = min(max((cell_len(line) for line in bubble_lines), default=0), 14)
+        art_head_row = 0
+        art_head_col = 0
+        for idx, line in enumerate(art):
+            marker_positions = [pos for pos in (line.find("(oo)"), line.find("(??)"), line.find("(^^)"), line.find("(OO)"), line.find("(--)"), line.find("(;;)"), line.find("(<<)")) if pos >= 0]
+            if marker_positions:
+                art_head_row = idx
+                art_head_col = marker_positions[0] + 2
+                break
+
+        head_x = min(canvas_width - 1, max(0, offset + art_head_col))
+        if self._pet_state.direction == "left":
+            bubble_anchor = min(
+                max(head_x - 4, 0),
+                max(canvas_width - bubble_width - 4, 0),
+            )
+        else:
+            bubble_anchor = min(
+                max(head_x - bubble_width + 2, 0),
+                max(canvas_width - bubble_width - 4, 0),
+            )
+        bubble_head_pad = bubble_anchor
+
+        bubble_rendered: List[str] = []
+        if bubble_lines:
+            top_border = f"[yellow]╭{'─' * (bubble_width + 2)}╮[/yellow]"
+            bubble_rendered.append(" " * bubble_head_pad + top_border)
+            for line in bubble_lines:
+                padded = line + " " * max(bubble_width - cell_len(line), 0)
+                bubble_rendered.append(" " * bubble_head_pad + f"[yellow]│[/yellow] {padded} [yellow]│[/yellow]")
+            tail_chars = [" "] * (bubble_width + 4)
+            tail_chars[0] = "╰"
+            for idx in range(1, bubble_width + 3):
+                tail_chars[idx] = "─"
+            tail_chars[bubble_width + 3] = "╯"
+            tail_offset = max(1, min(bubble_width + 2, head_x - bubble_anchor))
+            tail_chars[tail_offset] = "o"
+            tail_text = "".join(tail_chars)
+            bubble_rendered.append(" " * bubble_head_pad + f"[yellow]{tail_text}[/yellow]")
+
+        art_rendered = []
+        for idx, line in enumerate(art):
+            wobble = 1 if (self._pet_pose_tick % 2 and idx in (1, 4) and self._pet_state.pose in {"walk", "success"}) else 0
+            art_rendered.append(" " * max(offset - wobble, 0) + line)
+
+        rendered = [""] * stage_height
+        max_content_row = stage_height - 2
+
+        for idx, line in enumerate(bubble_rendered[:max_content_row]):
+            rendered[idx] = line
+
+        bubble_reserved_rows = len(bubble_rendered) + (1 if bubble_rendered else 0)
+        art_start = max(bubble_reserved_rows, max_content_row - len(art_rendered))
+        art_start = max(0, min(art_start, max_content_row - len(art_rendered)))
+        for idx, line in enumerate(art_rendered):
+            row = art_start + idx
+            if 0 <= row < max_content_row:
+                rendered[row] = line
+
+        try:
+            from core.infrastructure.agent_session import get_session_state
+
+            attention = get_session_state().get_attention_snapshot()
+            active_delegation = attention.get("active_delegation")
+        except Exception:
+            active_delegation = None
+
+        if active_delegation:
+            companion_art = self._get_subagent_companion_art(self._pet_state.direction)
+            companion_width = max(len(line) for line in companion_art)
+            left_slot = offset - companion_width - 2
+            right_slot = offset + sprite_width + 2
+            max_offset = max(0, canvas_width - companion_width - 1)
+            if self._pet_state.direction == "right":
+                preferred_offset = left_slot
+                fallback_offset = right_slot
+            else:
+                preferred_offset = right_slot
+                fallback_offset = left_slot
+            if 0 <= preferred_offset <= max_offset:
+                companion_offset = preferred_offset
+            elif 0 <= fallback_offset <= max_offset:
+                companion_offset = fallback_offset
+            else:
+                companion_offset = max(0, min(preferred_offset, max_offset))
+            companion_start = min(max_content_row - len(companion_art), max(art_start + 1, 0))
+            for idx, line in enumerate(companion_art):
+                row = companion_start + idx
+                if 0 <= row < max_content_row:
+                    existing = rendered[row] or ""
+                    companion_line = f"[bright_black]{line}[/bright_black]"
+                    rendered[row] = self._merge_stage_line(existing, companion_line, companion_offset)
+
+        rendered[-1] = "." * canvas_width
+        return "\n".join(rendered)
+
+    # ======================== 渲染 ========================
+
+    @staticmethod
+    def _make_bar(value: int, max_val: int = 100, width: int = 10) -> str:
+        pct = max(0, min(value, max_val)) / max(max_val, 1)
+        filled = int(pct * width)
+        return "█" * filled + "░" * (width - filled)
+
+    def _get_pet_snapshot(self) -> Dict[str, Any]:
+        snapshot = {
+            "name": "Baby Claw",
+            "level": 1,
+            "age": 0,
+            "mood": 100,
+            "hunger": 100,
+            "energy": 100,
+            "health": 100,
+            "love": 100,
+            "exp": 0,
+            "exp_max": 100,
+            "daily_tokens": 0,
+            "total_tokens": 0,
+        }
+        try:
+            pet = get_pet()
+            attrs = pet.data.attributes
+            snapshot.update(
+                {
+                    "name": attrs.name or snapshot["name"],
+                    "level": attrs.level,
+                    "age": self._completed_evolutions,
+                    "mood": attrs.mood,
+                    "hunger": attrs.hunger,
+                    "energy": int(attrs.energy),
+                    "health": attrs.health,
+                    "love": attrs.love,
+                    "exp": attrs.exp,
+                    "exp_max": attrs.exp_to_next,
+                    "daily_tokens": pet.data.hunger.daily_tokens,
+                    "total_tokens": pet.data.hunger.total_tokens,
+                }
+            )
+        except Exception:
+            pass
+        return snapshot
+
+    @staticmethod
+    def _clamp_metric(value: int) -> int:
+        return max(0, min(int(value), 100))
+
+    def _derive_runtime_metrics(self, pet: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from core.infrastructure.agent_session import get_session_state
+
+            attention = get_session_state().get_attention_snapshot()
+        except Exception:
+            attention = {
+                "recent_validation_results": [],
+                "recent_blockers": [],
+                "language_drift_count": 0,
+                "diagnostic_phase": "idle",
+                "diagnostic_drift": False,
+                "feedback_loop_ready": False,
+                "scope_frozen": False,
+                "convergence_state": "open",
+            }
+
+        with self._runtime_lock:
+            runtime = RuntimeTelemetry(**self._runtime.__dict__)
+
+        current_turn = max(0, int(runtime.current_turn or 0))
+        react_step = max(0, int(self._iterations or 0))
+        completed_rounds = max(0, int(runtime.completed_rounds or 0))
+        pet_age = max(0, int(pet.get("age") or 0))
+
+        spirit_factors: List[tuple[str, int]] = []
+        energy_factors: List[tuple[str, int]] = []
+        stability_factors: List[tuple[str, int]] = []
+        bond_factors: List[tuple[str, int]] = []
+
+        mood_bonus = {
+            "自信": 14,
+            "专注": 8,
+            "焦虑": -12,
+            "迷茫": -10,
+            "疲惫": -14,
+        }.get(self._pet_state.mental_mood, 0)
+        if mood_bonus:
+            spirit_factors.append((self._pet_state.mental_mood or "情绪", mood_bonus))
+        status_bonus = {
+            "SUCCESS": 10,
+            "DONE": 8,
+            "WORKING": 4,
+            "ACTING": 3,
+            "THINKING": 2,
+            "ERROR": -12,
+            "FAILED": -16,
+            "COMPRESSING": -8,
+        }.get(self._status, 0)
+        if status_bonus:
+            spirit_factors.append((self._humanize_work_state(), status_bonus))
+
+        validation_delta = runtime.validation_passes * 4 - runtime.validation_failures * 9
+        tool_delta = runtime.tool_successes * 2 - runtime.tool_errors * 5
+        blocking_items = [
+            item for item in (attention.get("recent_blockers") or [])
+            if str(item.get("severity") or "block").lower() != "hint"
+        ]
+        blocker_penalty = min(len(blocking_items) * 3, 15)
+        drift_penalty = 8 if attention.get("diagnostic_drift") else 0
+        freeze_bonus = 4 if attention.get("scope_frozen") else 0
+        if runtime.validation_passes:
+            spirit_factors.append((f"验证通过x{runtime.validation_passes}", runtime.validation_passes * 4))
+        if runtime.validation_failures:
+            spirit_factors.append((f"验证失败x{runtime.validation_failures}", -(runtime.validation_failures * 9)))
+        if runtime.tool_successes:
+            spirit_factors.append((f"工具成功x{runtime.tool_successes}", runtime.tool_successes * 2))
+        if runtime.tool_errors:
+            spirit_factors.append((f"工具错误x{runtime.tool_errors}", -(runtime.tool_errors * 5)))
+        if blocker_penalty:
+            spirit_factors.append(("阻塞点", -blocker_penalty))
+        spirit = self._clamp_metric(68 + mood_bonus + status_bonus + validation_delta + tool_delta - blocker_penalty + freeze_bonus)
+        if freeze_bonus:
+            spirit_factors.append(("范围冻结", freeze_bonus))
+
+        token_pressure = 0
+        total_tokens = max(0, int(pet.get("daily_tokens") or 0))
+        if total_tokens > 0:
+            token_pressure = min(18, total_tokens // 4000)
+        whisper_pressure = 10 if self._contains_any(self._pet_state.mental_whisper, ["compress", "拥挤", "暂停"]) else 0
+        energy_penalty = blocker_penalty + drift_penalty + whisper_pressure + token_pressure
+        if blocker_penalty:
+            energy_factors.append(("阻塞堆积", -blocker_penalty))
+        if drift_penalty:
+            energy_factors.append(("诊断漂移", -drift_penalty))
+        if whisper_pressure:
+            energy_factors.append(("压缩警报", -whisper_pressure))
+        if token_pressure:
+            energy_factors.append(("上下文压力", -token_pressure))
+        if self._status in {"THINKING", "PLANNING"}:
+            energy_penalty += 4
+            energy_factors.append((self._humanize_work_state(), -4))
+        if attention.get("scope_frozen"):
+            energy_penalty = max(0, energy_penalty - 2)
+            energy_factors.append(("范围收束", 2))
+        if self._status in {"ERROR", "FAILED"}:
+            energy_penalty += 8
+            energy_factors.append((self._humanize_work_state(), -8))
+        if self._status in {"SUCCESS", "DONE"}:
+            energy_penalty -= 4
+            energy_factors.append((self._humanize_work_state(), 4))
+        if runtime.successful_rounds:
+            energy_factors.append((f"顺利回合x{runtime.successful_rounds}", runtime.successful_rounds * 2))
+        if runtime.failed_rounds:
+            energy_factors.append((f"失败回合x{runtime.failed_rounds}", -(runtime.failed_rounds * 4)))
+        energy = self._clamp_metric(82 - energy_penalty + runtime.successful_rounds * 2 - runtime.failed_rounds * 4)
+
+        recent_validations = attention.get("recent_validation_results") or []
+        passed_recent = sum(1 for item in recent_validations if item.get("passed"))
+        failed_recent = sum(1 for item in recent_validations if not item.get("passed"))
+        if passed_recent:
+            stability_factors.append((f"近期验证通过x{passed_recent}", passed_recent * 6))
+        if failed_recent:
+            stability_factors.append((f"近期验证失败x{failed_recent}", -(failed_recent * 12)))
+        if runtime.tool_errors:
+            stability_factors.append((f"工具错误x{runtime.tool_errors}", -(runtime.tool_errors * 4)))
+        if runtime.tool_successes:
+            stability_factors.append((f"工具成功x{runtime.tool_successes}", runtime.tool_successes))
+        if drift_penalty:
+            stability_factors.append(("诊断漂移", -drift_penalty))
+        stability = self._clamp_metric(
+            76
+            + passed_recent * 6
+            - failed_recent * 12
+            - runtime.tool_errors * 4
+            + runtime.tool_successes
+            - drift_penalty
+        )
+
+        token_bond = min((pet.get("total_tokens") or 0) // 3000, 10)
+        if runtime.successful_rounds:
+            bond_factors.append((f"顺利回合x{runtime.successful_rounds}", runtime.successful_rounds * 5))
+        if runtime.validation_passes:
+            bond_factors.append((f"验证通过x{runtime.validation_passes}", runtime.validation_passes * 3))
+        if token_bond:
+            bond_factors.append(("长期摄食", token_bond))
+        if runtime.failed_rounds:
+            bond_factors.append((f"失败回合x{runtime.failed_rounds}", -(runtime.failed_rounds * 4)))
+        if runtime.validation_failures:
+            bond_factors.append((f"验证失败x{runtime.validation_failures}", -(runtime.validation_failures * 3)))
+        bond = self._clamp_metric(
+            45
+            + runtime.successful_rounds * 5
+            + runtime.validation_passes * 3
+            + token_bond
+            - runtime.failed_rounds * 4
+            - runtime.validation_failures * 3
+        )
+
+        status_note = self._humanize_work_state()
+        if runtime.last_validation_kind:
+            verdict = "通过" if runtime.last_validation_passed else "失败"
+            status_note = f"{status_note} / {runtime.last_validation_kind}:{verdict}"
+        elif runtime.last_tool_name:
+            verb = "完成" if runtime.last_tool_success else "受阻"
+            status_note = f"{status_note} / {runtime.last_tool_name}:{verb}"
+
+        reading_task = str(attention.get("reading_task") or "")
+        reading_recommendation = str(attention.get("reading_recommendation") or "")
+        reading_sufficiency = str(attention.get("reading_sufficiency") or "")
+        next_tool_intent = str(attention.get("next_tool_intent") or "")
+        recommended_tools = list(attention.get("recommended_tools") or [])
+        avoid_tools = list(attention.get("avoid_tools") or [])
+        active_delegation = attention.get("active_delegation") or {}
+        feedback_loop_ready = bool(attention.get("feedback_loop_ready"))
+        feedback_loop_type = str(attention.get("feedback_loop_type") or "")
+        feedback_loop_target = str(attention.get("feedback_loop_target") or "")
+        scope_frozen = bool(attention.get("scope_frozen"))
+        scope_anchor = str(attention.get("scope_anchor") or "")
+        convergence_state = str(attention.get("convergence_state") or "open")
+        stop_reason = str(attention.get("stop_reason") or "")
+        delegation_running = bool(active_delegation)
+        delegation_label = ""
+        if delegation_running:
+            delegation_goal = str(active_delegation.get("goal") or "").strip()
+            delegation_type = str(active_delegation.get("task_type") or "inspect").strip()
+            delegation_label = f"{delegation_type}: {self._compact_sentence(delegation_goal, 20)}"
+            status_note = f"{status_note} / 子agent干活中"
+
+        def summarize_factors(items: List[tuple[str, int]], limit: int = 2) -> List[tuple[str, int]]:
+            if not items:
+                return []
+            return sorted(items, key=lambda item: abs(item[1]), reverse=True)[:limit]
+
+        return {
+            "current_turn": current_turn,
+            "react_step": react_step,
+            "completed_rounds": completed_rounds,
+            "pet_age": pet_age,
+            "spirit": spirit,
+            "energy": energy,
+            "stability": stability,
+            "bond": bond,
+            "status_note": status_note,
+            "spirit_explain": summarize_factors(spirit_factors),
+            "energy_explain": summarize_factors(energy_factors),
+            "stability_explain": summarize_factors(stability_factors),
+            "bond_explain": summarize_factors(bond_factors),
+            "reading_task": reading_task,
+            "reading_recommendation": reading_recommendation,
+            "reading_sufficiency": reading_sufficiency,
+            "next_tool_intent": next_tool_intent,
+            "recommended_tools": recommended_tools,
+            "avoid_tools": avoid_tools,
+            "delegation_running": delegation_running,
+            "delegation_label": delegation_label,
+            "feedback_loop_ready": feedback_loop_ready,
+            "feedback_loop_type": feedback_loop_type,
+            "feedback_loop_target": feedback_loop_target,
+            "scope_frozen": scope_frozen,
+            "scope_anchor": scope_anchor,
+            "convergence_state": convergence_state,
+            "stop_reason": stop_reason,
+            "reading_task_label": humanize_reading_task(reading_task),
+            "next_tool_intent_label": humanize_tool_intent(next_tool_intent),
+            "recommended_tools_label": humanize_tool_chain(recommended_tools, limit=3),
+            "avoid_tools_label": " / ".join(humanize_tool_name(name) for name in avoid_tools[:2]),
+        }
+
+    def _format_metric_explain(self, label: str, items: List[tuple[str, int]]) -> str:
+        if not items:
+            return f"[dim]  {label}: 平稳[/dim]"
+        parts = []
+        for item_label, delta in items:
+            color = "green" if delta > 0 else "red"
+            sign = "+" if delta > 0 else ""
+            parts.append(f"[{color}]{item_label}{sign}{delta}[/{color}]")
+        return f"[dim]  {label}: [/dim]" + "[dim] / [/dim]".join(parts)
+
+    def _build_thought_text(self, width: int = 58, max_lines: int = 26) -> str:
+        current = self._current_thought_stream.strip()
+        if current:
+            lines = current.splitlines()
+        elif self._thought_history:
+            lines = self._thought_history[-1].splitlines()
+        else:
+            lines = ["等待思考..."]
+
+        cleaned: List[str] = []
+        for raw in lines:
+            line = raw.strip()
+            if not line:
+                if cleaned and cleaned[-1] != "":
+                    cleaned.append("")
+                continue
+            cleaned.extend(self._wrap_text_cells(line, width))
+
+        if len(cleaned) > max_lines:
+            cleaned = cleaned[-max_lines:]
+        return "\n".join(cleaned) or "等待思考..."
+
+    def _build_live_thought_block(self, title: str, text: str, *, width: int = 68, max_lines: int = 8) -> List[str]:
+        cleaned = self._sanitize_thought_text(text)
+        if not cleaned:
+            return []
+        lines = [f"[yellow]{title}[/yellow]"]
+        used = 0
+        for raw in cleaned.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            wrapped = self._wrap_text_cells(line, width)
+            wrapped = wrapped if wrapped else [line]
+            for chunk in wrapped:
+                lines.append(chunk)
+                used += 1
+                if used >= max_lines:
+                    return lines
+        return lines
+
+    def _pad_lines(self, lines: List[str], size: int, filler: str = "[dim]·[/dim]") -> List[str]:
+        padded = list(lines[:size])
+        if len(padded) < size:
+            padded.extend([filler] * (size - len(padded)))
+        return padded
+
+    def _build_info_module(
+        self,
+        title: str,
+        lines: List[str],
+        *,
+        border_style: str = "bright_black",
+        filler: str = "[dim]·[/dim]",
+    ) -> Panel:
+        return Panel(
+            Group(*[Text.from_markup(line) for line in self._pad_lines(lines, 3, filler=filler)]),
+            title=title,
+            border_style=border_style,
+            box=ROUNDED,
+            padding=(0, 1),
+            expand=True,
+        )
+
+    def _build_stage_caption(self, runtime_metrics: Dict[str, Any]) -> List[str]:
+        focus = runtime_metrics["next_tool_intent_label"] or runtime_metrics["reading_task_label"] or "等待下一步"
+        anchor = self._compact_sentence(runtime_metrics["scope_anchor"], 26) or "未固定"
+        tool_hint = runtime_metrics["recommended_tools_label"] or "按上下文选择"
+        return [
+            f"[cyan]焦点[/cyan]  [white]{self._compact_sentence(focus, 28)}[/white]",
+            f"[magenta]锚点[/magenta]  [white]{anchor}[/white]",
+            f"[green]建议[/green]  [white]{self._compact_sentence(tool_hint, 28)}[/white]",
+        ]
+
+    def _is_workspace_summary_line(self, text: str) -> bool:
+        plain = re.sub(r"\[[^\]]+\]", "", (text or "")).strip()
+        if not plain:
+            return False
+        noise_prefixes = (
+            "Vibelution 模型：",
+            "输入任务，或打开工作台菜单开始。",
+            "Tasks",
+            "记忆状态：",
+            "--------------------------------------------------",
+            "━━━━━━━━",
+            "mode=",
+        )
+        if any(plain.startswith(prefix) for prefix in noise_prefixes):
+            return False
+        if plain.startswith("[PromptManager]"):
+            return False
+        return True
+
+    def _build_workspace_summary_lines(self) -> List[str]:
+        lines = [line for line in self._conversation_events if self._is_workspace_summary_line(line)]
+        if not lines:
+            return ["[dim]当前轮以工具探索为主，暂无自然语言结论。[/dim]"]
+        return lines[-24:]
+
+    def _build_pet_panel(self):
+        pet = self._get_pet_snapshot()
+        runtime_metrics = self._derive_runtime_metrics(pet)
+        exp_max = max(int(pet["exp_max"] or 100), 1)
+        exp_pct = int((pet["exp"] / exp_max) * 100)
+        turn_total_tokens = self._turn_input_tokens + self._turn_output_tokens
+        all_total_tokens = self._total_input_tokens + self._total_output_tokens
+        context_limit = max(0, int(self._context_token_limit or 0))
+        context_current = max(0, int(self._current_context_tokens or 0))
+        request_input = max(0, int(self._last_request_input_tokens or 0))
+        context_pct = int((context_current / context_limit) * 100) if context_limit > 0 else 0
+        context_limit_text = format_token_count(context_limit) if context_limit else "?"
+        convergence_label = {
+            "open": "开放",
+            "narrowing": "收窄中",
+            "ready_to_fix": "准备修复",
+            "ready_to_verify": "准备验证",
+            "ready_to_stop": "准备停止",
+            "stopped": "已停止",
+        }.get(runtime_metrics["convergence_state"], runtime_metrics["convergence_state"])
+
+        identity_lines = [
+            f"[bold cyan]Vibelution[/bold cyan]  [dim]{runtime_metrics['status_note']}[/dim]",
+            f"[bold]{pet['name']}[/bold]  [dim]Lv.{pet['level']}[/dim]",
+            f"[grey70]岁数[/grey70]  [magenta]{runtime_metrics['pet_age']} 岁[/magenta]  [grey70]状态[/grey70]  [cyan]{self._humanize_work_state()}[/cyan]",
+        ]
+        progress_lines = [
+            f"[grey70]轮次[/grey70]  [cyan]第 {runtime_metrics['current_turn']} 轮[/cyan]",
+            f"[grey70]ReAct步[/grey70]  [yellow]{runtime_metrics['react_step']}[/yellow]  [grey70]完成轮[/grey70]  [cyan]{runtime_metrics['completed_rounds']}[/cyan]",
+            f"[grey70]成长[/grey70]  [dim]{self._make_bar(pet['exp'], exp_max, 10)}[/dim]  {exp_pct:>3}%",
+        ]
+        context_lines = [
+            f"[grey70]请求上下文[/grey70]  [cyan]In {format_token_count(request_input)}[/cyan] [dim]/ {context_limit_text}[/dim]",
+            f"[grey70]上下文当前[/grey70]  [cyan]{format_token_count(context_current)}[/cyan]  [grey70]占比[/grey70]  [yellow]{context_pct}%[/yellow]",
+            f"[grey70]本轮消耗[/grey70]  [cyan]In {format_token_count(self._turn_input_tokens)}[/cyan]  [cyan]Out {format_token_count(self._turn_output_tokens)}[/cyan]  [cyan]Σ {format_token_count(turn_total_tokens)}[/cyan]  [grey70]累计 Token[/grey70]  [yellow]In {format_token_count(self._total_input_tokens)} Out {format_token_count(self._total_output_tokens)} Σ {format_token_count(all_total_tokens)}[/yellow]",
+        ]
+
+        runtime_focus: List[str] = []
+        if self._pet_state.mental_mood:
+            runtime_focus.append(f"[grey70]心智[/grey70]  [yellow]{self._compact_sentence(self._pet_state.mental_mood, 28)}[/yellow]")
+        if runtime_metrics["delegation_running"]:
+            delegate_detail = runtime_metrics["delegation_label"]
+            delegate_label = "子 agent 干活中"
+            if delegate_detail:
+                delegate_label = f"{delegate_label} | {self._compact_sentence(delegate_detail, 18)}"
+            runtime_focus.append(f"[grey70]委派[/grey70]  [bright_cyan]{delegate_label}[/bright_cyan]")
+        if runtime_metrics["reading_task"] and runtime_metrics["reading_task"] != "locate":
+            runtime_focus.append(f"[grey70]阅读[/grey70]  [cyan]{runtime_metrics['reading_task_label']}[/cyan]")
+        if runtime_metrics["reading_sufficiency"]:
+            runtime_focus.append(
+                f"[grey70]充分性[/grey70]  [green]{self._compact_sentence(runtime_metrics['reading_sufficiency'], 28)}[/green]"
+            )
+        if runtime_metrics["next_tool_intent"]:
+            runtime_focus.append(f"[grey70]决策[/grey70]  [yellow]{runtime_metrics['next_tool_intent_label']}[/yellow]")
+        tool_line = runtime_metrics["recommended_tools_label"] or "按当前上下文选择"
+        if runtime_metrics["avoid_tools"]:
+            tool_line = f"{tool_line}  | 避免 {runtime_metrics['avoid_tools_label']}"
+        if runtime_metrics["recommended_tools"] or runtime_metrics["avoid_tools"]:
+            runtime_focus.append(f"[grey70]工具[/grey70]  [dim]{tool_line}[/dim]")
+        if runtime_metrics["feedback_loop_ready"]:
+            loop_type = runtime_metrics["feedback_loop_type"] or "active"
+            runtime_focus.append(f"[grey70]反馈环[/grey70]  [green]{loop_type}[/green]")
+        runtime_lines = self._pad_lines(runtime_focus, 3, filler="[dim]等待新的决策信号[/dim]")
+
+        control_lines = [
+            f"[grey70]收束[/grey70]  [magenta]{convergence_label}[/magenta]",
+            f"[grey70]锚点[/grey70]  [dim]{self._compact_sentence(runtime_metrics['scope_anchor'], 28) or '未固定'}[/dim]",
+            f"[grey70]工具[/grey70]  [dim]{tool_line}[/dim]",
+        ]
+        health_lines = [
+            f"[grey70]心气[/grey70] [yellow]{runtime_metrics['spirit']:>3}[/yellow]  [grey70]精力[/grey70] [cyan]{runtime_metrics['energy']:>3}[/cyan]  [grey70]稳态[/grey70] [red]{runtime_metrics['stability']:>3}[/red]  [grey70]羁绊[/grey70] [magenta]{runtime_metrics['bond']:>3}[/magenta]",
+            f"[grey70]摄食[/grey70]  [cyan]{format_token_count(pet['daily_tokens'])}[/cyan] [dim]今日[/dim] / [dim]{format_token_count(pet['total_tokens'])} 累计[/dim]",
+            "[dim]状态指标已压缩为单行，便于快速扫读[/dim]",
+        ]
+
+        meta_layout = Layout()
+        meta_layout.split_column(
+            Layout(self._build_info_module("[cyan]身份[/cyan]", identity_lines), size=5),
+            Layout(self._build_info_module("[white]进度[/white]", progress_lines), size=5),
+            Layout(self._build_info_module("[yellow]上下文[/yellow]", context_lines), size=5),
+            Layout(self._build_info_module("[magenta]决策态[/magenta]", runtime_lines), size=5),
+            Layout(self._build_info_module("[green]体征[/green]", health_lines), size=5),
+        )
+
+        stage_caption = self._build_stage_caption(runtime_metrics)
+        stage_text = Text.from_markup(self._render_pet_stage(), style="cyan")
+        stage_text.no_wrap = True
+        stage_text.overflow = "crop"
+        stage_group = Group(
+            *[Text.from_markup(line) for line in stage_caption],
+            Text(""),
+            stage_text,
+        )
+
+        stage_panel = Panel(
+            stage_group,
+            title="[cyan]舞台[/cyan]",
+            border_style="bright_black",
+            box=ROUNDED,
+            padding=(0, 1),
+            expand=True,
+        )
+
+        inner = Layout()
+        inner.split_column(
+            Layout(meta_layout, name="pet_meta", size=23),
+            Layout(stage_panel, name="pet_stage", ratio=1),
+        )
+        return Panel(inner, title="宠物空间", border_style="magenta", box=ROUNDED, padding=(0, 1))
+
+    def _build_conversation_panel(self):
+        thought_lines: List[str] = []
+        main_live = self._build_live_thought_block(
+            "思考(进行中)",
+            self._current_thought_stream,
+            width=68,
+            max_lines=5,
+        )
+        if main_live:
+            thought_lines.extend(self._prefixed_agent_lines("main", "\n".join(main_live)))
+        sub_live = self._build_live_thought_block(
+            "子 agent 思路(进行中)",
+            self._current_subagent_thought_stream,
+            width=68,
+            max_lines=5,
+        )
+        if sub_live:
+            thought_lines.extend(self._prefixed_agent_lines("sub", "\n".join(sub_live)))
+        if not thought_lines:
+            thought_lines = ["[dim]等待思考...[/dim]"]
+        output_lines = self._build_workspace_summary_lines()
+        tool_lines = self._tool_activity_events[-28:] if self._tool_activity_events else ["[dim]工具调用尚未开始。[/dim]"]
+        work_layout = Layout()
+        work_layout.split_row(
+            Layout(
+                Panel(
+                    Group(*[Text.from_markup(line) for line in output_lines]),
+                    title="工作区",
+                    border_style="bright_black",
+                    box=ROUNDED,
+                    padding=(0, 0),
+                    expand=True,
+                ),
+                name="output",
+                ratio=5,
+            ),
+            Layout(
+                Panel(
+                    Group(*[Text.from_markup(line) for line in tool_lines]),
+                    title="工具调用",
+                    border_style="cyan",
+                    box=ROUNDED,
+                    padding=(0, 0),
+                    expand=True,
+                ),
+                name="tools",
+                ratio=3,
+            ),
+        )
+        inner = Layout()
+        inner.split_column(
+            Layout(
+                Panel(
+                    Group(*[Text.from_markup(line) for line in thought_lines]),
+                    title="思考",
+                    border_style="yellow",
+                    box=ROUNDED,
+                    padding=(0, 0),
+                    expand=True,
+                ),
+                name="thought",
+                size=6,
+            ),
+            Layout(
+                work_layout,
+                name="workspace",
+                ratio=1,
+            ),
+        )
+        return Panel(
+            inner,
+            title=f"任务流 | {self._shell_mode.upper()}",
+            border_style="bright_black",
+            box=ROUNDED,
+            padding=(0, 0),
+        )
+
+    def _build_logs_panel(self):
+        lines = self._system_logs[-6:] if self._system_logs else ["[dim]系统日志为空。[/dim]"]
+        return Panel(
+            Group(*[Text.from_markup(line) for line in lines]),
+            title="系统日志",
+            border_style="dim",
+            box=ROUNDED,
+            padding=(0, 0),
+        )
+
+    def _status_renderable(self):
+        layout = Layout()
+        layout.split_column(Layout(name="body", ratio=1), Layout(name="logs", size=7))
+        layout["body"].split_row(Layout(name="pet", size=60), Layout(name="conversation", ratio=1))
+        layout["pet"].update(self._build_pet_panel())
+        layout["conversation"].update(self._build_conversation_panel())
+        layout["logs"].update(self._build_logs_panel())
+        return layout
+
+    # ======================== Live ========================
 
     def start_live(self):
         if UIManager._test_mode:
@@ -183,26 +1737,28 @@ class UIManager:
         if self._live is None:
             try:
                 from core.logging.logger import reset_token_console
+
                 reset_token_console()
-            except ImportError:
+            except Exception:
                 pass
 
-            from rich.live import Live
             self._live = Live(
                 self._status_renderable(),
                 console=self.console,
-                refresh_per_second=4,
+                refresh_per_second=6,
                 transient=False,
                 auto_refresh=False,
                 redirect_stdout=False,
                 redirect_stderr=False,
             )
             self._live.start()
+            self._start_pet_animation()
 
     def stop_live(self):
         if UIManager._test_mode:
             return
         if self._live:
+            self._stop_pet_animation()
             self._live.stop()
             self._live = None
 
@@ -213,11 +1769,18 @@ class UIManager:
             except Exception:
                 pass
 
-    # ======================== 状态更新 ========================
+    # ======================== 对外接口 ========================
 
-    def update_status(self, status: str, generation: int = None, goal: str = None,
-                      iterations: int = None, tool_count: int = None,
-                      input_tokens: int = None, output_tokens: int = None):
+    def update_status(
+        self,
+        status: str,
+        generation: int = None,
+        goal: str = None,
+        iterations: int = None,
+        tool_count: int = None,
+        input_tokens: int = None,
+        output_tokens: int = None,
+    ):
         self._status = status.upper()
         if goal is not None:
             self._current_goal = goal
@@ -226,70 +1789,54 @@ class UIManager:
         if tool_count is not None:
             self._tool_count = tool_count
         if input_tokens is not None:
-            self._input_tokens = input_tokens
+            self._turn_input_tokens = max(0, int(input_tokens or 0))
         if output_tokens is not None:
-            self._output_tokens = output_tokens
+            self._turn_output_tokens = max(0, int(output_tokens or 0))
         self._update_status_line()
 
     def refresh_pet_display(self):
-        """刷新状态行中的宠物数据（主循环每次迭代后调用）"""
         self._update_status_line()
 
     def set_task_board(self, markdown: str):
-        self.console.print(f"[dim]--- 任务清单 ---[/dim]")
         if markdown:
-            self.console.print(Markdown(markdown))
+            self._append_conversation("[bold yellow]Tasks[/bold yellow]")
+            for line in markdown.splitlines():
+                self._append_conversation(line)
 
     def increment_tool_count(self):
         self._tool_count += 1
         self._update_status_line()
 
-    # ======================== 流式输出 ========================
-
     def add_content(self, text: str):
-        """输出一行到内容缓冲区"""
         if UIManager._test_mode:
             sys.__stdout__.write(str(text) + "\n")
             sys.__stdout__.flush()
             return
-        self._append_to_buffer(text)
+        self._append_conversation(text)
 
     def add_content_block(self, lines: List[str]):
         for line in lines:
             self.add_content(line)
 
     def clear_content(self):
-        self._content_buffer.clear()
+        self._conversation_events.clear()
+        self._update_status_line()
 
     def add_log(self, message: str, level: str = "INFO"):
-        """内联日志输出 — 前缀时间戳"""
         timestamp = datetime.now().strftime("%H:%M:%S")
         try:
             icon = self.theme.get_log_icon(level.upper()) if self.theme else "--"
             color = self.theme.get_log_color(level.upper()) if self.theme else "white"
         except Exception:
             icon, color = "--", "white"
-
-        entry = f"[dim]{timestamp}[/dim] [{color}]{icon}[/{color}] {message}"
-
-        if UIManager._test_mode:
-            import re
-            plain = re.sub(r'\[/?\w+\]', '', entry)
-            sys.__stdout__.write(plain + "\n")
-            sys.__stdout__.flush()
-            return
-
-        self._append_to_buffer(entry)
-
-    # ======================== 思考动画 ========================
+        self._append_log(f"[dim]{timestamp}[/dim] [{color}]{icon}[/{color}] {message}")
 
     @contextmanager
-    def thinking(self, message: str = "Thinking..."):
-        self._thinking = True
+    def thinking(self, message: str = "思考中..."):
         original_status = self._status
         self._status = "THINKING"
-        self._update_status_line()
         self.add_log(message, "LLM")
+        self._update_status_line()
 
         if UIManager._test_mode:
             sys.__stdout__.write(f"[{message}]\n")
@@ -297,156 +1844,79 @@ class UIManager:
             try:
                 yield
             finally:
-                self._thinking = False
                 self._status = original_status
             return
 
         try:
             yield
         finally:
-            self._thinking = False
             self._status = original_status
             self._update_status_line()
 
-    # ======================== 工具输出 ========================
-
     def print_tool_start(self, tool_name: str, args: Dict[str, Any] = None):
         self.increment_tool_count()
-        self._append_to_buffer("")
         if args:
-            args_str = " ".join(f"{k}={str(v)[:40]}" for k, v in list(args.items())[:3])
-            self._append_to_buffer(f"[bold cyan]>>[/bold cyan] [bold]{tool_name}[/bold] [dim]({args_str})[/dim]")
+            args_str = self._format_tool_args(args)
+            line = f"[dim][主][/dim] [cyan]>[/cyan] [bold]{tool_name}[/bold] [dim]{args_str}[/dim]"
+            self._append_tool_activity(line)
         else:
-            self._append_to_buffer(f"[bold cyan]>>[/bold cyan] [bold]{tool_name}[/bold]")
+            line = f"[dim][主][/dim] [cyan]>[/cyan] [bold]{tool_name}[/bold]"
+            self._append_tool_activity(line)
 
     def print_tool_start_log(self, tool_name: str, args: Dict[str, Any] = None):
-        """工具调用日志（向后兼容）"""
-        if args:
-            preview = " ".join(f"{k}={str(v)[:20]}" for k, v in list(args.items())[:2])
-            self.add_log(f"{tool_name}({preview})", "TOOL")
-        else:
-            self.add_log(tool_name, "TOOL")
+        preview = self._format_tool_args(args)
+        self.add_log(f"{tool_name} {preview}".strip(), "TOOL")
 
     def print_tool_result(self, tool_name: str, result: str, success: bool = True):
-        icon = "+" if success else "!"
+        icon = "ok" if success else "x"
         color = "green" if success else "red"
-        if not isinstance(result, str):
-            try:
-                result = str(result)
-            except Exception:
-                result = f"<{type(result).__name__}>"
-
-        self._append_to_buffer(f"  [{color}]{icon}[/{color}] [{color}]{tool_name}[/{color}]")
-
-        if result:
-            preview = result[:400] + "..." if len(result) > 400 else result
-            for line in preview.split("\n")[:10]:
-                self._append_to_buffer(f"  [dim]│[/dim] {line}")
-        self._append_to_buffer("")
+        summary = self._summarize_tool_result(result)
+        line = f"[dim][主][/dim] [{color}]{icon}[/{color}] [bold]{tool_name}[/bold] [dim]{summary}[/dim]"
+        self._append_tool_activity(line)
+        if not success:
+            for line in self._format_tool_result_lines(result)[1:3]:
+                detail = f"[red dim]└[/red dim] {line}"
+                self._append_tool_activity(detail)
 
     def print_tool_result_log(self, tool_name: str, success: bool = True):
-        if success:
-            self.add_log(f"{tool_name} OK", "TOOL")
-        else:
-            self.add_log(f"{tool_name} FAILED", "ERROR")
-
-    # ======================== 独立输出方法 ========================
-
-    @staticmethod
-    def _make_bar(value: int, max_val: int = 100, width: int = 10) -> str:
-        """创建文本进度条"""
-        pct = max(0, min(value, max_val)) / max(max_val, 1)
-        filled = int(pct * width)
-        return "█" * filled + "░" * (width - filled)
+        self.add_log(f"{tool_name} {'OK' if success else 'FAILED'}", "TOOL" if success else "ERROR")
 
     def print_header(self, model: str, generation: int = None, tools_count: int = 0):
-        """打印会话头 — 宠物面板版"""
-        pet_name = "Baby Claw"
-        pet_level = 1
-        pet_age = 0
-        mood = hunger = energy = health = love = 100
-        exp = 0
-        exp_max = 100
-        try:
-            p = get_pet()
-            a = p.data.attributes
-            pet_name = a.name or pet_name
-            pet_level = a.level
-            pet_age = pet_level - 1
-            mood = a.mood
-            hunger = a.hunger
-            energy = int(a.energy)
-            health = a.health
-            love = a.love
-            exp = a.exp
-            exp_max = a.exp_to_next
-        except Exception:
-            pass
-
-        art = self.avatar.get_art("happy")
-        self._append_to_buffer(f"[cyan]{art}[/cyan]")
-
-        self._append_to_buffer(
-            f"[bold]Vibelution[/bold] [dim]v7.0[/dim]  —  "
-            f"[cyan]{pet_name}[/cyan]  "
-            f"[dim]Lv.{pet_level} ({pet_age}岁)[/dim]"
-        )
-        self._append_to_buffer("")
-
-        bar_w = 10
-
-        def _attr(label, value, color, icon):
-            bar = self._make_bar(value, 100, bar_w)
-            return f"  {icon} {label} [{color}]{bar}[/{color}] {value:>3}/100"
-
-        self._append_to_buffer(
-            _attr("Mood  ", mood, "yellow", "M") + "    " +
-            _attr("Hunger", hunger, "green", "H")
-        )
-        self._append_to_buffer(
-            _attr("Energy", energy, "cyan", "E") + "    " +
-            _attr("Health", health, "red", "❤ ")
-        )
-        exp_pct = exp / exp_max if exp_max > 0 else 0
-        exp_bar = f"[dim]{self._make_bar(exp, exp_max, bar_w)}[/dim]"
-        self._append_to_buffer(
-            _attr("Love  ", love, "magenta", "♥ ") + "    " +
-            f"  ⭐ EXP     {exp_bar} {int(exp_pct * 100):>3}%"
-        )
-        self._append_to_buffer("")
-
-        parts = [f"[dim]Model:[/dim] {model}"]
+        if generation is not None:
+            self._iterations = generation
         if tools_count:
-            parts.append(f"[dim]Tools:[/dim] {tools_count} loaded")
-        parts.append(f"[dim]Time:[/dim] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        self._append_to_buffer("  |  ".join(parts))
-        self._append_to_buffer("")
-
-    def print_thinking(self, message: str):
-        with self.console.status(f"[magenta]...[/magenta] {message}") as status:
-            yield status
+            self._tool_count = tools_count
+        self._append_conversation(
+            f"[bold]Vibelution[/bold] [dim]模型：[/dim] {model}  [dim]工具：[/dim] {tools_count}  "
+            f"[dim]时间：[/dim] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        self._append_conversation("")
 
     def print_warning(self, message: str):
-        self._append_to_buffer(f"[yellow]![/yellow] {message}")
+        self._append_conversation(f"[yellow]![/yellow] {message}")
         self.add_log(message, "WARN")
 
     def print_error(self, message: str, exc_info: str = None):
-        self._append_to_buffer(f"[red]!! {message}[/red]")
+        self._append_conversation(f"[red]!! {message}[/red]")
         self.add_log(message, "ERROR")
         if exc_info:
-            self._append_to_buffer(f"[red dim]{exc_info}[/red dim]")
+            self._append_conversation(f"[red dim]{exc_info}[/red dim]")
 
     def print_success(self, message: str):
+        self._append_conversation(f"[green]+[/green] {message}")
         self.add_log(message, "SUCCESS")
 
     def print_section(self, title: str):
-        self._append_to_buffer(f"\n[bold cyan]--- {title} ---[/bold cyan]")
+        self._append_conversation(f"[bold cyan]--- {title} ---[/bold cyan]")
 
     def print_markdown(self, markdown_text: str):
-        self.console.print(Markdown(markdown_text))
+        self._safe_console_render(Markdown(markdown_text), fallback_text=markdown_text)
 
     def print_code(self, code: str, language: str = "python"):
-        self.console.print(Syntax(code, language, theme="monokai", line_numbers=True))
+        self._safe_console_render(
+            Syntax(code, language, theme="monokai", line_numbers=True),
+            fallback_text=code,
+        )
 
     def print_table(self, data: List[Dict[str, Any]], columns: List[str] = None):
         if not data:
@@ -458,57 +1928,55 @@ class UIManager:
             table.add_column(col, style="cyan")
         for row in data:
             table.add_row(*[str(row.get(col, "")) for col in columns])
-        self.console.print(table)
+        fallback_lines = [" | ".join(columns)]
+        fallback_lines.extend(" | ".join(str(row.get(col, "")) for col in columns) for row in data)
+        self._safe_console_render(table, fallback_text="\n".join(fallback_lines))
 
     def print_task_checklist(self, tasks: List[Dict[str, Any]]):
-        tree = Tree(f"[bold yellow]Tasks[/bold yellow]")
+        tree = Tree("[bold yellow]Tasks[/bold yellow]")
         for task in tasks:
             title = task.get("title", "")
             done = task.get("done", False)
-            priority = task.get("priority", "medium")
-            pcolor = "red" if priority == "high" else ("yellow" if priority == "medium" else "cyan")
             icon = "[green]+[/green]" if done else "[dim]o[/dim]"
-            tree.add(f"{icon} [{pcolor}]{title}[/{pcolor}]")
-        self.console.print(tree)
+            tree.add(f"{icon} {title}")
+        fallback_lines = ["Tasks"]
+        fallback_lines.extend(
+            f"{'[x]' if task.get('done', False) else '[ ]'} {task.get('title', '')}" for task in tasks
+        )
+        self._safe_console_render(tree, fallback_text="\n".join(fallback_lines))
 
     def print_progress(self, description: str, completed: int, total: int):
-        bar_len = 30
         pct = completed / total if total > 0 else 0
-        filled = int(bar_len * pct)
-        bar = "[green]" + "=" * filled + "[/]" + "-" * (bar_len - filled)
-        self.console.print(f"  {description}")
-        self.console.print(f"  [{bar}] {int(pct * 100)}%")
+        self._append_conversation(f"{description} {int(pct * 100)}%")
 
     def print_lobster_status(self, status: str = "happy", message: str = ""):
-        art = self.avatar.get_art(status)
-        self.console.print(f"[cyan]{art}[/cyan]")
-        self.console.print(f"[bold]Status:[/bold] {status.upper()}")
+        self._append_conversation(f"[cyan]{self.avatar.get_art(status)}[/cyan]")
         if message:
-            self.console.print(f"[dim]{message}[/dim]")
+            self._append_conversation(f"[dim]{message}[/dim]")
 
     def print_pet_status(self):
         try:
             text = self.pet.get_full_status_text()
-            self.console.print(Panel(text, title="Pet", border_style="magenta", box=ASCII2))
+            self._safe_console_render(
+                Panel(text, title="宠物", border_style="magenta", box=ASCII2),
+                fallback_text=str(text),
+            )
         except Exception:
-            self.console.print("[dim]Pet system not available[/dim]")
+            self._safe_console_render("[dim]宠物系统暂时不可用[/dim]", fallback_text="宠物系统暂时不可用")
 
     def print_welcome_panel(self):
-        """打印欢迎面板"""
         try:
             from config import get_config
-            model = get_config().llm.model_name
+
+            model = get_config().llm.get_profile(role="primary").model
         except Exception:
             model = "?"
         self.print_header(model)
-        self._append_to_buffer("[dim]Type /help for commands, or enter a task to begin[/dim]")
-        self._append_to_buffer("")
+        self._append_conversation("[dim]输入任务，或打开工作台菜单开始。[/dim]")
 
     def clear(self):
         self.console.clear()
 
-
-# ======================== 全局实例 ========================
 
 _ui: Optional[UIManager] = None
 
@@ -520,15 +1988,11 @@ def get_ui() -> UIManager:
     return _ui
 
 
-
-
-# ======================== 便捷函数 ========================
-
 def ui_print_header(model: str, generation: int = None):
     get_ui().print_header(model, generation)
 
 
-def ui_thinking(message: str = "Thinking..."):
+def ui_thinking(message: str = "思考中..."):
     return get_ui().thinking(message)
 
 
@@ -555,11 +2019,24 @@ def ui_log(message: str, level: str = "INFO"):
     get_ui().add_log(message, level)
 
 
-def ui_update_status(status: str, generation: int = None, goal: str = None,
-                     iterations: int = None, tool_count: int = None,
-                     input_tokens: int = None, output_tokens: int = None):
-    get_ui().update_status(status, generation, goal, iterations, tool_count,
-                           input_tokens=input_tokens, output_tokens=output_tokens)
+def ui_update_status(
+    status: str,
+    generation: int = None,
+    goal: str = None,
+    iterations: int = None,
+    tool_count: int = None,
+    input_tokens: int = None,
+    output_tokens: int = None,
+):
+    get_ui().update_status(
+        status,
+        generation,
+        goal,
+        iterations,
+        tool_count,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
 
 
 def ui_task_board(markdown: str):
@@ -579,110 +2056,24 @@ def ui_print_welcome():
 
 
 def run_interactive_mode(agent) -> bool:
-    """交互模式 REPL — 支持宠物互动命令"""
     ui = get_ui()
-
     while True:
         try:
             user_input = input("Agent > ").strip()
-
             if not user_input:
                 ui.start_live()
                 agent.run_loop()
                 ui.stop_live()
                 break
-
-            lower = user_input.lower()
-            parts = user_input.split()
-            cmd = parts[0].lower() if parts else ""
-            args = parts[1:] if len(parts) > 1 else []
-
-            if lower in ("/quit", "/exit", "/q"):
+            if user_input.lower() in ("/quit", "/exit", "/q"):
                 print("Goodbye.")
                 return True
-
-            elif lower in ("/auto", "/a"):
-                ui.start_live()
-                agent.run_loop()
-                ui.stop_live()
-                break
-
-            elif cmd == "/pet":
-                ui.print_pet_status()
-
-            elif cmd == "/feed":
-                try:
-                    pet = get_pet()
-                    pet.feed(20)
-                    ui.console.print("[green]Pet fed! Hunger +20, Mood +5[/green]")
-                except Exception as e:
-                    ui.console.print(f"[yellow]Feed failed: {e}[/yellow]")
-                ui.print_pet_status()
-
-            elif cmd == "/play":
-                try:
-                    pet = get_pet()
-                    pet.play()
-                    ui.console.print("[magenta]Played with pet! Love +10, Mood +15, Energy -10[/magenta]")
-                except Exception as e:
-                    ui.console.print(f"[yellow]Play failed: {e}[/yellow]")
-                ui.print_pet_status()
-
-            elif cmd == "/avatar":
-                if args:
-                    preset = args[0].lower()
-                    from core.ui.ascii_art import get_avatar_manager
-                    avatar = get_avatar_manager()
-                    if avatar.switch(preset):
-                        info = avatar.list_presets().get(preset, {})
-                        ui.console.print(
-                            f"[green]Avatar switched to:[/green] "
-                            f"{info.get('icon', '?')} {info.get('name', preset)}"
-                        )
-                    else:
-                        ui.console.print(f"[yellow]Unknown avatar: {preset}[/yellow]")
-                        ui.console.print("[dim]Available: lobster, shrimp, crab, cat, chick[/dim]")
-                else:
-                    from core.ui.ascii_art import get_avatar_manager
-                    avatar = get_avatar_manager()
-                    ui.console.print("\n[bold]Available avatars:[/bold]")
-                    for key, info in avatar.list_presets().items():
-                        current = " [green](current)[/green]" if key == avatar.preset_name else ""
-                        ui.console.print(
-                            f"  {info['icon']} [cyan]{key}[/cyan] - "
-                            f"{info['name']} - {info['desc']}{current}"
-                        )
-                    ui.console.print("[dim]Usage: /avatar <name>[/dim]\n")
-
-            elif cmd == "/status":
-                ui.print_header("?", tools_count=len(agent.key_tools) if hasattr(agent, 'key_tools') else 0)
-
-            elif lower in ("/help", "/h", "/?"):
-                ui.console.print("""
-[yellow]Commands:[/yellow]
-  /auto, /a     — Enter auto mode
-  /quit, /q     — Exit
-  /help, /h     — Show help
-  /pet          — Show pet status
-  /feed         — Feed pet (+20 hunger)
-  /play         — Play with pet
-  /avatar [name] — Switch avatar (lobster/shrimp/crab/cat/chick)
-  /status       — Show full agent + pet status
-  <text>        — Send task to Agent
-""")
-
-            else:
-                ui.start_live()
-                agent.run_loop(initial_prompt=user_input)
-                ui.stop_live()
-                print(f"[dim]{'─' * 50}[/dim]")
-                print("[dim]Back to interactive mode[/dim]")
-                print()
-
+            ui.start_live()
+            agent.run_loop(initial_prompt=user_input)
+            ui.stop_live()
         except KeyboardInterrupt:
-            print("\n[yellow]Interrupted.[/yellow]")
+            print("\nInterrupted.")
             return False
         except EOFError:
             return False
-
     return True

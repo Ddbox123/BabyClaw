@@ -29,8 +29,13 @@ PROJECT_ROOT = Path(__file__).parent.parent
 
 class TestRunner:
     """统一测试运行器"""
+    __test__ = False
 
     TEST_MODULES = None  # Auto-discovered if None
+    ENVIRONMENT_SMOKE_MODULES = [
+        ("test_environment_doctor.py", "Environment Doctor"),
+        ("test_environment_smoke.py", "Environment Smoke"),
+    ]
 
     def _discover_test_modules(self) -> List[Tuple[str, str]]:
         """Auto-discover test files, excluding backups, runners, and utilities."""
@@ -44,11 +49,28 @@ class TestRunner:
             for f in test_files
         ]
 
-    def __init__(self, verbose: bool = False, fast: bool = False):
+    def __init__(self, verbose: bool = False, fast: bool = False, environment_smoke: bool = False):
         self.verbose = verbose
         self.fast = fast
+        self.environment_smoke = environment_smoke
         self.results: List[Dict] = []
         self.start_time = datetime.now()
+
+    def build_pytest_command(self, *targets: str) -> List[str]:
+        """构建统一的 pytest 调用命令。"""
+        cmd = [
+            sys.executable, "-m", "pytest",
+            *targets,
+            "-v" if self.verbose else "-q",
+            "--tb=short",
+            "--no-header",
+            "-p", "no:warnings",
+        ]
+
+        if self.fast:
+            cmd.extend(["-k", "not slow"])
+
+        return cmd
 
     def run_module_tests(self, test_file: str, description: str) -> Tuple[bool, Dict]:
         """运行单个测试模块"""
@@ -67,18 +89,7 @@ class TestRunner:
             }
 
         # 构建 pytest 命令
-        cmd = [
-            sys.executable, "-m", "pytest",
-            str(test_path),
-            "-v" if self.verbose else "-q",
-            "--tb=short",
-            "--no-header",
-            "-p", "no:warnings",
-        ]
-
-        # 快速模式：跳过慢速测试
-        if self.fast:
-            cmd.extend(["-k", "not slow"])
+        cmd = self.build_pytest_command(str(test_path))
 
         try:
             result = subprocess.run(
@@ -147,7 +158,9 @@ class TestRunner:
         print(f"开始时间: {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"模式: {'详细' if self.verbose else '简洁'}{' (快速)' if self.fast else ''}")
 
-        modules = self.TEST_MODULES or self._discover_test_modules()
+        modules = self.TEST_MODULES or (
+            self.ENVIRONMENT_SMOKE_MODULES if self.environment_smoke else self._discover_test_modules()
+        )
         all_passed = True
 
         for test_file, description in modules:
@@ -255,13 +268,45 @@ def check_evolution_ready() -> Tuple[bool, str]:
         return False, f"❌ 测试失败，禁止进化\n失败模块: {', '.join(failed_modules)}"
 
 
+def run_environment_smoke(verbose: bool = False) -> Tuple[bool, str]:
+    """运行稳定环境 smoke 套件。"""
+    runner = TestRunner(verbose=verbose, fast=False, environment_smoke=True)
+    all_passed = runner.run_all_tests()
+    summary_passed = runner.print_summary()
+    if all_passed and summary_passed:
+        return True, "✅ 环境 smoke 验证通过"
+    return False, "❌ 环境 smoke 验证失败"
+
+
+def test_runner_builds_pytest_module_command():
+    runner = TestRunner(verbose=False, fast=False, environment_smoke=True)
+    cmd = runner.build_pytest_command("tests/test_environment_smoke.py")
+
+    assert cmd[:3] == [sys.executable, "-m", "pytest"]
+    assert "tests/test_environment_smoke.py" in cmd
+
+
+def test_runner_environment_smoke_targets_are_stable():
+    runner = TestRunner(environment_smoke=True)
+
+    assert runner.ENVIRONMENT_SMOKE_MODULES == [
+        ("test_environment_doctor.py", "Environment Doctor"),
+        ("test_environment_smoke.py", "Environment Smoke"),
+    ]
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="自我进化测试运行器")
     parser.add_argument("-v", "--verbose", action="store_true", help="详细输出")
     parser.add_argument("--fast", action="store_true", help="跳过慢速测试")
+    parser.add_argument("--environment-smoke", action="store_true", help="只运行稳定环境 smoke 套件")
     args = parser.parse_args()
 
-    runner = TestRunner(verbose=args.verbose, fast=args.fast)
+    runner = TestRunner(
+        verbose=args.verbose,
+        fast=args.fast,
+        environment_smoke=args.environment_smoke,
+    )
 
     # 运行所有测试
     runner.run_all_tests()

@@ -39,6 +39,11 @@ def reset_singletons():
     _orig_state = _state_mod._state_manager
     _state_mod._state_manager = None
 
+    # 保存并重置 agent_session.py 单例
+    import core.infrastructure.agent_session as _session_mod
+    _orig_session = _session_mod._agent_session
+    _session_mod._agent_session = None
+
     # 保存并重置 event_bus.py 单例
     import core.infrastructure.event_bus as _eb_mod
     _orig_bus = _eb_mod._event_bus
@@ -70,10 +75,19 @@ def reset_singletons():
     except ImportError:
         pass
 
+    # 保存并重置 git_memory.py 单例
+    try:
+        import core.infrastructure.git_memory as _gm_mod
+        _orig_gm = _gm_mod._git_memory_service
+        _gm_mod._git_memory_service = None
+    except ImportError:
+        pass
+
     yield
 
     # 测试后恢复原始单例（或保持 None）
     _state_mod._state_manager = _orig_state
+    _session_mod._agent_session = _orig_session
     _eb_mod._event_bus = _orig_bus
     try:
         _tp_mod._task_manager_instance = _orig_tp
@@ -86,6 +100,10 @@ def reset_singletons():
         pass
     try:
         _pm_mod._prompt_manager = _orig_pm
+    except (NameError, AttributeError):
+        pass
+    try:
+        _gm_mod._git_memory_service = _orig_gm
     except (NameError, AttributeError):
         pass
 

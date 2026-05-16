@@ -13,9 +13,15 @@ import os
 import sys
 import pytest
 import time
+from types import SimpleNamespace
 from pathlib import Path
+from core.infrastructure.event_bus import EventNames, get_event_bus
+from core.pet_system import get_pet_system
+from core.pet_system.pet_system import reset_pet_system
 
+from core.infrastructure import evolution_governor as governor_module
 from core.infrastructure.tool_executor import ToolExecutor, get_tool_executor
+from core.infrastructure.agent_session import get_session_state, reset_session_state
 
 
 class TestToolExecutorInit:
@@ -159,6 +165,60 @@ class TestToolExecutorTimeout:
         })
         assert result is not None
 
+    def test_spawn_agent_tool_uses_requested_timeout_with_buffer(self, executor):
+        timeout = executor._resolve_timeout("spawn_agent_tool", {"timeout": 120})
+
+        assert timeout == 150
+
+    def test_cli_tool_uses_requested_timeout(self, executor):
+        timeout = executor._resolve_timeout("cli_tool", {"timeout": 600})
+
+        assert timeout == 600
+
+    def test_spawn_agent_tool_is_registered_for_internal_governor(self, executor):
+        assert "spawn_agent_tool" in executor._tool_map
+
+    def test_get_file_entities_tool_compat_alias_is_registered(self, executor):
+        assert "get_file_entities_tool" in executor._tool_map
+
+    def test_spawn_agent_tool_requires_internal_delegate_flag(self, executor):
+        result, action = executor.execute("spawn_agent_tool", {"goal": "分析重复调用"})
+
+        assert action is None
+        assert "仅允许主 agent 的委派治理层内部调用" in str(result)
+
+    def test_spawn_agent_tool_allows_internal_delegate_flag(self, executor):
+        def fake_spawn_agent_tool(**kwargs):
+            return f"delegated:{kwargs.get('goal', '')}"
+
+        executor.register_tool("spawn_agent_tool", fake_spawn_agent_tool, timeout=5)
+
+        result, action = executor.execute(
+            "spawn_agent_tool",
+            {"goal": "分析重复调用", "_internal_delegate": True},
+        )
+
+        assert action is None
+        assert str(result) == "delegated:分析重复调用"
+
+    def test_spawn_agent_tool_internal_flag_is_not_forwarded_to_tool(self, executor):
+        captured = {}
+
+        def fake_spawn_agent_tool(**kwargs):
+            captured.update(kwargs)
+            return "ok"
+
+        executor.register_tool("spawn_agent_tool", fake_spawn_agent_tool, timeout=5)
+
+        result, action = executor.execute(
+            "spawn_agent_tool",
+            {"goal": "分析重复调用", "_internal_delegate": True},
+        )
+
+        assert action is None
+        assert str(result) == "ok"
+        assert "_internal_delegate" not in captured
+
 
 class TestToolExecutorEvents:
     """事件总线集成测试"""
@@ -216,6 +276,351 @@ class TestToolExecutorErrorHandling:
         assert result is not None
         assert action is None
 
+    def test_python_lint_publishes_validation_event(self, executor):
+        events = []
+
+        def on_validation(event):
+            events.append(event.data)
+
+        bus = get_event_bus()
+        callback_id = "test_tool_executor_validation_event"
+        bus.subscribe(EventNames.VALIDATION_COMPLETED, on_validation, callback_id=callback_id)
+
+        def fake_lint_tool(file_path=""):
+            return '{"status": "ok", "issue_count": 0}'
+
+        executor.register_tool("python_lint_tool", fake_lint_tool, timeout=5)
+
+        try:
+            result, action = executor.execute("python_lint_tool", {"file_path": "agent.py"})
+            assert action is None
+            assert '"status": "ok"' in str(result)
+            assert events
+            assert events[-1]["kind"] == "lint"
+            assert events[-1]["passed"] is True
+        finally:
+            bus.unsubscribe_by_id(callback_id)
+
+    def test_cli_pipe_pattern_short_circuits_within_same_turn(self, executor):
+        """同轮同类 pipe 模式被拦截后，第二次应直接短路。"""
+        reset_session_state()
+
+        call_counter = {"count": 0}
+
+        def fake_cli_tool(command="", timeout=60):
+            call_counter["count"] += 1
+            return "[安全拦截] [Whitelist Block] 命令包含危险字符：|\n该危险命令已被系统安全策略禁止执行。"
+
+        executor.register_tool("cli_tool", fake_cli_tool, timeout=5)
+
+        first, _ = executor.execute("cli_tool", {"command": "git diff a b | head -20"})
+        second, _ = executor.execute("cli_tool", {"command": "git show :x | head -20"})
+
+        assert "[安全拦截]" in str(first)
+        assert "[短路]" in str(second)
+        assert call_counter["count"] == 1
+        snapshot = get_session_state().get_attention_snapshot()
+        assert "cli_tool:pipe" in snapshot["blocked_tool_patterns"]
+
+    def test_cross_platform_warning_is_recorded_as_successful_platform_check(self, executor):
+        """跨平台命令拦截是平台检查通过，不能污染 pytest 失败状态。"""
+        reset_session_state()
+
+        def fake_cli_tool(command="", timeout=60):
+            return (
+                "[跨平台警告] 在 Windows 上检测到 Unix shell 片段: "
+                f"{command}\n请改用 PowerShell/Windows 等价命令。"
+            )
+
+        executor.register_tool("cli_tool", fake_cli_tool, timeout=5)
+
+        result, action = executor.execute(
+            "cli_tool",
+            {"command": "python -m pytest tests/ --collect-only -q 2>/dev/null | tail -5"},
+        )
+
+        assert action is None
+        assert "[跨平台警告]" in str(result)
+        snapshot = get_session_state().get_attention_snapshot()
+        assert snapshot["last_validation_summary"] == "Windows 平台检查通过：已拦截 Unix shell 片段"
+        assert snapshot["last_validation_passed"] is True
+        assert snapshot["recent_validation_results"][-1]["kind"] == "platform_check"
+        assert snapshot["feedback_loop_ready"] is True
+        assert snapshot["feedback_loop_type"] == "platform_check"
+        assert snapshot["convergence_state"] == "ready_to_stop"
+        assert "cli_tool:unix_shell_on_windows" in snapshot["blocked_tool_patterns"]
+
+    def test_lint_validation_establishes_feedback_loop_and_freezes_scope(self, executor):
+        reset_session_state()
+
+        def fake_lint_tool(file_path=""):
+            return '{"status": "ok", "issue_count": 0}'
+
+        executor.register_tool("python_lint_tool", fake_lint_tool, timeout=5)
+
+        result, action = executor.execute("python_lint_tool", {"file_path": "agent.py"})
+
+        assert action is None
+        assert '"status": "ok"' in str(result)
+        snapshot = get_session_state().get_attention_snapshot()
+        assert snapshot["feedback_loop_ready"] is True
+        assert snapshot["feedback_loop_type"] == "lint"
+        assert snapshot["scope_frozen"] is True
+        assert snapshot["scope_anchor"] == "agent.py"
+
+    def test_cli_command_chain_short_circuits_within_same_turn(self, executor):
+        """同轮同类命令链模式被拦截后，第二次应直接短路。"""
+        reset_session_state()
+
+        call_counter = {"count": 0}
+
+        def fake_cli_tool(command="", timeout=60):
+            call_counter["count"] += 1
+            return "[安全拦截] [Whitelist Block] 命令包含危险字符：&&\n该危险命令已被系统安全策略禁止执行。"
+
+        executor.register_tool("cli_tool", fake_cli_tool, timeout=5)
+
+        first, _ = executor.execute("cli_tool", {"command": "python -m py_compile agent.py && python -m pytest tests/test_agent_protocol.py -q"})
+        second, _ = executor.execute("cli_tool", {"command": "cd workspace && dir"})
+
+        assert "[安全拦截]" in str(first)
+        assert "[短路]" in str(second)
+        assert call_counter["count"] == 1
+        snapshot = get_session_state().get_attention_snapshot()
+        assert "cli_tool:command_chain" in snapshot["blocked_tool_patterns"]
+
+    def test_read_file_records_read_range(self, executor, tmp_path):
+        reset_session_state()
+        file_path = tmp_path / "demo.txt"
+        file_path.write_text("a\nb\nc\nd\n", encoding="utf-8")
+
+        result, action = executor.execute("read_file", {
+            "file_path": str(file_path),
+            "offset": 1,
+            "max_lines": 2,
+        })
+
+        assert action is None
+        assert "第     2 行" in str(result)
+        snapshot = get_session_state().get_attention_snapshot()
+        ranges = snapshot["read_ranges"]
+        assert any("demo.txt" in key for key in ranges.keys())
+        stored = next(iter(ranges.values()))
+        assert stored[-1]["start_line"] == 2
+        assert stored[-1]["end_line"] == 3
+
+    def test_execute_read_file_accepts_string_numeric_args(self, executor, tmp_path):
+        reset_session_state()
+        file_path = tmp_path / "demo_string_args.txt"
+        file_path.write_text("a\nb\nc\nd\n", encoding="utf-8")
+
+        result, action = executor.execute(
+            "read_file",
+            {
+                "file_path": str(file_path),
+                "offset": "1",
+                "max_lines": "2",
+            },
+        )
+
+        assert action is None
+        assert "[文件读取] 错误" not in str(result)
+        assert "第     2 行" in str(result)
+
+    def test_duplicate_read_records_blocker(self, executor, tmp_path):
+        reset_session_state()
+        file_path = tmp_path / "demo_repeat.txt"
+        file_path.write_text("a\nb\nc\nd\ne\n", encoding="utf-8")
+
+        executor.execute("read_file", {"file_path": str(file_path), "offset": 0, "max_lines": 2})
+        second, _ = executor.execute("read_file", {"file_path": str(file_path), "offset": 0, "max_lines": 2})
+
+        snapshot = get_session_state().get_attention_snapshot()
+        assert "[短路]" in str(second) or any(
+            item["kind"] in {"duplicate_read", "duplicate_read_guard"} for item in snapshot["recent_blockers"]
+        )
+
+    def test_read_file_records_hint_when_continuation_is_ignored(self, executor, tmp_path):
+        session = reset_session_state()
+        file_path = tmp_path / "demo_flow.txt"
+        file_path.write_text("\n".join(f"line {i}" for i in range(1, 120)), encoding="utf-8")
+        session.record_pending_continuation(
+            "read_file_tool",
+            f'read_file_tool(file_path="{file_path}", offset=40, max_lines=40)',
+            str(file_path),
+        )
+
+        result, action = executor.execute("read_file", {"file_path": str(file_path), "offset": 10, "max_lines": 40})
+
+        assert action is None
+        assert "[短路]" not in str(result)
+        assert "第    11 行" in str(result) or "第     11 行" in str(result)
+        snapshot = get_session_state().get_attention_snapshot()
+        assert any(item["kind"] == "continuation_drift" for item in snapshot["recent_blockers"])
+        assert any(
+            item["kind"] == "continuation_drift" and item.get("severity") == "hint"
+            for item in snapshot["recent_blockers"]
+        )
+
+    def test_read_file_allows_switching_away_from_latest_pending_continuation_but_records_hint(self, executor, tmp_path):
+        session = reset_session_state()
+        first = tmp_path / "first_flow.txt"
+        second = tmp_path / "second_flow.txt"
+        first.write_text("\n".join(f"line {i}" for i in range(1, 120)), encoding="utf-8")
+        second.write_text("\n".join(f"line {i}" for i in range(1, 120)), encoding="utf-8")
+
+        session.record_pending_continuation(
+            "read_file_tool",
+            f'read_file_tool(file_path="{first}", offset=40, max_lines=40)',
+            str(first),
+        )
+
+        result, action = executor.execute("read_file", {"file_path": str(second), "offset": 0, "max_lines": 40})
+
+        assert action is None
+        assert "[短路]" not in str(result)
+        assert "第     1 行" in str(result)
+        snapshot = get_session_state().get_attention_snapshot()
+        assert any(item["kind"] == "continuation_focus" for item in snapshot["recent_blockers"])
+        assert any(
+            item["kind"] == "continuation_focus" and item.get("severity") == "hint"
+            for item in snapshot["recent_blockers"]
+        )
+
+    def test_read_file_short_circuits_on_high_overlap(self, executor, tmp_path):
+        session = reset_session_state()
+        file_path = tmp_path / "demo_overlap.txt"
+        file_path.write_text("\n".join(f"line {i}" for i in range(1, 160)), encoding="utf-8")
+        session.record_read_range(str(file_path), 21, 80, source="read_file_tool")
+
+        result, action = executor.execute("read_file", {"file_path": str(file_path), "offset": 30, "max_lines": 60})
+
+        assert action is None
+        assert "[短路]" in str(result)
+        snapshot = get_session_state().get_attention_snapshot()
+        assert any(item["kind"] == "duplicate_read_guard" for item in snapshot["recent_blockers"])
+
+    def test_duplicate_search_records_blocker(self, executor):
+        reset_session_state()
+
+        def fake_grep_search_tool(regex_pattern="", include_ext=".py", search_dir=".", case_sensitive=True, max_results=50, max_output_chars=8000):
+            return (
+                f"[搜索] 正则: {regex_pattern}\n"
+                f"[搜索] 目录: {search_dir}\n"
+                f"[搜索] 类型: {include_ext}\n"
+                f"[搜索] 找到 1 个匹配，分布在 1 个文件\n"
+                "[搜索摘要]\n"
+                "- core/demo.py | 命中 1 处 | 行 10\n"
+                "\n[续读] read_file_tool(file_path=\"core/demo.py\", offset=0, max_lines=40)\n"
+            )
+
+        executor.register_tool("grep_search_tool", fake_grep_search_tool, timeout=5)
+
+        executor.execute("grep_search_tool", {"regex_pattern": "Demo", "search_dir": "core"})
+        executor.execute("grep_search_tool", {"regex_pattern": "Demo", "search_dir": "core"})
+
+        snapshot = get_session_state().get_attention_snapshot()
+        assert any(item["kind"] == "duplicate_search" for item in snapshot["recent_blockers"])
+        assert snapshot["pending_continuations"][-1]["path"] == "core/demo.py"
+
+    def test_duplicate_search_short_circuits_before_execution(self, executor):
+        session = reset_session_state()
+        session.record_search_query("Demo", "core")
+
+        called = {"count": 0}
+
+        def fake_grep_search_tool(**_kwargs):
+            called["count"] += 1
+            return "should not execute"
+
+        executor.register_tool("grep_search_tool", fake_grep_search_tool, timeout=5)
+        result, action = executor.execute("grep_search_tool", {"regex_pattern": "Demo", "search_dir": "core"})
+
+        assert action is None
+        assert "[短路]" in str(result)
+        assert called["count"] == 0
+        snapshot = get_session_state().get_attention_snapshot()
+        assert any(item["kind"] == "duplicate_search" for item in snapshot["recent_blockers"])
+
+    def test_search_allows_progress_when_pending_continuation_exists(self, executor):
+        session = reset_session_state()
+        session.record_pending_continuation(
+            "read_file_tool",
+            'read_file_tool(file_path="core/demo.py", offset=40, max_lines=40)',
+            "core/demo.py",
+        )
+
+        called = {"count": 0}
+
+        def fake_grep_search_tool(**_kwargs):
+            called["count"] += 1
+            return "should not execute"
+
+        executor.register_tool("grep_search_tool", fake_grep_search_tool, timeout=5)
+        result, action = executor.execute("grep_search_tool", {"regex_pattern": "Demo", "search_dir": "core"})
+
+        assert action is None
+        assert "[短路]" not in str(result)
+        assert called["count"] == 1
+        snapshot = get_session_state().get_attention_snapshot()
+        assert any(item["kind"] == "continuation_focus" for item in snapshot["recent_blockers"])
+
+    def test_weak_search_continuation_does_not_block_switching_to_another_file(self, executor, tmp_path):
+        session = reset_session_state()
+        first = tmp_path / "search_hit.py"
+        second = tmp_path / "target.py"
+        first.write_text("\n".join(f"line {i}" for i in range(1, 40)), encoding="utf-8")
+        second.write_text("\n".join(f"line {i}" for i in range(1, 80)), encoding="utf-8")
+        session.record_pending_continuation(
+            "grep_search_tool",
+            f'read_file_tool(file_path="{first}", offset=0, max_lines=40)',
+            str(first),
+            strength="weak",
+        )
+
+        result, action = executor.execute("read_file", {"file_path": str(second), "offset": 0, "max_lines": 40})
+
+        assert action is None
+        assert "[短路]" not in str(result)
+        snapshot = get_session_state().get_attention_snapshot()
+        assert not any(item["kind"] == "continuation_focus" for item in snapshot["recent_blockers"])
+
+    def test_duplicate_entity_short_circuits_before_execution(self, executor):
+        session = reset_session_state()
+        session.record_read_entity("core/demo.py", "Demo.run")
+
+        called = {"count": 0}
+
+        def fake_get_code_entity_tool(**_kwargs):
+            called["count"] += 1
+            return "should not execute"
+
+        executor.register_tool("get_code_entity_tool", fake_get_code_entity_tool, timeout=5)
+        result, action = executor.execute(
+            "get_code_entity_tool",
+            {"file_path": "core/demo.py", "entity_name": "Demo.run"},
+        )
+
+        assert action is None
+        assert "[短路]" in str(result)
+        assert called["count"] == 0
+        snapshot = get_session_state().get_attention_snapshot()
+        assert any(item["kind"] == "duplicate_entity_guard" for item in snapshot["recent_blockers"])
+
+    def test_cli_tool_records_deviation_when_recommendation_exists(self, executor):
+        session = reset_session_state()
+        session.set_tool_decision("inspect_entity", ["get_code_entity_tool", "read_file_tool"], ["cli_tool"])
+
+        def fake_cli_tool(command="", timeout=60):
+            return "[命令执行完成，无输出]"
+
+        executor.register_tool("cli_tool", fake_cli_tool, timeout=5)
+        executor.execute("cli_tool", {"command": "echo ok"})
+
+        snapshot = get_session_state().get_attention_snapshot()
+        assert any(item["tool_name"] == "cli_tool" for item in snapshot["tool_deviations"])
+        assert any(item["kind"] == "tool_deviation" for item in snapshot["recent_blockers"])
+
     def test_execute_tool_missing_required_args(self, executor):
         """测试执行工具时缺少必需参数"""
         # 缺少 file_path 参数
@@ -224,6 +629,97 @@ class TestToolExecutorErrorHandling:
         # 应该返回错误而不是抛出异常
         assert result is not None
         assert action is None
+
+    def test_python_lint_records_validation_signal(self, executor, monkeypatch):
+        reset_session_state()
+        executor.register_tool(
+            "python_lint_tool",
+            lambda target=".", max_issues=100: '{"status": "ok", "issue_count": 0, "issues": []}',
+            timeout=5,
+        )
+
+        result, _ = executor.execute("python_lint_tool", {"target": "."})
+
+        assert '"issue_count": 0' in str(result)
+        snapshot = get_session_state().get_attention_snapshot()
+        assert snapshot["recent_validation_results"][-1]["kind"] == "lint"
+
+    def test_successful_validation_and_task_completion_reward_pet_exp(self, executor):
+        reset_session_state()
+        reset_pet_system()
+        pet = get_pet_system()
+        start_exp = pet.data.attributes.exp
+        start_tasks = pet.data.attributes.total_tasks
+
+        executor.register_tool(
+            "python_lint_tool",
+            lambda target=".", max_issues=100: '{"status": "ok", "issue_count": 0, "issues": []}',
+            timeout=5,
+        )
+        executor.register_tool(
+            "task_update_tool",
+            lambda task_id=1, is_completed=True, result_summary="": '{"status":"success"}',
+            timeout=5,
+        )
+
+        executor.execute("python_lint_tool", {"target": "."})
+        executor.execute("task_update_tool", {"task_id": 1, "is_completed": True, "result_summary": "done"})
+
+        assert pet.data.attributes.exp > start_exp
+        assert pet.data.attributes.total_tasks == start_tasks + 1
+
+    def test_readonly_subagent_blocks_mutating_tools(self, executor, monkeypatch):
+        monkeypatch.setenv("VIBELUTION_SUBAGENT_MODE", "readonly")
+
+        result, action = executor.execute(
+            "write_file_tool",
+            {"file_path": "workspace/demo.txt", "content": "x"},
+        )
+
+        assert action is None
+        assert "[只读子代理]" in str(result)
+
+    def test_readonly_subagent_blocks_spawn_agent_tool(self, executor, monkeypatch):
+        monkeypatch.setenv("VIBELUTION_SUBAGENT_MODE", "readonly")
+
+        result, action = executor.execute(
+            "spawn_agent_tool",
+            {"goal": "继续分析", "_internal_delegate": True},
+        )
+
+        assert action is None
+        assert "禁止继续派发子 agent" in str(result)
+
+    def test_active_evolution_transaction_blocks_writes_outside_allowed_dirs(self, executor, monkeypatch, tmp_path):
+        project_root = tmp_path / "project"
+        project_root.mkdir(parents=True, exist_ok=True)
+
+        class _FakeWorkspace:
+            def __init__(self, root: Path):
+                self.project_root = root
+
+            def get_prompt_path(self, name: str) -> Path:
+                return self.project_root / "workspace" / "prompts" / name
+
+        evolution = SimpleNamespace(
+            allowed_target_dirs=["workspace/prompts/"],
+            audit_log_path="workspace/evolution/audit.jsonl",
+        )
+        monkeypatch.setattr(governor_module, "get_config", lambda: SimpleNamespace(evolution=evolution))
+        monkeypatch.setattr(governor_module, "get_workspace", lambda: _FakeWorkspace(project_root))
+        governor_module._governor = None
+
+        session = reset_session_state()
+        session.set_active_evolution_txn("txn_guard")
+        executor.register_tool("write_file_tool", lambda file_path, content: "ok", timeout=5)
+
+        result, action = executor.execute(
+            "write_file_tool",
+            {"file_path": "core/runtime.py", "content": "x"},
+        )
+
+        assert action is None
+        assert "[演化治理]" in str(result)
 
 
 class TestToolExecutorConvenience:

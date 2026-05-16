@@ -20,7 +20,7 @@ import time
 from collections import defaultdict
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 from core.logging import debug_logger
 
@@ -173,14 +173,6 @@ def _build_file_entry(fpath: Path, rel_root: Path) -> str:
     desc = f" — {doc}" if doc else " — _(无描述)_"
     lines = [f"**`{rel_path}`** ({lc}行){desc}"]
 
-    imps = info["imports"]
-    if imps:
-        shown = imps[:5]
-        imp_str = "  imports: " + ", ".join(shown)
-        if len(imps) > 5:
-            imp_str += f" +{len(imps) - 5}more"
-        lines.append(imp_str)
-
     # Test files: show class/test count
     if "tests/" in rel_path or rel_path.startswith("test_"):
         lines.append(f"  {info['n_classes']} test classes, {info['n_tests']} tests")
@@ -217,7 +209,7 @@ _RISK_RULES = [
 _SUBSYSTEM_LABELS = {
     "core/infrastructure":    "基础设施 (状态/事件/安全)",
     "core/prompt_manager":    "提示词引擎 (组装/缓存/代码地图)",
-    "core/orchestration":     "任务编排 (TaskPlanner)",
+    "core/orchestration":     "任务编排 (TaskManager)",
     "core/restarter_manager": "自我重启守护进程",
     "core/logging":           "日志系统",
     "core/ui":                "CLI 交互界面",
@@ -311,7 +303,7 @@ def _build_reverse_deps(files: List[Path], project_root: Path) -> str:
 
 
 def _build_test_coverage(files: List[Path], project_root: Path) -> str:
-    """Check which source files have corresponding test files. Show uncovered ones."""
+    """Check which source files have corresponding test files. Show summary + top critical uncovered."""
     tests_dir = project_root / "tests"
     if not tests_dir.is_dir():
         return ""
@@ -324,7 +316,6 @@ def _build_test_coverage(files: List[Path], project_root: Path) -> str:
         stem = Path(rel).stem
         test_file = tests_dir / f"test_{stem}.py"
         if not test_file.exists():
-            # Check for alternative naming patterns
             alt_names = [
                 tests_dir / f"test_{stem.replace('_', '')}.py",
                 tests_dir / f"test_{stem.rsplit('_', 1)[-1]}.py",
@@ -335,9 +326,28 @@ def _build_test_coverage(files: List[Path], project_root: Path) -> str:
     if not uncovered:
         return "## 测试覆盖 ✓ — 所有源文件均有对应测试\n"
 
-    lines = ["## 无测试覆盖", ""]
-    for rel in uncovered:
-        lines.append(f"- `{rel}`")
+    total_source = len([f for f in files if not f.relative_to(project_root).as_posix().startswith("tests/")])
+    covered = total_source - len(uncovered)
+    pct = int(covered / total_source * 100) if total_source else 0
+
+    lines = ["## 测试覆盖", ""]
+    lines.append(f"覆盖率: {pct}% ({covered}/{total_source}) | 未覆盖: {len(uncovered)} 个模块")
+    lines.append("")
+
+    # 仅列出关键模块（core/ 下的核心文件）
+    critical = [u for u in uncovered if u.startswith("core/infrastructure/") or u in ("agent.py", "reset.py")]
+    other_core = [u for u in uncovered if u.startswith("core/") and u not in critical]
+    rest = [u for u in uncovered if u not in critical and u not in other_core]
+
+    if critical:
+        lines.append("**关键未覆盖**:")
+        for rel in critical:
+            lines.append(f"- `{rel}`")
+    if other_core:
+        lines.append(f"\n其他 core/ 未覆盖 ({len(other_core)}): `{', '.join(other_core)}`")
+    if rest:
+        lines.append(f"其余 ({len(rest)}): `{', '.join(rest)}`")
+
     return "\n".join(lines) + "\n"
 
 
@@ -454,18 +464,41 @@ def scan_and_build_codebase_map(project_root: Optional[Path] = None, force: bool
         lines.append("")
 
         # 直接在该目录下的文件（无子目录）
-        for fpath in sorted(sub_groups.pop("", []), key=lambda p: p.name):
-            lines.append(_build_file_entry(fpath, project_root))
+        root_entries = sorted(sub_groups.pop("", []), key=lambda p: p.name)
+        if scan_dir == "tests":
+            # 测试目录摘要化：只显示数量和关键统计
+            test_count = len(root_entries)
+            total_classes = 0
+            total_tests = 0
+            for fpath in root_entries:
+                info = _scan_file(fpath)
+                if info:
+                    total_classes += info.get("n_classes", 0)
+                    total_tests += info.get("n_tests", 0)
+            lines.append(f"**{test_count} 个测试文件** — {total_classes} test classes, {total_tests} tests")
             lines.append("")
+        else:
+            for fpath in root_entries:
+                lines.append(_build_file_entry(fpath, project_root))
+                lines.append("")
 
         # 子目录按名称排序
         for subdir in sorted(sub_groups.keys()):
             sub_label = f"{scan_dir}/{subdir}"
-            lines.append(f"### 📂 {sub_label}/")
-            lines.append("")
-            for fpath in sorted(sub_groups[subdir], key=lambda p: p.name):
-                lines.append(_build_file_entry(fpath, project_root))
+            sub_files = sorted(sub_groups[subdir], key=lambda p: p.name)
+            # 深层子目录（>1 层）摘要化：只显示文件数量和名称
+            if "/" in subdir:
+                file_names = ", ".join(f.name for f in sub_files)
+                total_lines = sum(_scan_file(f).get("line_count", 0) if _scan_file(f) else 0 for f in sub_files)
+                lines.append(f"### 📂 {sub_label}/ — {len(sub_files)} 文件, {total_lines} 行")
+                lines.append(f"> `{file_names}`")
                 lines.append("")
+            else:
+                lines.append(f"### 📂 {sub_label}/")
+                lines.append("")
+                for fpath in sub_files:
+                    lines.append(_build_file_entry(fpath, project_root))
+                    lines.append("")
 
         lines.append("---")
         lines.append("")
@@ -573,7 +606,11 @@ def incremental_add_file(filepath: str) -> bool:
 
 
 def _update_map_file(map_path: Path, new_content: str, project_root: Path):
-    """更新地图文件内容（同步 front matter 中的元数据）。"""
+    """更新地图文件内容（同步文件级 front matter 注释）。
+
+    这里的 front matter 只用于文件自描述与缓存元数据，不参与 prompt section
+    的运行时注册。
+    """
     agent_lines = _get_agent_py_lines(project_root)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -730,12 +767,217 @@ def should_rescan(project_root: Optional[Path] = None) -> bool:
 
 
 def _strip_front_matter(content: str) -> str:
-    """剥离 YAML front matter（--- ... ---），保留正文供提示词使用。"""
+    """剥离 YAML front matter（--- ... ---），保留正文供提示词使用。
+
+    CODEBASE_MAP 文件头不是 section 元信息真源，只是文件级注释。
+    """
     if content.startswith("---\n"):
         idx = content.find("\n---\n", 4)
         if idx != -1:
             return content[idx + 5:].lstrip()
     return content
+
+
+def _extract_markdown_section(content: str, heading: str) -> str:
+    """提取指定二级标题及其正文。"""
+    pattern = rf"(^## {re.escape(heading)}\n.*?)(?=^## |\Z)"
+    match = re.search(pattern, content, flags=re.MULTILINE | re.DOTALL)
+    return match.group(1).strip() if match else ""
+
+
+def _get_prompt_runtime_context() -> Tuple[str, str]:
+    """读取当前任务相关上下文。"""
+    goal = ""
+    state_memory = ""
+    try:
+        from core.prompt_manager.prompt_manager import get_prompt_manager
+        pm = get_prompt_manager()
+        goal = (pm.get_current_goal() or "").strip()
+        state_memory = (pm.state_memory or "").strip()
+    except Exception:
+        pass
+    return goal, state_memory
+
+
+def _score_file_relevance(fpath: Path, project_root: Path, context_text: str, hot_paths: set[str]) -> int:
+    rel = fpath.relative_to(project_root).as_posix()
+    score = 0
+    if rel in hot_paths:
+        score += 10
+    for path in hot_paths:
+        if rel.startswith(path.rstrip("/")):
+            score += 6
+    info = _scan_file(fpath) or {}
+    haystack = " ".join([
+        rel.lower(),
+        str(info.get("docstring", "")).lower(),
+        " ".join(info.get("imports", [])).lower(),
+    ])
+    keywords = [token for token in re.findall(r"[a-zA-Z_\-\u4e00-\u9fff]{2,}", context_text.lower()) if len(token) >= 2]
+    for keyword in keywords[:20]:
+        if keyword and keyword in haystack:
+            score += 2
+    if rel.startswith(("core/prompt_manager/", "core/infrastructure/", "agent.py", "config/")):
+        score += 1
+    return score
+
+
+def _module_name_for_path(fpath: Path, project_root: Path) -> str:
+    rel = fpath.relative_to(project_root).as_posix()
+    if rel.endswith(".py"):
+        rel = rel[:-3]
+    return rel.replace("/", ".")
+
+
+def _build_dependency_index(files: List[Path], project_root: Path) -> Tuple[Dict[str, List[str]], Dict[str, str]]:
+    """构建模块反向依赖索引。"""
+    reverse_imports: Dict[str, List[str]] = defaultdict(list)
+    module_to_path: Dict[str, str] = {}
+    for fpath in files:
+        rel = fpath.relative_to(project_root).as_posix()
+        module_name = _module_name_for_path(fpath, project_root)
+        module_to_path[module_name] = rel
+
+    for fpath in files:
+        rel = fpath.relative_to(project_root).as_posix()
+        module_name = _module_name_for_path(fpath, project_root)
+        info = _scan_file(fpath) or {}
+        for imported in info.get("imports", []):
+            target = imported
+            while target:
+                if target in module_to_path:
+                    reverse_imports[module_to_path[target]].append(rel)
+                    break
+                if "." not in target:
+                    break
+                target = target.rsplit(".", 1)[0]
+    return reverse_imports, module_to_path
+
+
+def _candidate_tests_for_path(rel_path: str) -> List[str]:
+    """根据源文件路径推测测试文件。"""
+    path = Path(rel_path)
+    if rel_path.startswith("tests/") or path.name.startswith("test_"):
+        return [rel_path]
+    stem = path.stem
+    candidates = [
+        f"tests/test_{stem}.py",
+        f"tests/test_{stem.replace('_', '')}.py",
+    ]
+    if path.parent.parts:
+        parent = path.parent.parts[-1]
+        candidates.append(f"tests/test_{parent}.py")
+        candidates.append(f"tests/{parent}/test_{stem}.py")
+    return list(dict.fromkeys(candidates))
+
+
+def _build_impact_chain_view(
+    top_files: List[Path],
+    files: List[Path],
+    project_root: Path,
+) -> str:
+    """为当前热点文件构建影响链路视图。"""
+    if not top_files:
+        return ""
+
+    reverse_imports, _ = _build_dependency_index(files, project_root)
+    lines = ["## 影响链路"]
+    for fpath in top_files[:3]:
+        rel = fpath.relative_to(project_root).as_posix()
+        impacted = reverse_imports.get(rel, [])
+        affected_tests = _candidate_tests_for_path(rel)
+        lines.append(f"- `{rel}`")
+        if impacted:
+            preview = ", ".join(f"`{item}`" for item in impacted[:3])
+            if len(impacted) > 3:
+                preview += " ..."
+            lines.append(f"  - 可能牵动模块: {preview}")
+        if affected_tests:
+            preview = ", ".join(f"`{item}`" for item in affected_tests[:3])
+            lines.append(f"  - 建议先看测试: {preview}")
+    return "\n".join(lines)
+
+
+def _build_task_focused_view(project_root: Path, full_content: str) -> str:
+    """构建面向当前任务的局部导航视图。"""
+    goal, state_memory = _get_prompt_runtime_context()
+    session = None
+    attention = {}
+    recent_changes = []
+    try:
+        from core.infrastructure.agent_session import get_session_state
+        session = get_session_state()
+        attention = session.get_attention_snapshot()
+    except Exception:
+        attention = {}
+    try:
+        from core.infrastructure.git_memory import get_git_memory_service
+        recent_changes = get_git_memory_service().get_recent_project_changes(limit=4)
+    except Exception:
+        recent_changes = []
+
+    hot_paths = set(attention.get("modified_paths") or [])
+    for change in recent_changes:
+        if getattr(change, "path", None):
+            hot_paths.add(change.path)
+
+    files = _collect_python_files(project_root)
+    context_text = "\n".join(part for part in [goal, state_memory] if part).strip()
+    scored = []
+    for fpath in files:
+        score = _score_file_relevance(fpath, project_root, context_text, hot_paths)
+        if score > 0:
+            scored.append((score, fpath))
+    scored.sort(key=lambda item: (-item[0], item[1].as_posix()))
+    top_files = [f for _, f in scored[:6]]
+
+    lines = ["## 当前任务局部地图"]
+    if goal:
+        lines.append(f"- 当前目标: {goal}")
+    if attention.get("modified_paths"):
+        display = ", ".join(f"`{path}`" for path in (attention.get("modified_paths") or [])[:4])
+        lines.append(f"- 当前焦点路径: {display}")
+    if attention.get("modified_entities"):
+        display = ", ".join(f"`{name}`" for name in (attention.get("modified_entities") or [])[:6])
+        lines.append(f"- 当前焦点实体: {display}")
+    if top_files:
+        lines.append("- 建议先读:")
+        for fpath in top_files[:4]:
+            rel = fpath.relative_to(project_root).as_posix()
+            info = _scan_file(fpath) or {}
+            doc = info.get("docstring") or "无描述"
+            lines.append(f"  - `{rel}`: {doc}")
+    if recent_changes:
+        lines.append("- 最近牵动链路:")
+        for change in recent_changes[:3]:
+            suffix = f" ({change.subject})" if getattr(change, "subject", None) else ""
+            lines.append(f"  - `{change.path}`: {change.change_type}{suffix}")
+    if attention.get("last_validation_summary"):
+        lines.append(f"- 最近验证焦点: {attention['last_validation_summary']}")
+
+    impact_chain = _build_impact_chain_view(top_files, files, project_root)
+
+    overview = _extract_markdown_section(full_content, "子系统概览")
+    dependency = _extract_markdown_section(full_content, "核心依赖 (被依赖最多的模块 Top-10)")
+    coverage = _extract_markdown_section(full_content, "测试覆盖")
+
+    compact_sections = ["## 全局骨架摘要"]
+    if overview:
+        compact_sections.append(overview)
+    if dependency:
+        dep_lines = dependency.splitlines()
+        compact_sections.append("\n".join(dep_lines[:6]))
+    if coverage:
+        cov_lines = coverage.splitlines()
+        compact_sections.append("\n".join(cov_lines[:4]))
+
+    sections = [
+        "\n".join(lines).strip(),
+    ]
+    if impact_chain:
+        sections.append(impact_chain.strip())
+    sections.append("\n".join(compact_sections).strip())
+    return "\n\n".join(section for section in sections if section).strip()
 
 
 def get_codebase_map(force_refresh: bool = False) -> str:
@@ -758,7 +1000,12 @@ def get_codebase_map(force_refresh: bool = False) -> str:
                 content = scan_and_build_codebase_map()
         else:
             content = scan_and_build_codebase_map()
-    return _strip_front_matter(content)
+    stripped = _strip_front_matter(content)
+    project_root = _resolve_project_root()
+    task_view = _build_task_focused_view(project_root, stripped)
+    if not task_view:
+        return stripped
+    return f"{task_view}\n\n---\n\n{stripped}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

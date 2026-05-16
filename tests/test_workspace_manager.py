@@ -17,13 +17,10 @@
 - Workspace 状态报告
 """
 
-import os
-import json
 import sys
 import sqlite3
 import pytest
 from pathlib import Path
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -141,6 +138,30 @@ class TestPathProperties:
         path = isolated_workspace.get_archive_path(5)
         assert "5" in str(path)
         assert path.parent == isolated_workspace.archives_dir
+
+    def test_workspace_root_does_not_follow_cwd(self, tmp_path, monkeypatch):
+        """workspace 根目录应由项目根决定，而不是当前 cwd"""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        (project_root / "agent.py").write_text("# test", encoding="utf-8")
+        nested_cwd = tmp_path / "elsewhere"
+        nested_cwd.mkdir()
+
+        monkeypatch.chdir(nested_cwd)
+        monkeypatch.setattr(
+            "core.infrastructure.workspace_manager._resolve_project_root",
+            lambda: project_root.resolve(),
+        )
+
+        from core.infrastructure.workspace_manager import WorkspaceManager
+
+        old_instance = WorkspaceManager._instance
+        WorkspaceManager._instance = None
+        try:
+            wm = WorkspaceManager()
+            assert wm.root == project_root / "workspace"
+        finally:
+            WorkspaceManager._instance = old_instance
 
 
 # ============================================================================

@@ -8,6 +8,8 @@ from typing import Optional, List, Dict, Any
 from core.prompt_manager.types import (
     SystemPrompt,
     SystemPromptSection,
+    SectionRenderResult,
+    PromptBuildResult,
     as_system_prompt,
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 )
@@ -17,7 +19,8 @@ from core.prompt_manager.section_cache import SystemPromptCache
 def get_system_prompt(
     sections: List[SystemPromptSection],
     cache: SystemPromptCache,
-) -> SystemPrompt:
+    all_sections: Optional[List[SystemPromptSection]] = None,
+) -> PromptBuildResult:
     """组装 SystemPrompt。
 
     流程：
@@ -33,12 +36,11 @@ def get_system_prompt(
     Returns:
         组装完成的 SystemPrompt。
     """
-    sorted_sections = sorted(sections, key=lambda s: s.priority)
-
     parts: List[str] = []
+    results: List[SectionRenderResult] = []
     found_boundary = False
 
-    for section in sorted_sections:
+    for section in sections:
         if section.cache_break:
             # 动态章节：每轮重算，不读缓存
             content = section.compute()
@@ -54,15 +56,30 @@ def get_system_prompt(
                 content = section.compute()
                 cache.set(section.name, content)
 
+        rendered = SectionRenderResult(
+            name=section.name,
+            priority=section.priority,
+            required=section.required,
+            cache_break=section.cache_break,
+            description=section.description,
+            content=content,
+            is_empty=not bool(content),
+        )
+        results.append(rendered)
+
         if content:
             parts.append(content)
 
-    # 可用章节提示（精简为一行，跳过空章节）
-    available = _build_available_sections(sorted_sections)
+    # 可用章节提示：基于本次真实渲染结果 + 注册表
+    available = _build_available_sections(results, all_sections or sections)
     if available:
         parts.insert(0, available)
 
-    return as_system_prompt(parts)
+    return PromptBuildResult(
+        prompt=as_system_prompt(parts),
+        section_results=tuple(results),
+        available_sections_text=available,
+    )
 
 
 def split_sys_prompt_prefix(sp: SystemPrompt):
@@ -92,21 +109,35 @@ def to_string(sp: SystemPrompt) -> str:
     return "\n\n".join(s for s in sp if s != SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
 
 
-def _build_available_sections(sections: List[SystemPromptSection]) -> str:
-    """生成可用章节提示（精简为一行，跳过无内容空章节）。"""
-    # 只列出有实际内容或非空的章节
-    active = [s for s in sections if not s.is_empty]
-    if not active:
+def _build_available_sections(
+    results: List[SectionRenderResult],
+    sections: List[SystemPromptSection],
+) -> str:
+    """生成章节索引：优先展示本次真实启用结果，再展示可选能力。"""
+    active = [r for r in results if not r.is_empty]
+    if not active and not sections:
         return ""
 
-    required_names = "、".join(s.name for s in active if s.required)
-    optional_names = "、".join(s.name for s in active if not s.required)
+    enabled_names = "、".join(r.name for r in active)
+    required_names = "、".join(r.name for r in active if r.required)
+    optional_names = "、".join(r.name for r in active if not r.required)
+
+    registered_optional = [
+        s.name for s in sections
+        if not s.required and s.name not in {r.name for r in active}
+    ]
+    registered_optional_names = "、".join(registered_optional)
 
     parts = ["## 提示词组件\n"]
+    if enabled_names:
+        parts.append(f"- 已启用: {enabled_names}\n")
     if required_names:
         parts.append(f"- 必选: {required_names}\n")
     if optional_names:
-        parts.append(f"- 可选: {optional_names}\n")
+        parts.append(f"- 当前可选: {optional_names}\n")
+    if registered_optional_names:
+        parts.append(f"- 其他可选: {registered_optional_names}\n")
+    if optional_names or registered_optional_names:
         parts.append("- 使用 `<active_components>` 标签按需激活可选组件\n")
 
     return "".join(parts)

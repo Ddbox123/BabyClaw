@@ -8,6 +8,10 @@ Pydantic 数据模型定义
 2. 从环境变量覆盖
 3. 从字典创建
 4. 程序化修改
+
+默认值语义：
+- 本文件中的 default / default_factory 仅作为最低优先级兜底
+- 项目主配置面由 config.toml / config.example.toml 显式表达
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+from urllib.parse import urlparse
 
 from pydantic import (
     BaseModel,
@@ -26,84 +31,174 @@ from pydantic import (
 from pydantic import ConfigDict
 
 
+PROVIDER_API_KEY_ENV_MAP: Dict[str, str] = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "aliyun": "DASHSCOPE_API_KEY",
+    "zhipu": "ZHIPU_API_KEY",
+    "google": "GOOGLE_API_KEY",
+    "siliconflow": "SILICONFLOW_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "minimax": "MINIMAX_API_KEY",
+}
+
+PROVIDER_API_KEY_ENV_ALIASES: Dict[str, List[str]] = {
+    "minimax": ["MINIMAX2_7_API_KEY", "minimax2.7"],
+}
+
+
+def get_provider_api_key_env(provider: str) -> Optional[str]:
+    """返回 provider 对应的 API Key 环境变量名。"""
+    normalized = (provider or "").strip().lower()
+    return PROVIDER_API_KEY_ENV_MAP.get(normalized)
+
+
+def _read_env_var(name: str) -> Optional[str]:
+    """读取环境变量；仅在显式开启时兼容 Windows 用户级变量回退。"""
+    value = os.environ.get(name)
+    if value:
+        return value
+
+    allow_user_env_fallback = os.environ.get("VIBELUTION_ENABLE_USER_ENV_FALLBACK", "").strip().lower()
+    if os.name == "nt" and allow_user_env_fallback in {"1", "true", "yes", "on"}:
+        try:
+            import subprocess
+
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", f"[Environment]::GetEnvironmentVariable('{name}', 'User')"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            value = result.stdout.strip()
+            if value:
+                return value
+        except Exception:
+            return None
+
+    return None
+
+
+def _is_local_base_url(base_url: str) -> bool:
+    parsed = urlparse(str(base_url or "").strip())
+    return parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+
+
+def resolve_api_key(provider: str, explicit_api_key: str = "") -> Optional[str]:
+    """解析当前 provider 的 API Key。"""
+    if explicit_api_key:
+        return explicit_api_key
+
+    normalized = (provider or "").strip().lower()
+    env_var = get_provider_api_key_env(provider)
+    if env_var:
+        value = _read_env_var(env_var)
+        if value:
+            return value
+
+    for alias in PROVIDER_API_KEY_ENV_ALIASES.get(normalized, []):
+        value = _read_env_var(alias)
+        if value:
+            return value
+
+    return None
+
+
 # ============================================================================
 # LLM 配置
 # ============================================================================
 
-class LLMConfig(BaseModel):
-    """
-    大语言模型 (LLM) 配置
-
-    Attributes:
-        provider: 模型提供商 (openai, anthropic, deepseek, aliyun 等)
-        model_name: 具体模型名称
-        api_key: API 密钥（可从配置文件读取）
-        api_base: API 端点 URL
-        temperature: 采样温度，控制输出的随机性 (0.0-2.0)
-        max_tokens: 最大输出 token 数
-        api_timeout: API 请求超时时间（秒）
-        connect_timeout: 连接超时时间（秒）
-        discovery: 模型动态发现配置
-    """
+class RetryPolicyConfig(BaseModel):
+    """重试策略。"""
     model_config = ConfigDict(extra="ignore")
 
-    provider: str = Field(
-        default="aliyun",
-        description="LLM 提供商: openai, anthropic, deepseek, aliyun, google, ollama, local 等"
-    )
-    model_name: str = Field(
-        default="qwen-plus",
-        description="具体模型名称，如 gpt-4, claude-3-5-sonnet-20241022, deepseek-chat"
-    )
-    api_key: str = Field(
-        default="",
-        description="API 密钥，可从环境变量获取"
-    )
-    api_base: str = Field(
-        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        description="API 端点 URL"
-    )
-    temperature: float = Field(
-        default=0.7,
-        ge=0.0,
-        le=2.0,
-        description="采样温度 (0.0-2.0)，越低越确定性，越高越随机"
-    )
-    max_tokens: int = Field(
-        default=4096,
-        gt=0,
-        description="最大输出 token 数（会被运行时动态发现覆盖）"
-    )
-    api_timeout: int = Field(
-        default=60,
-        gt=0,
-        description="API 请求超时时间（秒）"
-    )
-    connect_timeout: int = Field(
-        default=30,
-        gt=0,
-        description="连接超时时间（秒）"
-    )
+    max_attempts: int = Field(default=5, ge=1)
+    backoff_base_seconds: float = Field(default=2.0, ge=0.1)
 
-    @field_validator("provider")
-    @classmethod
-    def validate_provider(cls, v: str) -> str:
-        """验证提供商名称"""
-        valid_providers = [
-            "openai", "anthropic", "deepseek", "aliyun",
-            "google", "zhipu", "ollama", "siliconflow", "groq", "minimax", "local"
-        ]
-        if v.lower() not in valid_providers:
-            pass
-        return v.lower()
 
-    @field_validator("temperature")
+class ProviderConfig(BaseModel):
+    """Provider 级配置。"""
+    model_config = ConfigDict(extra="ignore")
+
+    provider_id: str = Field(default="")
+    kind: str = Field(default="openai")
+    api_key: str = Field(default="")
+    api_key_env: str = Field(default="")
+    base_url: str = Field(default="")
+    extra_headers: Dict[str, str] = Field(default_factory=dict)
+    compat_mode: str = Field(default="native")
+    requires_api_key: bool = Field(default=True)
+    context_window: int = Field(default=32768, gt=0)
+
+    @field_validator("kind")
     @classmethod
-    def validate_temperature(cls, v: float) -> float:
-        """确保温度在有效范围内"""
-        if not 0.0 <= v <= 2.0:
-            raise ValueError(f"Temperature must be between 0.0 and 2.0, got {v}")
-        return round(v, 2)
+    def normalize_kind(cls, v: str) -> str:
+        return (v or "").strip().lower()
+
+    def resolve_api_key(self) -> Optional[str]:
+        env_candidates: List[str] = []
+        if self.api_key_env:
+            env_candidates.append(self.api_key_env)
+        canonical_env = get_provider_api_key_env(self.kind)
+        if canonical_env and canonical_env not in env_candidates:
+            env_candidates.append(canonical_env)
+        for env_var in env_candidates:
+            value = _read_env_var(env_var)
+            if value:
+                return value
+        for alias in PROVIDER_API_KEY_ENV_ALIASES.get((self.kind or "").strip().lower(), []):
+            value = _read_env_var(alias)
+            if value:
+                return value
+        if self.api_key:
+            return self.api_key
+        return None
+
+
+class LLMProfile(BaseModel):
+    """模型运行档案。"""
+    model_config = ConfigDict(extra="ignore")
+
+    profile_id: str = Field(default="")
+    provider_id: str = Field(default="default")
+    model: str = Field(default="qwen-plus")
+    transport: str = Field(default="chat_completions")
+    contract: str = Field(default="tool_chat")
+    reasoning_state_field: str = Field(default="")
+    strict_compatibility: bool = Field(default=True)
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    max_output_tokens: int = Field(default=4096, gt=0)
+    timeout: int = Field(default=60, gt=0)
+    connect_timeout: int = Field(default=30, gt=0)
+    streaming: bool = Field(default=True)
+    tool_calling_mode: str = Field(default="auto")
+    retry_policy: RetryPolicyConfig = Field(default_factory=RetryPolicyConfig)
+    discovery_enabled: bool = Field(default=True)
+
+    @field_validator("transport")
+    @classmethod
+    def normalize_transport(cls, v: str) -> str:
+        value = (v or "chat_completions").strip().lower()
+        if value not in {"chat_completions", "responses"}:
+            raise ValueError("transport must be one of: chat_completions, responses")
+        return value
+
+    @field_validator("contract")
+    @classmethod
+    def normalize_contract(cls, v: str) -> str:
+        value = (v or "tool_chat").strip().lower()
+        if value not in {"basic_chat", "tool_chat", "reasoning_chat", "responses_agent"}:
+            raise ValueError(
+                "contract must be one of: basic_chat, tool_chat, reasoning_chat, responses_agent"
+            )
+        return value
+
+    @field_validator("reasoning_state_field")
+    @classmethod
+    def normalize_reasoning_state_field(cls, v: str) -> str:
+        return (v or "").strip()
 
 
 class LLMDiscoveryConfig(BaseModel):
@@ -139,55 +234,128 @@ class LLMDiscoveryConfig(BaseModel):
     )
 
 
-class LocalLLMConfig(BaseModel):
-    """本地部署 LLM 配置（当 provider = "local" 时生效）"""
+DEFAULT_ROLE_PROFILE_IDS = (
+    "primary",
+    "mental_model",
+    "subagent_worker",
+    "subagent_explorer",
+    "supervised_baseline",
+    "supervised_candidate",
+    "compression",
+)
+
+
+class LLMConfig(BaseModel):
+    """新的 LLM 根配置：providers / profiles / discovery。"""
     model_config = ConfigDict(extra="ignore")
 
-    url: str = Field(
-        default="http://localhost:11434/v1",
-        description="本地服务 URL（Ollama, LM Studio, vLLM 等）"
-    )
-    model: str = Field(
-        default="qwen2.5:7b",
-        description="本地模型名称"
-    )
-    require_api_key: bool = Field(
-        default=False,
-        description="是否需要 API Key"
-    )
-    api_key: str = Field(
-        default="",
-        description="本地 API Key（如果需要）"
-    )
-    streaming: bool = Field(
-        default=True,
-        description="是否启用流式响应"
-    )
-    context_window: int = Field(
-        default=8192,
-        gt=0,
-        description="上下文窗口大小（自动发现失败时使用）"
-    )
-    auto_detect_model: bool = Field(
-        default=True,
-        description="是否自动检测可用模型"
-    )
-    model_refresh_interval: int = Field(
-        default=300,
-        gt=0,
-        description="模型列表刷新间隔（秒）"
-    )
-    max_retries: int = Field(
-        default=3,
-        ge=0,
-        description="连接失败重试次数"
-    )
-    retry_delay: float = Field(
-        default=1.0,
-        ge=0,
-        description="重试间隔（秒）"
-    )
+    providers: Dict[str, ProviderConfig] = Field(default_factory=dict)
+    profiles: Dict[str, LLMProfile] = Field(default_factory=dict)
+    model_library: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    discovery: LLMDiscoveryConfig = Field(default_factory=LLMDiscoveryConfig)
 
+    @model_validator(mode="after")
+    def ensure_defaults(self) -> "LLMConfig":
+        if not self.providers:
+            self.providers["default"] = ProviderConfig(
+                provider_id="default",
+                kind="aliyun",
+                api_key_env="DASHSCOPE_API_KEY",
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                compat_mode="openai",
+                requires_api_key=True,
+                context_window=131072,
+            )
+        if not self.profiles:
+            self.profiles["primary"] = LLMProfile(
+                profile_id="primary",
+                provider_id=next(iter(self.providers.keys())),
+                model="qwen-plus",
+                max_output_tokens=4096,
+            )
+        for provider_id, provider in self.providers.items():
+            if not provider.provider_id:
+                provider.provider_id = provider_id
+        for profile_id, profile in self.profiles.items():
+            if not profile.profile_id:
+                profile.profile_id = profile_id
+        return self
+
+    def get_role_profile_id(self, role: str = "primary") -> str:
+        normalized_role = (role or "primary").strip() or "primary"
+        if normalized_role in self.profiles:
+            return normalized_role
+        if "primary" in self.profiles:
+            return "primary"
+        if self.profiles:
+            return next(iter(self.profiles.keys()))
+        raise ValueError("missing profile: primary")
+
+    def get_profile(self, profile_id: Optional[str] = None, role: str = "primary") -> LLMProfile:
+        resolved_id = profile_id or self.get_role_profile_id(role)
+        profile = self.profiles.get(resolved_id)
+        if profile is None:
+            raise ValueError(f"missing profile: {resolved_id}")
+        return profile
+
+    def get_provider(self, provider_id: Optional[str] = None, role: str = "primary") -> ProviderConfig:
+        resolved_provider_id = provider_id
+        if resolved_provider_id is None:
+            resolved_provider_id = self.get_profile(role=role).provider_id
+        provider = self.providers.get(resolved_provider_id)
+        if provider is None:
+            raise ValueError(f"missing provider: {resolved_provider_id}")
+        return provider
+
+    def get_model_library_entry_for_profile(self, profile: LLMProfile) -> tuple[str, Dict[str, Any]] | tuple[None, None]:
+        for model_id, item in self.model_library.items():
+            if not isinstance(item, dict):
+                continue
+            if item.get("provider_id") == profile.provider_id and item.get("model") == profile.model:
+                return model_id, item
+        return None, None
+
+    def resolve_api_key_for_profile(self, profile_id: Optional[str] = None, role: str = "primary") -> Optional[str]:
+        profile = self.get_profile(profile_id=profile_id, role=role)
+        provider = self.get_provider(profile.provider_id)
+        _, model_entry = self.get_model_library_entry_for_profile(profile)
+        if isinstance(model_entry, dict):
+            model_env = str(model_entry.get("api_key_env") or "").strip()
+            if model_env:
+                value = _read_env_var(model_env)
+                if value:
+                    return value
+        return provider.resolve_api_key()
+
+    def get_api_key_source_label_for_profile(self, profile_id: Optional[str] = None, role: str = "primary") -> str:
+        profile = self.get_profile(profile_id=profile_id, role=role)
+        provider = self.get_provider(profile.provider_id)
+        _, model_entry = self.get_model_library_entry_for_profile(profile)
+        if isinstance(model_entry, dict):
+            model_env = str(model_entry.get("api_key_env") or "").strip()
+            if model_env and _read_env_var(model_env):
+                return f"model-env:{model_env}"
+
+        provider_env = provider.api_key_env or get_provider_api_key_env(provider.kind)
+        if provider_env and _read_env_var(provider_env):
+            return f"provider-env:{provider_env}"
+
+        if provider.api_key:
+            return "config-or-kwargs"
+
+        canonical_env = get_provider_api_key_env(provider.kind)
+        if canonical_env and canonical_env != provider_env and _read_env_var(canonical_env):
+            return f"provider-env:{canonical_env}"
+
+        return "missing"
+
+    @property
+    def api_key(self) -> str:
+        return self.get_provider(role="primary").api_key or ""
+
+    @api_key.setter
+    def api_key(self, value: str) -> None:
+        self.get_provider(role="primary").api_key = value
 
 # ============================================================================
 # Agent 行为配置
@@ -433,7 +601,7 @@ class AvatarConfig(BaseModel):
 
     preset: str = Field(
         default="lobster",
-        description="预设形象: lobster(龙虾), shrimp(小虾米), crab(小螃蟹), cat(猫猫), chick(小鸡)"
+        description="预设形象: lobster(龙虾), shrimp(小虾米), crab(小螃蟹), cat(猫猫), chick(小鸡), bunny(兔兔), slime(果冻团), penguin(企鹅), moose(驼鹿)"
     )
 
 
@@ -605,18 +773,6 @@ class ToolConfig(BaseModel):
     """工具模块配置"""
     model_config = ConfigDict(extra="ignore")
 
-    web_search_enabled: bool = Field(
-        default=True,
-        description="是否启用网络搜索（向后兼容）"
-    )
-    file_edit_enabled: bool = Field(
-        default=True,
-        description="是否启用文件编辑（向后兼容）"
-    )
-    syntax_check_enabled: bool = Field(
-        default=True,
-        description="是否启用语法检查（向后兼容）"
-    )
     restart_enabled: bool = Field(
         default=True,
         description="是否允许 Agent 自我重启"
@@ -962,7 +1118,7 @@ class PromptConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     default_components: List[str] = Field(
-        default=["SOUL", "SPEC", "ENV_INFO"],
+        default=["SOUL", "SPEC", "CODEBASE_MAP", "GIT_MEMORY", "DELEGATION_RULES", "CONFIG_AWARENESS", "LANGUAGE_AWARENESS", "GIT_RULES", "MEMORY", "ENV_INFO"],
         description="默认拼装的组件列表（静态章节 + 内置动态章节）"
     )
     sections: List[SectionConfig] = Field(
@@ -1005,6 +1161,10 @@ class UIConfig(BaseModel):
     """CLI UI 配置"""
     model_config = ConfigDict(extra="ignore")
 
+    language: str = Field(
+        default="zh",
+        description="界面语言（zh 或 en）"
+    )
     theme: str = Field(
         default="lobster",
         description="主题名称"
@@ -1080,6 +1240,33 @@ class DebugConfig(BaseModel):
         default=True,
         description="Token 使用统计"
     )
+
+
+# ============================================================================
+# 运行时基线配置
+# ============================================================================
+
+class RuntimeConfig(BaseModel):
+    """运行时基线与启动前检查配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    profile: str = Field(
+        default="",
+        description="稳定运行档案：safe_local / safe_remote / debug / ci"
+    )
+    preflight_doctor: bool = Field(
+        default=True,
+        description="启动前是否执行 doctor 自检"
+    )
+    require_venv: bool = Field(
+        default=True,
+        description="是否要求使用项目 .venv 解释器"
+    )
+
+    @field_validator("profile")
+    @classmethod
+    def normalize_profile(cls, v: str) -> str:
+        return (v or "").strip().lower()
 
 
 # ============================================================================
@@ -1194,24 +1381,6 @@ class SoundConfig(BaseModel):
 
 
 # ============================================================================
-# 兼容性配置
-# ============================================================================
-
-class CompatConfig(BaseModel):
-    """向后兼容配置"""
-    model_config = ConfigDict(extra="ignore")
-
-    legacy_api_enabled: bool = Field(
-        default=True,
-        description="启用旧版 API"
-    )
-    legacy_config_path: str = Field(
-        default="config.py",
-        description="旧版配置路径"
-    )
-
-
-# ============================================================================
 # 主配置类
 # ============================================================================
 
@@ -1229,14 +1398,12 @@ class AppConfig(BaseModel):
         config = AppConfig.from_toml("config.toml")
 
         # 访问配置
-        config.llm.model_name = "gpt-4"
-        print(config.llm.temperature)
+        config.llm.get_profile(role="primary").model = "gpt-4"
+        print(config.llm.get_profile(role="primary").temperature)
     """
     model_config = ConfigDict(extra="ignore")
 
     llm: LLMConfig = Field(default_factory=LLMConfig)
-    llm_discovery: LLMDiscoveryConfig = Field(default_factory=LLMDiscoveryConfig)
-    llm_local: LocalLLMConfig = Field(default_factory=LocalLLMConfig)
     avatar: AvatarConfig = Field(default_factory=AvatarConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     context_compression: ContextCompressionConfig = Field(
@@ -1254,7 +1421,7 @@ class AppConfig(BaseModel):
     parser: ParserConfig = Field(default_factory=ParserConfig)
     prompt: PromptConfig = Field(default_factory=PromptConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)
-    compat: CompatConfig = Field(default_factory=CompatConfig)
+    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
 
     # 宠物系统配置
     pet: PetConfig = Field(default_factory=PetConfig)
@@ -1279,15 +1446,8 @@ class AppConfig(BaseModel):
     @computed_field
     @property
     def effective_api_base(self) -> Optional[str]:
-        """
-        获取实际的 API 端点
-
-        当 provider = "local" 时，使用 llm_local.url；
-        否则使用 llm.api_base。
-        """
-        if self.llm.provider == "local":
-            return self.llm_local.url
-        return self.llm.api_base
+        primary = self.llm.get_profile(role="primary")
+        return self.llm.get_provider(primary.provider_id).base_url
 
     def model_dump_simple(self) -> dict:
         """
@@ -1296,12 +1456,14 @@ class AppConfig(BaseModel):
         Returns:
             包含主要配置的字典
         """
+        primary = self.llm.get_profile(role="primary")
+        provider = self.llm.get_provider(primary.provider_id)
         return {
             "llm": {
-                "provider": self.llm.provider,
-                "model_name": self.llm.model_name,
-                "temperature": self.llm.temperature,
-                "max_tokens": self.llm.max_tokens,
+                "provider": provider.kind,
+                "model_name": primary.model,
+                "temperature": primary.temperature,
+                "max_tokens": primary.max_output_tokens,
             },
             "agent": {
                 "name": self.agent.name,
@@ -1315,6 +1477,142 @@ class AppConfig(BaseModel):
             "log_level": self.log.level,
         }
 
+    def get_api_key_source_label(self) -> str:
+        """返回当前 API Key 的粗粒度来源标签。"""
+        return self.llm.get_api_key_source_label_for_profile(role="primary")
+
+    def diagnose_config(self) -> Dict[str, Any]:
+        """生成配置健康摘要，供 prompt / doctor 等感知层使用。"""
+        warnings: List[str] = []
+        blocking_issues: List[str] = []
+        suggested_actions: List[str] = []
+
+        primary = self.llm.get_profile(role="primary")
+        provider_cfg = self.llm.get_provider(primary.provider_id)
+        provider = provider_cfg.kind
+        profile = self.runtime.profile or "(none)"
+        api_key_source = self.get_api_key_source_label()
+        has_api_key = bool(self.get_api_key())
+
+        if provider != "local" and not has_api_key:
+            blocking_issues.append(f"{provider} provider 缺少可用 API Key")
+            suggested_actions.append("设置对应 provider 的环境变量，或在 config.toml 中显式配置 api_key")
+
+        if provider == "local" and not _is_local_base_url(provider_cfg.base_url):
+            blocking_issues.append("local provider 指向了非本地 API base")
+            suggested_actions.append("将 local provider 的 base_url 改为 localhost / 127.0.0.1 / ::1")
+
+        if provider != "local" and _is_local_base_url(provider_cfg.base_url):
+            warnings.append(f"{provider} provider 使用了本地 API base")
+
+        if "CONFIG_AWARENESS" not in self.prompt.default_components:
+            warnings.append("prompt.default_components 未包含 CONFIG_AWARENESS")
+            suggested_actions.append("将 CONFIG_AWARENESS 加入默认 prompt 组件，保持配置自感知常驻")
+
+        if "LANGUAGE_AWARENESS" not in self.prompt.default_components:
+            warnings.append("prompt.default_components 未包含 LANGUAGE_AWARENESS")
+            suggested_actions.append("将 LANGUAGE_AWARENESS 加入默认 prompt 组件，压制自然语言输出向英文漂移")
+
+        if "MEMORY" not in self.prompt.default_components:
+            warnings.append("prompt.default_components 未包含 MEMORY")
+            suggested_actions.append("将 MEMORY 加入默认 prompt 组件，确保状态记忆与复盘约束进入当前轮提示词")
+
+        if not self.prompt.sections:
+            warnings.append("未配置任何静态 prompt sections")
+            suggested_actions.append("至少保留 SOUL / SPEC 两个静态章节")
+
+        if profile == "safe_remote" and primary.connect_timeout > 20:
+            warnings.append("safe_remote 档案下 connect_timeout 高于推荐值 20")
+
+        if profile == "safe_local" and provider != "local":
+            warnings.append("safe_local 档案下当前 provider 不是 local")
+
+        if self.tools.search.max_results > 200:
+            warnings.append("tools.search.max_results 较高，可能导致上下文噪声增加")
+
+        from core.llm import doctor_llm_profile
+
+        for profile_id in self.llm.profiles.keys():
+            report = doctor_llm_profile(self, str(profile_id))
+            for item in report.errors:
+                scoped = f"{report.profile_id}: {item}"
+                if scoped not in blocking_issues:
+                    blocking_issues.append(scoped)
+            for item in report.warnings:
+                scoped = f"{report.profile_id}: {item}"
+                if scoped not in warnings:
+                    warnings.append(scoped)
+
+        if not suggested_actions and not warnings and not blocking_issues:
+            suggested_actions.append("当前配置健康，可直接按当前基线继续运行")
+
+        return {
+            "identity": {
+                "provider": provider,
+                "provider_id": provider_cfg.provider_id,
+                "profile_id": primary.profile_id,
+                "model_name": primary.model,
+                "api_base": provider_cfg.base_url,
+                "runtime_profile": profile,
+            },
+            "sources": {
+                "api_key": api_key_source,
+                "prompt_sections": "config.toml",
+                "runtime_profile": "config.toml" if self.runtime.profile else "default-or-kwargs",
+            },
+            "status": {
+                "has_api_key": has_api_key,
+                "prompt_sections_count": len(self.prompt.sections),
+                "default_components_count": len(self.prompt.default_components),
+            },
+            "warnings": warnings,
+            "blocking_issues": blocking_issues,
+            "suggested_actions": suggested_actions,
+        }
+
+    def format_config_awareness_prompt(self) -> str:
+        """格式化为 prompt section 文本。"""
+        diagnosis = self.diagnose_config()
+        identity = diagnosis["identity"]
+        sources = diagnosis["sources"]
+        status = diagnosis["status"]
+
+        lines = [
+            "## 配置自感知",
+            (
+                f"- 当前身份: provider={identity['provider']} | "
+                f"model={identity['model_name']} | profile={identity['runtime_profile']}"
+            ),
+            f"- API Base: {identity['api_base']}",
+            (
+                f"- 关键来源: api_key={sources['api_key']} | "
+                f"prompt_sections={sources['prompt_sections']} | "
+                f"runtime_profile={sources['runtime_profile']}"
+            ),
+            (
+                f"- 当前状态: has_api_key={status['has_api_key']} | "
+                f"prompt_sections={status['prompt_sections_count']} | "
+                f"default_components={status['default_components_count']}"
+            ),
+        ]
+
+        if diagnosis["blocking_issues"]:
+            lines.append("- 阻断问题:")
+            for item in diagnosis["blocking_issues"][:3]:
+                lines.append(f"  - {item}")
+
+        if diagnosis["warnings"]:
+            lines.append("- 风险提示:")
+            for item in diagnosis["warnings"][:3]:
+                lines.append(f"  - {item}")
+
+        if diagnosis["suggested_actions"]:
+            lines.append("- 建议动作:")
+            for item in diagnosis["suggested_actions"][:3]:
+                lines.append(f"  - {item}")
+
+        return "\n".join(lines)
+
     def get_api_key(self) -> Optional[str]:
         """
         获取 API Key（优先从配置读取，其次环境变量）
@@ -1322,29 +1620,11 @@ class AppConfig(BaseModel):
         Returns:
             API Key，未设置返回 None
         """
-        # 1. 优先从配置读取
-        if self.llm.api_key:
-            return self.llm.api_key
+        return self.llm.resolve_api_key_for_profile(role="primary")
 
-        # 2. 从环境变量读取
-        provider = self.llm.provider
-        env_var_map = {
-            "openai": "OPENAI_API_KEY",
-            "anthropic": "ANTHROPIC_API_KEY",
-            "deepseek": "DEEPSEEK_API_KEY",
-            "aliyun": "DASHSCOPE_API_KEY",
-            "zhipu": "ZHIPU_API_KEY",
-            "google": "GOOGLE_API_KEY",
-            "siliconflow": "SILICONFLOW_API_KEY",
-            "groq": "GROQ_API_KEY",
-            "minimax": "MINIMAX_API_KEY",
-        }
-
-        env_var = env_var_map.get(provider)
-        if env_var:
-            return os.environ.get(env_var)
-
-        return None
+    def get_api_key_for_profile(self, profile_id: Optional[str] = None, role: str = "primary") -> Optional[str]:
+        """获取指定 profile/role 的 API Key，优先使用模型库级环境变量。"""
+        return self.llm.resolve_api_key_for_profile(profile_id=profile_id, role=role)
 
     def set_api_key(self, api_key: str) -> None:
         """
@@ -1353,13 +1633,15 @@ class AppConfig(BaseModel):
         Args:
             api_key: API 密钥
         """
-        self.llm.api_key = api_key
+        self.llm.get_provider(role="primary").api_key = api_key
 
     def __repr__(self) -> str:
+        primary = self.llm.get_profile(role="primary")
+        provider = self.llm.get_provider(primary.provider_id)
         return (
-            f"AppConfig(model={self.llm.model_name}, "
-            f"provider={self.llm.provider}, "
-            f"temperature={self.llm.temperature})"
+            f"AppConfig(model={primary.model}, "
+            f"provider={provider.kind}, "
+            f"temperature={primary.temperature})"
         )
 
 
@@ -1371,7 +1653,9 @@ __all__ = [
     # LLM 配置
     "LLMConfig",
     "LLMDiscoveryConfig",
-    "LocalLLMConfig",
+    "ProviderConfig",
+    "LLMProfile",
+    "RetryPolicyConfig",
     # Agent 配置
     "AgentConfig",
     # 上下文压缩配置
@@ -1410,8 +1694,6 @@ __all__ = [
     "ParserConfig",
     # 调试配置
     "DebugConfig",
-    # 兼容性配置
-    "CompatConfig",
     # 主配置类
     "AppConfig",
 ]

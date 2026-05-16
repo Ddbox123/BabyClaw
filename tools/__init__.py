@@ -76,6 +76,14 @@ from tools.code_analysis_tools import (
 )
 
 # ============================================================================
+# Python 结构感知 / Lint 工具
+# ============================================================================
+from tools.python_intelligence_tools import (
+    python_symbol_tool,
+    python_lint_tool,
+)
+
+# ============================================================================
 # Token 管理工具
 # ============================================================================
 from tools.token_manager import (
@@ -98,6 +106,19 @@ from tools.agent_tools import spawn_agent as spawn_agent_tool
 from tools.web_search_tool import web_search_tool as web_search_tool
 from tools.web_search_tool import web_search as web_search_impl
 from tools.web_search_tool import web_fetch as web_fetch_tool
+
+# ============================================================================
+# Git Memory 工具
+# ============================================================================
+from tools.git_tools import (
+    get_git_status_summary_tool,
+    get_recent_changes_tool,
+    get_entity_history_tool,
+    explain_current_worktree_tool,
+    open_evolution_transaction_tool,
+    close_evolution_transaction_tool,
+    get_evolution_fitness_tool,
+)
 
 __all__ = [
     # Shell 工具
@@ -144,6 +165,9 @@ __all__ = [
     "get_code_entity_tool",
     "list_file_entities_tool",
     "get_file_entities_tool",
+    # Python 结构感知 / Lint
+    "python_symbol_tool",
+    "python_lint_tool",
     # Token 管理工具
     "EnhancedTokenCompressor",
     "truncate_tool_result_tool",
@@ -157,4 +181,12 @@ __all__ = [
     "web_search_tool",
     "web_search_impl",
     "web_fetch_tool",
+    # Git Memory 工具
+    "get_git_status_summary_tool",
+    "get_recent_changes_tool",
+    "get_entity_history_tool",
+    "explain_current_worktree_tool",
+    "open_evolution_transaction_tool",
+    "close_evolution_transaction_tool",
+    "get_evolution_fitness_tool",
 ]

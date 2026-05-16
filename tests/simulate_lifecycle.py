@@ -14,10 +14,30 @@ import os
 import sys
 import json
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 # 添加项目根目录到路径
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
+@contextmanager
+def isolated_memory_index():
+    """为沙盘测试提供隔离的 memory.json，避免污染真实 workspace 记忆。"""
+    old_path = os.environ.get("VIBELUTION_MEMORY_INDEX_PATH")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        isolated_path = Path(tmpdir) / "memory.json"
+        os.environ["VIBELUTION_MEMORY_INDEX_PATH"] = str(isolated_path)
+        try:
+            yield isolated_path
+        finally:
+            if old_path is None:
+                os.environ.pop("VIBELUTION_MEMORY_INDEX_PATH", None)
+            else:
+                os.environ["VIBELUTION_MEMORY_INDEX_PATH"] = old_path
 
 
 def test_1_cli_error_detection():
@@ -54,28 +74,30 @@ def test_2_memory_save():
 
     from tools.memory_tools import force_save_current_state, _load_memory
 
-    # 保存测试记忆
-    test_wisdom = "沙盘测试: 记忆保存功能正常"
-    test_goal = "沙盘测试: 验证记忆持久化"
+    with isolated_memory_index() as memory_path:
+        # 保存测试记忆
+        test_wisdom = "沙盘测试: 记忆保存功能正常"
+        test_goal = "沙盘测试: 验证记忆持久化"
 
-    result = force_save_current_state(
-        core_wisdom=test_wisdom,
-        next_goal=test_goal,
-    )
+        result = force_save_current_state(
+            core_wisdom=test_wisdom,
+            next_goal=test_goal,
+        )
 
-    print(f"  保存结果: {result}")
+        print(f"  保存结果: {result}")
+        print(f"  隔离记忆路径: {memory_path}")
 
-    # 验证读取
-    memory = _load_memory()
-    print(f"  核心智慧: {memory.get('core_wisdom')}")
-    print(f"  当前目标: {memory.get('current_goal')}")
+        # 验证读取
+        memory = _load_memory()
+        print(f"  核心智慧: {memory.get('core_wisdom')}")
+        print(f"  当前目标: {memory.get('current_goal')}")
 
-    wisdom_ok = test_wisdom in memory.get("core_wisdom", "")
-    goal_ok = test_goal in memory.get("current_goal", "")
+        wisdom_ok = test_wisdom in memory.get("core_wisdom", "")
+        goal_ok = test_goal in memory.get("current_goal", "")
 
-    print(f"\n  记忆正确保存: {'PASS' if wisdom_ok and goal_ok else 'FAIL'}")
+        print(f"\n  记忆正确保存: {'PASS' if wisdom_ok and goal_ok else 'FAIL'}")
 
-    return wisdom_ok and goal_ok
+        return wisdom_ok and goal_ok
 
 
 def test_3_restart_snapshot():
@@ -86,41 +108,39 @@ def test_3_restart_snapshot():
 
     from tools.memory_tools import force_save_current_state
 
-    # 模拟重启前的记忆快照
-    snapshot_wisdom = "沙盘测试: 重启前快照成功"
-    snapshot_goal = "沙盘测试: 验证重启流程"
+    with isolated_memory_index() as memory_path:
+        # 模拟重启前的记忆快照
+        snapshot_wisdom = "沙盘测试: 重启前快照成功"
+        snapshot_goal = "沙盘测试: 验证重启流程"
 
-    result = force_save_current_state(
-        core_wisdom=snapshot_wisdom,
-        next_goal=snapshot_goal,
-        
-    )
+        result = force_save_current_state(
+            core_wisdom=snapshot_wisdom,
+            next_goal=snapshot_goal,
+        )
 
-    print(f"  快照结果: {result}")
+        print(f"  快照结果: {result}")
 
-    # 检查 workspace/memory/memory.json 是否存在
-    ws_memory = PROJECT_ROOT / "workspace" / "memory" / "memory.json"
-    exists = ws_memory.exists()
-    print(f"\n  记忆索引文件存在: {exists}")
-    print(f"  路径: {ws_memory}")
+        exists = memory_path.exists()
+        print(f"\n  记忆索引文件存在: {exists}")
+        print(f"  路径: {memory_path}")
 
-    if exists:
-        with open(ws_memory, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        
-        print(f"  智慧: {data.get('core_wisdom')}")
+        if exists:
+            with open(memory_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
 
-        snapshot_ok = snapshot_wisdom in data.get("core_wisdom", "")
-        print(f"\n  快照验证: {'PASS' if snapshot_ok else 'FAIL'}")
-        return snapshot_ok
+            print(f"  智慧: {data.get('core_wisdom')}")
 
-    return False
+            snapshot_ok = snapshot_wisdom in data.get("core_wisdom", "")
+            print(f"\n  快照验证: {'PASS' if snapshot_ok else 'FAIL'}")
+            return snapshot_ok
+
+        return False
 
 
 def test_4_workspace_structure():
-    """测试5: workspace 结构完整性"""
+    """测试4: 工作区与提示词控制面完整性"""
     print("\n" + "=" * 60)
-    print("测试5: workspace 结构完整性")
+    print("测试4: 工作区与提示词控制面完整性")
     print("=" * 60)
 
     from core.infrastructure.workspace_manager import get_workspace
@@ -136,13 +156,17 @@ def test_4_workspace_structure():
         checks.append(("目录 " + d, exists))
         print(f"  workspace/{d}: {'OK' if exists else 'MISSING'}")
 
-    # 检查关键文件（从 workspace/prompts/ 读取）
-    for f in ["SOUL.md", "IDENTITY.md", "SPEC.md"]:
-        path = ws.get_prompt_path(f)
+    # 检查核心提示词控制面（当前项目真实布局）
+    prompt_checks = [
+        ("core/core_prompt/SOUL.md", PROJECT_ROOT / "core" / "core_prompt" / "SOUL.md"),
+        ("core/core_prompt/SPEC.md", PROJECT_ROOT / "core" / "core_prompt" / "SPEC.md"),
+        ("workspace/prompts", ws.root / "prompts"),
+    ]
+    for label, path in prompt_checks:
         exists = path.exists()
-        content_ok = path.exists() and len(ws.read_prompt(f)) > 0
-        checks.append(("文件 " + f, content_ok))
-        print(f"  workspace/prompts/{f}: {'OK' if content_ok else 'MISSING'}")
+        content_ok = exists and (path.is_dir() or len(path.read_text(encoding="utf-8")) > 0)
+        checks.append(("提示词 " + label, content_ok))
+        print(f"  {label}: {'OK' if content_ok else 'MISSING'}")
 
     # 检查数据库
     db_exists = ws.db_path.exists()
@@ -158,6 +182,37 @@ def test_4_workspace_structure():
     print(f"\n  结构完整性: {'PASS' if all_ok else 'FAIL'}")
 
     return all_ok
+
+
+def test_5_restart_bootstrap_path():
+    """测试5: 重启后启动路径应绕开工作台，直接回到 agent 主线"""
+    print("\n" + "=" * 60)
+    print("测试5: 重启后启动路径")
+    print("=" * 60)
+
+    import agent as agent_module
+
+    args = SimpleNamespace(
+        test=False,
+        prompt=None,
+        auto=False,
+        shell=False,
+        no_shell=False,
+    )
+
+    old_reason = os.environ.get("AGENT_RESTART_REASON")
+    os.environ["AGENT_RESTART_REASON"] = "sandbox_restart"
+    try:
+        should_launch = agent_module.should_launch_workbench(args, None)
+        print(f"  AGENT_RESTART_REASON=sandbox_restart")
+        print(f"  should_launch_workbench(...): {should_launch}")
+        print(f"\n  启动路径校验: {'PASS' if not should_launch else 'FAIL'}")
+        return should_launch is False
+    finally:
+        if old_reason is None:
+            os.environ.pop("AGENT_RESTART_REASON", None)
+        else:
+            os.environ["AGENT_RESTART_REASON"] = old_reason
 
 
 def main():
@@ -191,6 +246,12 @@ def main():
     except Exception as e:
         print(f"  [ERROR] {e}")
         results.append(("workspace结构", False))
+
+    try:
+        results.append(("重启启动路径", test_5_restart_bootstrap_path()))
+    except Exception as e:
+        print(f"  [ERROR] {e}")
+        results.append(("重启启动路径", False))
 
     # 汇总
     print("\n" + "=" * 60)

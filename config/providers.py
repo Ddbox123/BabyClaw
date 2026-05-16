@@ -8,7 +8,7 @@ LLM 模型预设注册表
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
 
 @dataclass
@@ -589,49 +589,43 @@ def resolve_model_alias(model_id: str) -> str:
 def init_model_discovery(
     config: Any,
     debug_logger: Optional[Any] = None,
-) -> int:
+) -> Tuple[int, Optional[Any]]:
     """
     执行模型动态发现，返回 effective_max_token_limit。
 
     Args:
-        config: AppConfig 实例，提供 llm / llm_discovery / context_compression 配置
+        config: AppConfig 实例，主要读取 llm.providers / llm.profiles /
+                llm.discovery / context_compression 配置
         debug_logger: 可选的 debug logger 对象，拥有 .success() 和 .warning() 方法。
                       若为 None，则静默执行。
 
     Returns:
-        effective_max_token_limit: 动态调整后的压缩阈值
+        (effective_max_token_limit, model_info)
     """
     # 避免循环导入
-    from core.infrastructure.model_discovery import ModelDiscovery, DiscoveryStatus
+    from core.infrastructure.model_discovery import discover_model_sync, DiscoveryStatus
 
     model_info = None
 
-    provider = getattr(config.llm, 'provider', '')
-    is_local_provider = provider in ('local', 'ollama')
-    discovery_enabled = getattr(config.llm_discovery, 'enabled', True) and is_local_provider
+    profile = config.llm.get_profile(role="primary")
+    provider = config.llm.get_provider(profile.provider_id)
+    api_base = provider.base_url or ''
+    api_key = config.get_api_key_for_profile(profile_id=profile.profile_id) or ''
+    discovery_enabled = bool(config.llm.discovery.enabled and profile.discovery_enabled and api_base)
 
     if not discovery_enabled:
-        return getattr(config.context_compression, 'max_token_limit', 16000)
-
-    discovery = ModelDiscovery(
-        api_base=config.llm.api_base,
-        model_name=config.llm.model_name,
-        timeout=getattr(config.llm_discovery, 'timeout', 5),
-        enabled=True,
-    )
-    discovery.set_fallback(
-        max_tokens=config.llm.max_tokens,
-        max_token_limit=getattr(config.context_compression, 'max_token_limit', 16000),
-    )
+        return getattr(config.context_compression, 'max_token_limit', 16000), None
 
     try:
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        model_info = loop.run_until_complete(discovery.discover())
+        model_info = discover_model_sync(
+            api_base=api_base,
+            model_name=profile.model,
+            api_key=api_key,
+            fallback_max_tokens=profile.max_output_tokens,
+            fallback_max_token_limit=getattr(config.context_compression, 'max_token_limit', 16000),
+            timeout=config.llm.discovery.timeout,
+            enabled=True,
+        )
 
         if model_info.status == DiscoveryStatus.SUCCESS:
             if debug_logger:
@@ -642,7 +636,7 @@ def init_model_discovery(
                     f"  压缩阈值 max_token_limit: {model_info.compression_thresholds.max_token_limit}",
                     tag="MODEL_DISCOVERY",
                 )
-            return model_info.compression_thresholds.max_token_limit
+            return model_info.compression_thresholds.max_token_limit, model_info
         else:
             if debug_logger:
                 debug_logger.warning(
@@ -653,7 +647,7 @@ def init_model_discovery(
         if debug_logger:
             debug_logger.warning(f"模型发现异常: {e}，使用配置文件的值", tag="MODEL_DISCOVERY")
 
-    return getattr(config.context_compression, 'max_token_limit', 16000)
+    return getattr(config.context_compression, 'max_token_limit', 16000), model_info
 
 
 # ============================================================================

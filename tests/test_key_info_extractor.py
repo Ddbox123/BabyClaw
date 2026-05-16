@@ -71,6 +71,18 @@ class TestKeyInfoExtractor:
         decisions = extractor.extract_key_decisions(messages)
         assert len(decisions) >= 1
 
+    def test_extract_key_decisions_uses_external_request_context(self):
+        """测试关键决策优先关联外部任务输入上下文"""
+        extractor = KeyInfoExtractor()
+        messages = [
+            MockMessage('system', '## 外部任务输入\n检查 token 压缩协议'),
+            MockMessage('ai', '我决定先统一外部输入识别函数'),
+        ]
+        decisions = extractor.extract_key_decisions(messages)
+
+        assert len(decisions) >= 1
+        assert '检查 token 压缩协议' in decisions[0]['context']
+
     def test_extract_tool_results(self):
         """测试提取工具结果"""
         extractor = KeyInfoExtractor()

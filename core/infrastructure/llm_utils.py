@@ -5,18 +5,22 @@ core/infrastructure/llm_utils.py — LLM 辅助工具
 职责：
 - LLM 错误分类与重试策略
 - 系统提示词消息构建
+- LLM 响应内容解析（XML 工具调用、<state> 块）
 
 从 agent.py 下沉，遵循 Core First 原则。
 """
 
 from __future__ import annotations
 
-from typing import Optional, Any, Tuple
+import json
+import re
+from typing import Any, Tuple
+from langchain_core.messages import SystemMessage
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-
+from core.llm.errors import classify_for_legacy
+from core.llm.recovery import LLMRecoveryDecision, plan_recovery
+from core.llm.routing import attach_recovery_fallback
 from core.prompt_manager import to_string, split_sys_prompt_prefix
-
 
 MAX_CONSECUTIVE_FAILURES = 5
 
@@ -30,39 +34,60 @@ def classify_llm_error(e: Exception) -> Tuple[str, bool, str]:
     Returns:
         (错误类别, 是否可重试, 用户友好消息)
     """
-    exc_type = type(e).__name__
-    exc_msg = str(e)
+    return classify_for_legacy(e)
 
-    if "HTTPStatusError" in exc_type or "429" in exc_msg or "500" in exc_msg:
-        if "429" in exc_msg:
-            return ("rate_limit", True, "API 速率超限（429），等待后重试")
-        if "500" in exc_msg:
-            return ("server_error", True, "API 服务器错误（500），等待后重试")
-        if "502" in exc_msg or "503" in exc_msg or "504" in exc_msg:
-            return ("server_error", True, f"API 服务不可用（{exc_msg[:30]}），等待后重试")
-        if "401" in exc_msg or "403" in exc_msg:
-            return ("auth_error", False, "API 认证失败（401/403），请检查 API Key")
-        return ("http_error", False, f"HTTP 错误：{exc_msg[:60]}")
 
-    if "Timeout" in exc_type or "timeout" in exc_msg.lower():
-        return ("timeout", True, "LLM 响应超时，等待后重试")
+def plan_llm_recovery(
+    e: Exception,
+    *,
+    attempt: int = 1,
+    max_attempts: int = MAX_CONSECUTIVE_FAILURES,
+    config: Any = None,
+    role: str = "primary",
+    current_profile_id: str | None = None,
+) -> LLMRecoveryDecision:
+    """Return the normalized recovery decision for an LLM exception."""
+    decision = plan_recovery(e, attempt=attempt, max_attempts=max_attempts)
+    return attach_recovery_fallback(
+        decision,
+        config=config,
+        role=role,
+        current_profile_id=current_profile_id,
+    )
 
-    if "ConnectError" in exc_type or "Connect" in exc_type:
-        return ("network_error", True, "网络连接失败，等待后重试")
 
-    if "ReadError" in exc_type or "RemoteProtocolError" in exc_type:
-        return ("network_error", True, "连接读取异常，等待后重试")
+_INT_LIKE_PATTERN = re.compile(r"^-?(0|[1-9]\d*)$")
+_FLOAT_LIKE_PATTERN = re.compile(r"^-?(0|[1-9]\d*)\.\d+$")
 
-    if "RequestError" in exc_type:
-        return ("network_error", True, "网络请求异常，等待后重试")
 
-    if "auth" in exc_msg.lower() or "401" in exc_msg or "403" in exc_msg:
-        return ("auth_error", False, "认证失败，请检查 API Key 配置")
+def _coerce_tool_arg_value(value: Any) -> Any:
+    """对 LLM/XML 工具参数做轻量标量归一化。"""
+    if isinstance(value, dict):
+        return {k: _coerce_tool_arg_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_coerce_tool_arg_value(item) for item in value]
+    if not isinstance(value, str):
+        return value
 
-    if exc_type == "KeyboardInterrupt":
-        return ("user_interrupt", False, "用户主动中断")
-
-    return ("unknown_error", False, f"未知错误：{exc_type}: {exc_msg[:60]}")
+    stripped = value.strip()
+    lowered = stripped.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if lowered in {"null", "none"}:
+        return None
+    if _INT_LIKE_PATTERN.fullmatch(stripped):
+        try:
+            return int(stripped)
+        except ValueError:
+            return value
+    if _FLOAT_LIKE_PATTERN.fullmatch(stripped):
+        try:
+            return float(stripped)
+        except ValueError:
+            return value
+    return value
 
 
 def parse_tool_args(tool_args: Any) -> dict:
@@ -77,16 +102,16 @@ def parse_tool_args(tool_args: Any) -> dict:
         解析后的 dict，失败返回空 dict
     """
     if isinstance(tool_args, dict):
-        return tool_args
+        return _coerce_tool_arg_value(tool_args)
     if isinstance(tool_args, str):
         try:
-            import json
-            return json.loads(tool_args)
+            parsed = json.loads(tool_args)
+            return _coerce_tool_arg_value(parsed) if isinstance(parsed, dict) else {}
         except (json.JSONDecodeError, TypeError):
             return {}
     try:
-        import json
-        return json.loads(str(tool_args))
+        parsed = json.loads(str(tool_args))
+        return _coerce_tool_arg_value(parsed) if isinstance(parsed, dict) else {}
     except (json.JSONDecodeError, TypeError):
         return {}
 
@@ -119,3 +144,66 @@ def build_system_message(sp) -> Any:
             "text": "\n\n".join(dynamic_parts),
         })
     return {"role": "system", "content": content_blocks}
+
+
+def parse_xml_tool_calls(content: str) -> list:
+    """解析 LLM 响应中的 XML 格式工具调用。
+
+    模型有时输出 <invoke> XML 标签而非标准 tool_calls，
+    本函数将其解析为统一格式。
+
+    Args:
+        content: LLM 响应原始文本
+
+    Returns:
+        [{"name": "tool_name", "args": {"arg1": "value1"}, "id": "xml_0"}, ...]
+    """
+    if '<invoke' not in content:
+        return []
+
+    tool_calls = []
+    invoke_pattern = re.compile(
+        r'<invoke\s+name=["\']([^"\']+)["\']\s*>(.*?)</invoke>',
+        re.DOTALL,
+    )
+    param_pattern = re.compile(
+        r'<parameter\s+name=["\']([^"\']+)["\']\s*>(.*?)</parameter>',
+        re.DOTALL,
+    )
+
+    for i, m in enumerate(invoke_pattern.finditer(content)):
+        tool_name = (m.group(1) or "").strip()
+        body = m.group(2)
+        if not tool_name:
+            continue
+        args = {}
+        for pm in param_pattern.finditer(body):
+            param_name = (pm.group(1) or "").strip()
+            if not param_name:
+                continue
+            args[param_name] = (pm.group(2) or "").strip()
+        tool_calls.append({"name": tool_name, "args": args, "id": f"xml_{i}"})
+
+    return tool_calls
+
+
+def parse_state_block(content: str) -> dict:
+    """从 LLM 响应中解析 <state> JSON 块（内心感知状态）。
+
+    MENTAL_SOUL.md 要求感知层输出 <state> JSON 块，
+    本函数提取其中的情绪和直觉信息用于日志记录。
+
+    Args:
+        content: LLM 响应原始文本
+
+    Returns:
+        {"mood": "...", "feeling": "...", "whisper": "..."}
+        解析失败返回空 dict
+    """
+    match = re.search(r'<state>\s*(\{.*?\})\s*</state>', content, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return {}

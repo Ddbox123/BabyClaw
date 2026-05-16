@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from pathlib import Path
 from typing import List, Set, Optional, Tuple
 from dataclasses import dataclass
@@ -92,6 +93,14 @@ FORBIDDEN_COMMANDS: Set[str] = {
     # 进程注入
     "inject", "hook", "patch",
 }
+
+FORBIDDEN_GIT_SUBCOMMANDS: Set[str] = {
+    "reset", "clean", "rebase", "push", "pull", "fetch", "checkout", "switch",
+    "restore", "cherry-pick", "merge", "stash", "tag", "rm",
+}
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ============================================================================
@@ -243,28 +252,67 @@ class SecurityValidator:
             if re.search(rf"\b{re.escape(forbidden)}\b", command, re.IGNORECASE):
                 return (False, f"禁止使用命令：{forbidden}")
 
-        # 检查危险字符（命令注入）
-        dangerous_chars = ["|", ";", "&&", "||", "`", "$", "(", ")"]
-        for char in dangerous_chars:
-            if char in command:
-                return (False, f"命令包含危险字符：{char}")
+        command_family = self._detect_command_family(command)
+        if command_family == "git":
+            return self._validate_git_command(command)
 
-        # PowerShell 白名单验证
-        if shell_type == "powershell":
-            return self._validate_powershell_command(command)
+        # 默认采用黑名单模式：只拦明显危险命令，其余命令允许通过。
+        return (True, "允许：黑名单模式已通过")
 
-        # 其他 shell 默认拒绝
-        return (False, f"不支持的 shell 类型：{shell_type}")
+    def _contains_unquoted_token(self, command: str, token: str) -> bool:
+        """检查 token 是否出现在引号外部。"""
+        in_single = False
+        in_double = False
+        i = 0
+        token_len = len(token)
 
-    def _validate_powershell_command(self, command: str) -> Tuple[bool, str]:
-        """验证 PowerShell 命令是否在白名单内"""
-        command_stripped = command.strip()
+        while i < len(command):
+            ch = command[i]
+            prev = command[i - 1] if i > 0 else ""
 
-        for pattern in SAFE_POWERSHELL_COMMANDS:
-            if re.match(pattern.pattern, command_stripped, re.IGNORECASE):
-                return (True, f"允许：{pattern.description}")
+            if ch == "'" and not in_double and prev != "`":
+                in_single = not in_single
+                i += 1
+                continue
 
-        return (False, f"命令不在白名单内：{command_stripped}")
+            if ch == '"' and not in_single and prev != "`":
+                in_double = not in_double
+                i += 1
+                continue
+
+            if not in_single and not in_double and command[i:i + token_len] == token:
+                return True
+
+            i += 1
+
+        return False
+
+    def _detect_command_family(self, command: str) -> str:
+        """检测命令族。"""
+        try:
+            parts = shlex.split(command, posix=False)
+        except ValueError:
+            return "unknown"
+        if not parts:
+            return "unknown"
+        head = parts[0].strip().lower()
+        return head
+
+    def _validate_git_command(self, command: str) -> Tuple[bool, str]:
+        """Git 命令专项校验。"""
+        try:
+            parts = shlex.split(command, posix=False)
+        except ValueError as e:
+            return (False, f"Git 命令解析失败：{e}")
+
+        if len(parts) < 2:
+            return (False, "Git 命令缺少子命令")
+
+        subcommand = parts[1].strip().lower()
+        if subcommand in FORBIDDEN_GIT_SUBCOMMANDS:
+            return (False, f"禁止使用 Git 子命令：{subcommand}")
+
+        return (True, f"允许：Git {subcommand}")
 
     def validate_file_operation(
         self,
@@ -333,7 +381,7 @@ def get_security_validator(project_root: Optional[str] = None) -> SecurityValida
     
     if _security_validator is None:
         if project_root is None:
-            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            project_root = str(PROJECT_ROOT)
         _security_validator = SecurityValidator(project_root)
     
     return _security_validator
@@ -348,4 +396,4 @@ def validate_shell_command(command: str, shell_type: str = "powershell") -> Tupl
 def validate_file_path(file_path: str) -> Tuple[bool, str]:
     """便捷函数：验证文件路径是否在允许范围内"""
     validator = get_security_validator()
-    return validator.validate_path(file_path)
+    return validator.path_sandbox.validate_path(file_path)

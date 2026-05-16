@@ -30,6 +30,7 @@ import os
 import threading
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, Dict, Any, Callable
 
 # ============================================================================
@@ -106,6 +107,7 @@ class DebugLogger:
         self.show_timestamps = True
         self._indent_level = 0
         self._indent_char = "  "
+        self._file_handle = None
 
     def _timestamp(self) -> str:
         """获取带毫秒的时间戳"""
@@ -129,52 +131,130 @@ class DebugLogger:
         """获取 UI 实例，未就绪时返回 None"""
         return _get_ui()
 
+    def start_session(self, session_id: str):
+        """开始会话 — 打开 debug 日志文件"""
+        try:
+            log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'log_info')
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, f'debug_{session_id}.log')
+            self._file_handle = open(log_path, 'a', encoding='utf-8', buffering=1)
+            self._write_file("SYS", f"=== Debug session started: {session_id} ===")
+        except Exception:
+            self._file_handle = None
+
+    def end_session(self):
+        """结束会话 — 关闭 debug 日志文件"""
+        if self._file_handle:
+            try:
+                self._write_file("SYS", "=== Debug session ended ===")
+                self._file_handle.close()
+            except Exception:
+                pass
+            self._file_handle = None
+
+    def _write_file(self, tag: str, msg: str):
+        """写入 debug 日志文件"""
+        if self._file_handle:
+            try:
+                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                self._file_handle.write(f"[{ts}] [{tag}] {msg}\n")
+                self._file_handle.flush()
+            except Exception:
+                pass
+
     def debug(self, msg: str, tag: str = "DEBUG"):
         """调试信息"""
+        self._write_file("DEBUG", msg)
+        try:
+            conversation_logger.log_debug(tag, msg, "DEBUG")
+        except Exception:
+            pass
         if self.verbose and (ui := self._ui_or_none()):
             ui.add_log(msg, "DEBUG")
 
     def info(self, msg: str, tag: str = "INFO"):
         """一般信息"""
+        self._write_file("INFO", msg)
+        try:
+            conversation_logger.log_debug(tag, msg, "INFO")
+        except Exception:
+            pass
         if ui := self._ui_or_none():
             ui.add_log(msg, "INFO")
 
     def success(self, msg: str, tag: str = "OK"):
         """成功信息"""
+        self._write_file("OK", msg)
+        try:
+            conversation_logger.log_debug(tag, msg, "OK")
+        except Exception:
+            pass
         if ui := self._ui_or_none():
             ui.add_log(msg, "SUCCESS")
 
     def warning(self, msg: str, tag: str = "WARN"):
         """警告信息"""
+        self._write_file("WARN", msg)
+        try:
+            conversation_logger.log_debug(tag, msg, "WARN")
+        except Exception:
+            pass
         if ui := self._ui_or_none():
             ui.print_warning(msg)
 
     def error(self, msg: str, tag: str = "ERROR", exc_info: Optional[str] = None):
         """错误信息"""
+        self._write_file("ERROR", msg)
+        if exc_info:
+            self._write_file("ERROR", exc_info)
+        try:
+            conversation_logger.log_debug(tag, f"{msg}\n{exc_info}" if exc_info else msg, "ERROR")
+        except Exception:
+            pass
         if ui := self._ui_or_none():
             ui.print_error(msg, exc_info)
 
     def system(self, msg: str, tag: str = "SYS"):
         """系统信息"""
+        self._write_file("SYS", msg)
+        try:
+            conversation_logger.log_debug(tag, msg, "SYS")
+        except Exception:
+            pass
         if ui := self._ui_or_none():
             ui.add_log(msg, "SYS")
 
     def tool(self, name: str, status: str, details: str = ""):
         """工具执行日志"""
+        self._write_file("TOOL", f"{name} {status} {details}")
+        try:
+            conversation_logger.log_debug("TOOL", f"{name} {status} {details}", "TOOL")
+        except Exception:
+            pass
         if ui := self._ui_or_none():
             ui.add_log(f"Tool: {name} {status} {details}", "TOOL")
 
     def llm(self, msg: str, details: str = ""):
         """LLM 调用日志"""
+        self._write_file("LLM", f"{msg} {details}")
+        try:
+            conversation_logger.log_debug("LLM", f"{msg} {details}", "LLM")
+        except Exception:
+            pass
         if ui := self._ui_or_none():
             ui.add_log(f"{msg} {details}", "LLM")
 
     def llm_response(self, content: str, prefix: str = "LLM 回复"):
         """打印 LLM 响应摘要到日志面板"""
+        preview = content[:80] if content else ""
+        self._write_file("LLM", f"{prefix}: {preview}...")
+        try:
+            conversation_logger.log_debug("LLM", f"{prefix}: {preview}", "LLM")
+        except Exception:
+            pass
         ui = _get_ui()
         if ui is None:
             return
-        preview = content[:80] if content else ""
         ui.add_log(f"{prefix}: {preview}...", "LLM")
 
     def llm_thinking(self, content: str):
@@ -182,19 +262,7 @@ class DebugLogger:
         ui = _get_ui()
         if ui is None:
             return
-
-        ui.add_content("")
-        ui.add_content("[dim]--- Thinking ---[/dim]")
-
-        import re
-        cleaned = re.sub(r'</?thinking[^>]*>', '', content, flags=re.IGNORECASE).strip()
-        for line in cleaned.split('\n'):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            ui.add_content(f"  {stripped[:120]}" + ("..." if len(stripped) > 120 else ""))
-
-        ui.add_content("")
+        ui.stream_thought(content, done=True)
 
     def llm_thinking_log(self, content: str):
         """打印 LLM 思考摘要 — 仅写入日志面板"""
@@ -205,6 +273,11 @@ class DebugLogger:
 
     def tool_start(self, tool_name: str, args: dict):
         """打印工具开始调用 — 内容区 + 日志区"""
+        self._write_file("TOOL", f"START {tool_name} args={str(args)[:200]}")
+        try:
+            conversation_logger.log_debug("TOOL", f"START {tool_name} args={args}", "TOOL")
+        except Exception:
+            pass
         ui = _get_ui()
         if ui is None:
             return
@@ -213,6 +286,12 @@ class DebugLogger:
 
     def tool_result(self, tool_name: str, result: str, success: bool = True):
         """打印工具执行结果 — 内容区 + 日志区"""
+        status = "OK" if success else "FAIL"
+        self._write_file("TOOL", f"RESULT {tool_name} {status} len={len(result) if result else 0}")
+        try:
+            conversation_logger.log_debug("TOOL", f"RESULT {tool_name} {status} len={len(result) if result else 0}", "TOOL")
+        except Exception:
+            pass
         ui = _get_ui()
         if ui is None:
             return
@@ -233,6 +312,11 @@ class DebugLogger:
 
     def turn_end(self, turn_num: int, tool_count: int = 0):
         """结束一轮对话"""
+        self._write_file("TURN", f"Turn {turn_num} complete | Tools: {tool_count}")
+        try:
+            conversation_logger.log_debug("TURN", f"Turn {turn_num} complete | Tools: {tool_count}", "TURN")
+        except Exception:
+            pass
         ui = _get_ui()
         if ui:
             ui.add_log(f"Turn {turn_num} complete | Tools: {tool_count}", "TURN")
@@ -326,12 +410,41 @@ class ConversationLogger:
             return
         self._initialized = True
         self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._actor = "main"
+        self._actor_label = ""
+        self._parent_turn = None
+        self._delegation_depth = 0
+        self._inherited_session = False
         self._log_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "log_info"
         )
+        self._apply_env_context()
         self._ensure_log_dir()
         self._current_session_file = None
         self._turn_count = 0
+        self._session_active = False
+
+    def _apply_env_context(self):
+        """从环境变量恢复跨进程日志上下文。"""
+        actor = str(os.environ.get("VIBELUTION_LOG_ACTOR", "main") or "main").strip().lower()
+        self._actor = actor or "main"
+        self._actor_label = str(os.environ.get("VIBELUTION_LOG_ACTOR_LABEL", "") or "").strip()
+
+        inherited_session_id = str(os.environ.get("VIBELUTION_LOG_SESSION_ID", "") or "").strip()
+        if inherited_session_id:
+            self._session_id = inherited_session_id
+            self._inherited_session = True
+
+        try:
+            parent_turn = os.environ.get("VIBELUTION_LOG_PARENT_TURN", "")
+            self._parent_turn = int(parent_turn) if str(parent_turn).strip() else None
+        except (TypeError, ValueError):
+            self._parent_turn = None
+
+        try:
+            self._delegation_depth = int(os.environ.get("VIBELUTION_SUBAGENT_DEPTH", "0") or 0)
+        except (TypeError, ValueError):
+            self._delegation_depth = 0
 
     def _ensure_log_dir(self):
         """确保日志目录存在"""
@@ -345,13 +458,69 @@ class ConversationLogger:
             )
         return self._current_session_file
 
+    def _get_payload_dir(self) -> Path:
+        payload_dir = Path(self._log_dir) / "payloads" / self._session_id
+        payload_dir.mkdir(parents=True, exist_ok=True)
+        return payload_dir
+
+    @staticmethod
+    def _make_preview(text: str, head: int = 280, tail: int = 180) -> str:
+        raw = str(text or "")
+        if len(raw) <= head + tail + 20:
+            return raw
+        return raw[:head] + "\n...\n" + raw[-tail:]
+
+    def _spill_text_payload(self, kind: str, text: str, *, turn: Optional[int] = None, ext: str = "txt") -> str:
+        payload_dir = self._get_payload_dir()
+        safe_kind = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in kind)[:48]
+        turn_label = f"turn_{turn if turn is not None else 'session'}"
+        path = payload_dir / f"{turn_label}_{safe_kind}.{ext}"
+        path.write_text(str(text or ""), encoding="utf-8")
+        try:
+            return str(path.relative_to(Path(self._log_dir)))
+        except Exception:
+            return str(path)
+
+    def _pack_text_payload(
+        self,
+        *,
+        field_name: str,
+        text: str,
+        kind: str,
+        turn: Optional[int] = None,
+        inline_limit: int = 600,
+        ext: str = "txt",
+    ) -> Dict[str, Any]:
+        raw = str(text or "")
+        payload = {
+            f"{field_name}_length": len(raw),
+            f"{field_name}_preview": self._make_preview(raw),
+            f"{field_name}_inlined": len(raw) <= inline_limit,
+        }
+        if len(raw) <= inline_limit:
+            payload[field_name] = raw
+        else:
+            payload[f"{field_name}_ref"] = self._spill_text_payload(kind, raw, turn=turn, ext=ext)
+        return payload
+
     def _timestamp(self) -> str:
         """获取 ISO 格式的时间戳"""
         return datetime.now().isoformat(timespec="milliseconds")
 
     def _write(self, record: dict):
         """写入单条记录到文件（实时刷出）"""
+        if not self._session_active:
+            return
         try:
+            record = dict(record)
+            record.setdefault("session_id", self._session_id)
+            record.setdefault("actor", self._actor)
+            if self._actor_label:
+                record.setdefault("actor_label", self._actor_label)
+            if self._parent_turn is not None:
+                record.setdefault("parent_turn", self._parent_turn)
+            if self._delegation_depth:
+                record.setdefault("delegation_depth", self._delegation_depth)
             with open(self._get_session_file(), "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
                 f.flush()
@@ -360,55 +529,74 @@ class ConversationLogger:
 
     def start_session(self, metadata: dict = None):
         """记录会话开始"""
+        self._session_active = True
         record = {
-            "type": "session_start",
+            "type": "session_attach" if self._actor != "main" else "session_start",
             "timestamp": self._timestamp(),
             "session_id": self._session_id,
             "metadata": metadata or {},
         }
         self._write(record)
 
-    def log_user_input(self, content: str):
-        """记录用户输入"""
+    def log_external_request(self, content: str):
+        """记录外部任务输入"""
         self._turn_count += 1
         record = {
-            "type": "user_input",
+            "type": "external_request",
             "turn": self._turn_count,
             "timestamp": self._timestamp(),
-            "content": content[:500] if len(content) > 500 else content,
-            "content_length": len(content),
         }
+        record.update(
+            self._pack_text_payload(
+                field_name="content",
+                text=content,
+                kind="external_request",
+                turn=self._turn_count,
+                inline_limit=800,
+            )
+        )
         self._write(record)
 
-    def log_llm_request(self, messages: list, model: str = None):
+    def log_llm_request(self, messages: list, model: str = None, iteration: int = 0):
         """记录发送给 LLM 的请求，同时实时显示输入 token 数"""
         msg_summaries = []
         total_input_tokens = 0
-
-        # 尝试用 tiktoken 计算 token 数
         try:
-            import tiktoken
-            enc = tiktoken.encoding_for_model("gpt-4o")
+            from tools.token_manager import estimate_messages_tokens
+
+            total_input_tokens = max(0, int(estimate_messages_tokens(messages) or 0))
         except Exception:
-            try:
-                enc = tiktoken.get_encoding("cl100k_base")
-            except Exception:
-                enc = None
+            total_input_tokens = 0
 
         for msg in messages:
-            msg_type = getattr(msg, "type", "unknown")
-            content = getattr(msg, "content", "")
-            if isinstance(content, str):
-                content_preview = content[:200] + "..." if len(content) > 200 else content
-                if enc:
-                    total_input_tokens += len(enc.encode(content))
+            # 处理 dict 格式消息（如 build_system_message 返回的格式）
+            if isinstance(msg, dict):
+                msg_type = msg.get("role", "unknown")
+                content_raw = msg.get("content", "")
+                # content 可能是 content_blocks 列表
+                if isinstance(content_raw, list):
+                    text = "\n\n".join(
+                        block.get("text", "") for block in content_raw
+                        if isinstance(block, dict)
+                    )
+                else:
+                    text = str(content_raw)
             else:
-                content_preview = str(content)[:200]
-            msg_summaries.append({
-                "type": msg_type,
-                "content_preview": content_preview,
-                "content_length": len(content) if isinstance(content, str) else 0,
-            })
+                msg_type = getattr(msg, "type", "unknown")
+                content_raw = getattr(msg, "content", "")
+                text = str(content_raw) if not isinstance(content_raw, str) else content_raw
+
+            payload = {"type": msg_type}
+            payload.update(
+                self._pack_text_payload(
+                    field_name="content",
+                    text=text,
+                    kind=f"llm_request_{msg_type}_{len(msg_summaries)}",
+                    turn=self._turn_count,
+                    inline_limit=500,
+                )
+            )
+            msg_summaries.append(payload)
 
         # 通过 UI 显示 token 数
         ui = _get_ui()
@@ -419,6 +607,7 @@ class ConversationLogger:
             "type": "llm_request",
             "turn": self._turn_count,
             "timestamp": self._timestamp(),
+            "iteration": iteration,
             "message_count": len(messages),
             "messages": msg_summaries,
             "model": model,
@@ -426,16 +615,38 @@ class ConversationLogger:
         }
         self._write(record)
 
-    def log_llm_response(self, response_content: str, raw_response: str = None):
+    def log_llm_response(self, response_content: str, raw_response: str = None,
+                         input_tokens: int = 0, output_tokens: int = 0, tool_call_count: int = 0):
         """记录 LLM 的原始响应"""
+        effective_raw = raw_response if raw_response is not None else response_content
         record = {
             "type": "llm_response",
             "turn": self._turn_count,
             "timestamp": self._timestamp(),
-            "content": response_content,
-            "content_length": len(response_content) if response_content else 0,
-            "raw_length": len(raw_response) if raw_response else 0,
+            "raw_length": len(effective_raw) if effective_raw else 0,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "tool_call_count": tool_call_count,
         }
+        record.update(
+            self._pack_text_payload(
+                field_name="content",
+                text=response_content,
+                kind="llm_response",
+                turn=self._turn_count,
+                inline_limit=700,
+            )
+        )
+        if raw_response:
+            record.update(
+                self._pack_text_payload(
+                    field_name="raw_response",
+                    text=raw_response,
+                    kind="llm_response_raw",
+                    turn=self._turn_count,
+                    inline_limit=500,
+                )
+            )
         self._write(record)
 
     def log_tool_call(
@@ -443,7 +654,8 @@ class ConversationLogger:
         tool_name: str,
         tool_args: dict,
         tool_result: str = None,
-        status: str = "success"
+        status: str = "success",
+        tool_call_id: str = None,
     ):
         """记录工具调用"""
         record = {
@@ -452,12 +664,21 @@ class ConversationLogger:
             "timestamp": self._timestamp(),
             "tool_name": tool_name,
             "tool_args": tool_args,
-            "tool_result_preview": (
-                tool_result[:500] if tool_result and len(tool_result) > 500 else tool_result
-            ),
-            "tool_result_length": len(tool_result) if tool_result else 0,
+            "tool_call_id": tool_call_id,
             "status": status,
         }
+        if tool_result is not None:
+            record.update(
+                self._pack_text_payload(
+                    field_name="tool_result",
+                    text=tool_result,
+                    kind=f"tool_result_{tool_name}",
+                    turn=self._turn_count,
+                    inline_limit=700,
+                )
+            )
+        else:
+            record["tool_result_length"] = 0
         self._write(record)
 
     def log_llm_intent(self, intent: str, content_preview: str = None):
@@ -498,7 +719,7 @@ class ConversationLogger:
         }
         self._write(record)
 
-    def log_error(self, error_type: str, error_msg: str, traceback: str = None):
+    def log_error(self, error_type: str, error_msg: str, traceback: str = None, details: dict = None):
         """记录错误"""
         record = {
             "type": "error",
@@ -506,16 +727,97 @@ class ConversationLogger:
             "timestamp": self._timestamp(),
             "error_type": error_type,
             "error_msg": error_msg,
-            "traceback": (
-                traceback[:1000] if traceback and len(traceback) > 1000 else traceback
-            ),
+            "traceback": traceback,
+        }
+        if details:
+            record["details"] = details
+        self._write(record)
+
+    def log_system_prompt(self, prompt_text: str):
+        """记录完整系统提示词"""
+        record = {
+            "type": "system_prompt",
+            "turn": self._turn_count,
+            "timestamp": self._timestamp(),
+        }
+        record.update(
+            self._pack_text_payload(
+                field_name="content",
+                text=prompt_text,
+                kind="system_prompt",
+                turn=self._turn_count,
+                inline_limit=700,
+            )
+        )
+        self._write(record)
+
+    def log_debug(self, tag: str, message: str, level: str = "INFO"):
+        """记录 debug/warning/info/system 级别事件"""
+        record = {
+            "type": "debug",
+            "turn": self._turn_count,
+            "timestamp": self._timestamp(),
+            "level": level,
+            "tag": tag,
+            "message": message,
+        }
+        self._write(record)
+
+    def log_subagent_stream(
+        self,
+        stream: str,
+        text: str,
+        *,
+        task_type: str = "",
+        goal: str = "",
+    ):
+        """记录子 agent 实时输出流，便于与正式事件对齐追踪。"""
+        record = {
+            "type": "subagent_stream",
+            "turn": self._turn_count,
+            "timestamp": self._timestamp(),
+            "stream": str(stream or "").strip().lower() or "stdout",
+            "task_type": task_type or "",
+            "goal_preview": (goal or "")[:200],
+            "actor": "subagent",
+        }
+        record.update(
+            self._pack_text_payload(
+                field_name="content",
+                text=text,
+                kind=f"subagent_stream_{stream or 'stdout'}",
+                turn=self._turn_count,
+                inline_limit=500,
+            )
+        )
+        self._write(record)
+
+    def log_token_usage(self, input_tokens: int, output_tokens: int, turn: int = 0):
+        """记录 token 用量"""
+        record = {
+            "type": "token_usage",
+            "turn": turn or self._turn_count,
+            "timestamp": self._timestamp(),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        }
+        self._write(record)
+
+    def log_turn_end(self, turn: int, stats: dict = None):
+        """记录轮次汇总"""
+        record = {
+            "type": "turn_end",
+            "turn": turn,
+            "timestamp": self._timestamp(),
+            "stats": stats or {},
         }
         self._write(record)
 
     def end_session(self, summary: dict = None):
         """记录会话结束"""
         record = {
-            "type": "session_end",
+            "type": "session_detach" if self._actor != "main" else "session_end",
             "timestamp": self._timestamp(),
             "session_id": self._session_id,
             "total_turns": self._turn_count,
@@ -525,9 +827,11 @@ class ConversationLogger:
 
     def new_session(self):
         """开始新的会话（生成新的 session_id）"""
-        self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if not self._inherited_session:
+            self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._current_session_file = None
         self._turn_count = 0
+        self._session_active = True
 
     @property
     def _current_turn(self) -> int:

@@ -113,10 +113,10 @@ SAMPLE_MD_CONTENT = '''
 
 ## 示例代码
 
-\`\`\`python
+```python
 def test_function():
     return "test"
-\`\`\`
+```
 
 ## 参考
 
@@ -196,6 +196,8 @@ class TestGrepSearch:
         )
         assert "helper_function" in result
         assert ".py" in result
+        assert "[搜索摘要]" in result
+        assert "[续读]" in result
 
     def test_search_with_context(self, sample_project):
         """测试带上下文的搜索"""
@@ -239,8 +241,7 @@ class TestGrepSearch:
             max_results=2
         )
         # 结果不应超过限制
-        matches = result.count("def ")
-        assert matches <= 2
+        assert "[搜索] 找到 2 个匹配" in result
 
     def test_search_nonexistent_dir(self):
         """测试不存在的目录"""
@@ -584,8 +585,7 @@ class TestSearchAndRead:
             max_results=2
         )
         # 结果应有限制
-        matches = result.count("def ")
-        assert matches <= 2
+        assert "[搜索读取完成] 共 2 处匹配" in result
 
     def test_search_and_read_nonexistent_pattern(self, sample_project):
         """测试搜索不存在的模式"""
@@ -672,7 +672,7 @@ def 中文函数():
             include_ext=".py",
             search_dir=sample_project
         )
-        assert "中文��数" in result
+        assert "中文函数" in result
 
     def test_search_in_empty_directory(self, temp_test_dir):
         """测试搜索空目录"""
@@ -923,6 +923,24 @@ class TestParameterCombinations:
         )
         assert "deep_function" in result
         assert "nested" in result
+
+    def test_max_output_chars_is_respected(self, sample_project):
+        for i in range(12):
+            file_path = os.path.join(sample_project, f"preview_{i}.py")
+            with open(file_path, "w", encoding="utf-8") as f:
+                for j in range(20):
+                    f.write(f"def preview_target_{i}_{j}():\n    return 'demo'\n")
+
+        result = grep_search_tool(
+            regex_pattern="preview_target",
+            include_ext=".py",
+            search_dir=sample_project,
+            max_results=30,
+            max_output_chars=1500,
+        )
+
+        assert "[续读]" in result
+        assert result.count("📁 ") <= 3
 
 
 if __name__ == "__main__":

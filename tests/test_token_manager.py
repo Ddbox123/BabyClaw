@@ -40,6 +40,7 @@ from tools.token_manager import (
     MessagePriority,
     TokenBudget,
 )
+from core.infrastructure.runtime_input import build_external_request_message
 
 
 # ============================================================================
@@ -84,6 +85,14 @@ class FakeMessage:
     def __init__(self, content: str, msg_type: str = "ai"):
         self.content = content
         self.type = msg_type
+
+
+class FakeToolCallMessage(FakeMessage):
+    """带工具调用的 AI 消息。"""
+
+    def __init__(self, tool_name: str, args: dict | None = None, content: str = ""):
+        super().__init__(content=content, msg_type="ai")
+        self.tool_calls = [{"name": tool_name, "args": args or {}}]
 
 
 # ============================================================================
@@ -196,11 +205,11 @@ class TestEstimateMessagesTokens:
 
     def test_estimate_real_langchain_messages(self):
         """测试真实的 LangChain 消息类型"""
-        from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+        from langchain_core.messages import AIMessage, SystemMessage
         
         messages = [
             SystemMessage(content="You are a helpful assistant"),
-            HumanMessage(content="Hello"),
+            build_external_request_message("Hello"),
             AIMessage(content="Hi there!"),
         ]
         tokens = estimate_messages_tokens(messages)
@@ -250,11 +259,11 @@ class TestGetMessagePriority:
         # 可能是 MEDIUM 或更高
         assert priority in [MessagePriority.MEDIUM, MessagePriority.HIGH, MessagePriority.CRITICAL]
 
-    def test_human_message(self):
-        """测试用户消息"""
-        msg = FakeMessage("User input", msg_type="human")
+    def test_external_request_message_priority(self):
+        """协议标记的外部任务输入保留中等优先级。"""
+        msg = build_external_request_message("External input")
         priority = get_message_priority(msg)
-        assert priority in [MessagePriority.MEDIUM, MessagePriority.HIGH]
+        assert priority == MessagePriority.MEDIUM
 
     def test_unknown_type_default(self):
         """测试未知类型默认值"""
@@ -461,19 +470,50 @@ class TestEnhancedTokenCompressor:
         assert stats.tokens_after < stats.tokens_before
 
     def test_compress_preserves_recent_messages(self):
-        """测试保留最近消息"""
-        messages = []
+        """测试保留最近外部任务输入和 AI 上下文"""
+        from langchain_core.messages import AIMessage
+
+        messages = [build_external_request_message("目标 H9")]
         for i in range(10):
-            messages.append(FakeMessage(f"H{i}", msg_type="human"))
-            messages.append(FakeMessage(f"A{i}", msg_type="ai"))
+            messages.append(AIMessage(content=f"A{i}"))
         
         compressor = EnhancedTokenCompressor(token_budget=1000, max_history_pairs=2)
         compressed, _ = compressor.compress(messages)
         
-        # 最后几对应该保留
-        last_contents = [m.content for m in compressed[-4:]]
-        assert any("H9" in c for c in last_contents)
-        assert any("A9" in c for c in last_contents)
+        contents = [m.content for m in compressed]
+        assert any("目标 H9" in c for c in contents)
+        assert any("A9" in c for c in contents[-4:])
+
+    def test_compression_does_not_create_human_message_for_external_request(self):
+        """压缩真实运行时消息时不生成 HumanMessage。"""
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+        messages = [
+            SystemMessage(content="system"),
+            build_external_request_message("开始自主进化"),
+        ]
+        for i in range(8):
+            messages.append(AIMessage(content=f"step {i} " + ("x" * 500)))
+
+        compressor = EnhancedTokenCompressor(token_budget=1000, max_history_pairs=1)
+        compressed, _ = compressor.compress(messages, keep_count=1, use_llm_summary=False)
+
+        assert all(not isinstance(msg, HumanMessage) for msg in compressed)
+        assert any("外部任务输入" in getattr(msg, "content", "") for msg in compressed)
+
+    def test_rule_based_summary_prefers_external_request_protocol(self):
+        """规则摘要应直接识别外部任务输入协议。"""
+        messages = [
+            build_external_request_message("修复压缩摘要"),
+            FakeToolCallMessage("grep_search_tool", {"query": "external_request"}),
+            FakeMessage("已定位问题", msg_type="ai"),
+        ]
+
+        compressor = EnhancedTokenCompressor(token_budget=1000, max_history_pairs=1)
+        summary = compressor._rule_based_summary(messages, max_chars=300)
+
+        assert "外部任务" in summary
+        assert "修复压缩摘要" in summary
 
     def test_compression_stats_recording(self):
         """测试压缩统计记录"""

