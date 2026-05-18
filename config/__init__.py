@@ -2,9 +2,11 @@
 
 from .models import (
     AgentConfig,
+    AgentModesConfig,
     AnalysisConfig,
     AppConfig,
     AvatarConfig,
+    ChatDatasetCaptureConfig,
     CompressionLevelsConfig,
     CompressionPreservationConfig,
     CompressionSummaryCharsConfig,
@@ -62,9 +64,11 @@ from .settings import (
 
 __all__ = [
     "AgentConfig",
+    "AgentModesConfig",
     "AnalysisConfig",
     "AppConfig",
     "AvatarConfig",
+    "ChatDatasetCaptureConfig",
     "CompressionLevelsConfig",
     "CompressionPreservationConfig",
     "CompressionSummaryCharsConfig",

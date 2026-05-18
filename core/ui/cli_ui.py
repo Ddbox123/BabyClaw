@@ -3,15 +3,16 @@
 Vibelution CLI UI — 统一终端工作台渲染引擎
 
 布局：
-- 左侧：宠物区 + 思考气泡
-- 中间：主任务流
-- 底部：系统日志
+- chat：独立会话页（顶部概览 + 底部输入区）
+- 其他模式：宠物区 + 任务流 + 系统日志
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -23,10 +24,14 @@ from typing import Any, Dict, List, Optional
 
 from rich.box import ASCII2, ROUNDED
 from rich.cells import cell_len
+from rich.align import Align
 from rich.console import Console, Group
+from rich.control import Control
 from rich.layout import Layout
 from rich.live import Live
+from rich.markup import escape as rich_escape
 from rich.markdown import Markdown
+from rich.measure import Measurement
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
@@ -82,6 +87,19 @@ class RuntimeTelemetry:
     missing_usage_rounds: int = 0
 
 
+class VerticalDivider:
+    def __init__(self, char: str = "│", style: str = "#d7875f"):
+        self.char = char
+        self.style = style
+
+    def __rich_measure__(self, console, options):
+        return Measurement(1, 1)
+
+    def __rich_console__(self, console, options):
+        height = max(1, int(getattr(options, "height", 0) or 1))
+        yield Text("\n".join([self.char] * height), style=self.style)
+
+
 class UIManager:
     """统一终端工作台 UI 管理器。"""
 
@@ -128,6 +146,8 @@ class UIManager:
         self._load_runtime_totals()
         self._shell_mode = "chat"
 
+        self._chat_messages: List[Dict[str, Any]] = []
+        self._chat_task_snapshot: Dict[str, Any] = {}
         self._conversation_events: List[str] = []
         self._tool_activity_events: List[str] = []
         self._system_logs: List[str] = []
@@ -139,11 +159,13 @@ class UIManager:
         self._current_subagent_thought_stream = ""
 
         self._conversation_max = 400
+        self._chat_messages_max = 400
         self._tool_activity_max = 120
         self._logs_max = 200
         self._thought_history_max = 6
         self._subagent_process_max = 24
         self._subagent_thought_max = 12
+        self._last_terminal_resize_request: tuple[str, int, int] | None = None
         self._pet_walk_offset = 0
         self._pet_walk_direction = 1
         self._pet_anim_running = False
@@ -157,6 +179,8 @@ class UIManager:
     # ======================== 内部状态 ========================
 
     def reset_workspace(self):
+        self._chat_messages.clear()
+        self._chat_task_snapshot = {}
         self._conversation_events.clear()
         self._tool_activity_events.clear()
         self._system_logs.clear()
@@ -231,6 +255,15 @@ class UIManager:
                 "total_output_tokens": max(0, int(self._total_output_tokens or 0)),
                 "completed_evolutions": max(0, int(self._completed_evolutions or 0)),
                 "seen_closed_evolution_txns": sorted(self._seen_closed_evolution_txns)[-200:],
+                "current_context_tokens": max(0, int(self._current_context_tokens or 0)),
+                "context_token_limit": max(0, int(self._context_token_limit or 0)),
+                "turn_input_tokens": max(0, int(self._turn_input_tokens or 0)),
+                "turn_output_tokens": max(0, int(self._turn_output_tokens or 0)),
+                "status": str(self._status or "").upper(),
+                "runtime_status": str(self._runtime.last_status or "").upper(),
+                "current_goal": str(self._current_goal or "").strip(),
+                "last_tool_name": str(self._runtime.last_tool_name or "").strip(),
+                "last_tool_success": self._runtime.last_tool_success,
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
             }
             self._runtime_state_path.write_text(
@@ -266,7 +299,66 @@ class UIManager:
 
     def set_shell_mode(self, mode: str):
         self._shell_mode = (mode or "chat").lower()
+        self._ensure_terminal_footprint(self._shell_mode)
         self._update_status_line()
+
+    @staticmethod
+    def _terminal_resize_target(mode: str) -> tuple[int, int] | None:
+        normalized = str(mode or "").strip().lower()
+        if normalized == "chat":
+            return (150, 44)
+        if normalized in {"shell", "self_evolution"}:
+            return (140, 40)
+        return None
+
+    def _current_terminal_dimensions(self) -> tuple[int, int]:
+        try:
+            size = shutil.get_terminal_size(fallback=(0, 0))
+            return (int(size.columns or 0), int(size.lines or 0))
+        except Exception:
+            return (0, 0)
+
+    def _request_terminal_resize(self, cols: int, rows: int) -> bool:
+        if cols <= 0 or rows <= 0:
+            return False
+        resized = False
+        try:
+            stream = getattr(self.console, "file", None) or sys.__stdout__
+            if stream and hasattr(stream, "write") and hasattr(stream, "flush"):
+                stream.write(f"\x1b[8;{rows};{cols}t")
+                stream.flush()
+                resized = True
+        except Exception:
+            pass
+        if os.name == "nt":
+            try:
+                exit_code = os.system(f"mode con: cols={cols} lines={rows} > nul")
+                resized = resized or exit_code == 0
+            except Exception:
+                pass
+        return resized
+
+    def _ensure_terminal_footprint(self, mode: str | None = None) -> bool:
+        if UIManager._test_mode:
+            return False
+        stream = getattr(self.console, "file", None)
+        if stream is None or not getattr(stream, "isatty", lambda: False)():
+            return False
+        normalized_mode = str(mode or self._shell_mode or "chat").strip().lower()
+        target = self._terminal_resize_target(normalized_mode)
+        if target is None:
+            return False
+        cols, rows = target
+        current_cols, current_rows = self._current_terminal_dimensions()
+        if current_cols >= cols and current_rows >= rows:
+            return False
+        request_key = (normalized_mode, cols, rows)
+        if self._last_terminal_resize_request == request_key:
+            return False
+        resized = self._request_terminal_resize(cols, rows)
+        if resized:
+            self._last_terminal_resize_request = request_key
+        return resized
 
     def set_avatar_preset(self, preset: str):
         if not preset:
@@ -276,6 +368,86 @@ class UIManager:
         except Exception:
             self.avatar = get_avatar_manager()
         self._update_status_line()
+
+    @staticmethod
+    def _normalize_chat_message_tool_calls(value: Any) -> List[str]:
+        tool_calls: List[str] = []
+        for item in list(value or []):
+            name = ""
+            if isinstance(item, dict):
+                function_block = item.get("function") or {}
+                if not isinstance(function_block, dict):
+                    function_block = {}
+                name = str(
+                    item.get("name")
+                    or item.get("tool_name")
+                    or function_block.get("name")
+                    or ""
+                ).strip()
+            else:
+                name = str(item or "").strip()
+            if name:
+                tool_calls.append(name)
+        return tool_calls
+
+    def load_chat_messages(self, messages: List[Dict[str, Any]]):
+        self._chat_messages = []
+        for item in list(messages or []):
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            content = self.sanitize_chat_message_content(role, item.get("content") or "")
+            if not content:
+                continue
+            timestamp = str(item.get("timestamp") or "").strip()
+            tool_calls = self._normalize_chat_message_tool_calls(item.get("tool_calls") or [])
+            entry: Dict[str, Any] = {
+                "role": role,
+                "content": content,
+                "timestamp": timestamp,
+            }
+            if tool_calls:
+                entry["tool_calls"] = tool_calls
+            self._chat_messages.append(entry)
+        if len(self._chat_messages) > self._chat_messages_max:
+            self._chat_messages = self._chat_messages[-self._chat_messages_max :]
+        self._update_status_line()
+
+    def set_chat_task_snapshot(self, snapshot: Dict[str, Any] | None):
+        self._chat_task_snapshot = dict(snapshot or {}) if isinstance(snapshot, dict) else {}
+        self._update_status_line()
+
+    def get_chat_task_snapshot(self) -> Dict[str, Any]:
+        return dict(self._chat_task_snapshot)
+
+    def add_chat_message(
+        self,
+        role: str,
+        content: str,
+        timestamp: str = "",
+        tool_calls: List[str] | None = None,
+    ):
+        normalized_role = str(role or "").strip().lower()
+        text = self.sanitize_chat_message_content(normalized_role, content or "")
+        if normalized_role not in {"user", "assistant"} or not text:
+            return
+        entry: Dict[str, Any] = {
+            "role": normalized_role,
+            "content": text,
+            "timestamp": str(timestamp or "").strip(),
+        }
+        normalized_tool_calls = self._normalize_chat_message_tool_calls(tool_calls or [])
+        if normalized_tool_calls:
+            entry["tool_calls"] = normalized_tool_calls
+        self._chat_messages.append(entry)
+        if len(self._chat_messages) > self._chat_messages_max:
+            self._chat_messages = self._chat_messages[-self._chat_messages_max :]
+        self._update_status_line()
+
+    def get_chat_messages(self) -> List[Dict[str, Any]]:
+        return [dict(item) for item in self._chat_messages]
 
     def _append_conversation(self, text: str):
         if UIManager._test_mode:
@@ -568,6 +740,7 @@ class UIManager:
                 self._runtime.failed_rounds += 1
         if had_progress:
             self._status = "SUCCESS" if success else "ERROR"
+        self._save_runtime_state()
         self._update_status_line()
 
     def note_turn_start(self, turn: int):
@@ -576,6 +749,7 @@ class UIManager:
         self._turn_input_tokens = 0
         self._turn_output_tokens = 0
         self._last_request_input_tokens = 0
+        self._save_runtime_state()
         self._update_status_line()
 
     def _on_evolution_txn_closed(self, event):
@@ -595,6 +769,7 @@ class UIManager:
         self._current_context_tokens = max(0, int(current_tokens or 0))
         self._last_request_input_tokens = self._current_context_tokens
         self._context_token_limit = max(0, int(total_tokens or 0))
+        self._save_runtime_state()
         self._update_status_line()
 
     def _on_tool_start(self, event):
@@ -605,6 +780,7 @@ class UIManager:
             self._runtime.last_status = "ACTING"
         if self._status not in {"THINKING", "PLANNING"}:
             self._status = "ACTING"
+        self._save_runtime_state()
         self._update_status_line()
 
     def _on_tool_success(self, event):
@@ -617,6 +793,7 @@ class UIManager:
             self._runtime.last_error = ""
         if self._status not in {"THINKING", "PLANNING"}:
             self._status = "WORKING"
+        self._save_runtime_state()
         self._update_status_line()
 
     def _on_tool_error(self, event):
@@ -629,6 +806,7 @@ class UIManager:
             self._runtime.last_error = str(data.get("error") or "")[:120]
         if self._status not in {"THINKING", "PLANNING"}:
             self._status = "ERROR"
+        self._save_runtime_state()
         self._update_status_line()
 
     def _on_validation_completed(self, event):
@@ -1523,6 +1701,805 @@ class UIManager:
             return ["[dim]当前轮以工具探索为主，暂无自然语言结论。[/dim]"]
         return lines[-24:]
 
+    def _chat_prompt_placeholder(self) -> str:
+        return "输入消息..."
+
+    def sanitize_chat_message_content(self, role: str, content: str) -> str:
+        text = str(content or "").strip()
+        normalized_role = str(role or "").strip().lower()
+        if normalized_role != "assistant":
+            return text
+        text = re.sub(
+            r"<(?:think|thinking)[^>]*>.*?</(?:think|thinking)>",
+            "",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        text = re.sub(
+            r"<(?:think|thinking)[^>]*>.*$",
+            "",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        text = re.sub(r"<state[^>]*>.*?</state>", "", text, flags=re.IGNORECASE | re.DOTALL)
+        text = re.sub(r"<state[^>]*>.*$", "", text, flags=re.IGNORECASE | re.DOTALL)
+        text = re.sub(r"</?(?:think|thinking)[^>]*>", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"</?[\w:-]*tool_call[^>]*>", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def _format_chat_kv_lines(
+        self,
+        label: str,
+        value: str,
+        *,
+        width: int,
+        value_style: str = "white",
+        label_style: str = "grey70",
+        max_lines: int = 3,
+    ) -> List[str]:
+        clean_label = str(label or "").strip()
+        clean_value = str(value or "").strip()
+        if not clean_label or not clean_value:
+            return []
+        content_width = max(8, width - cell_len(clean_label) - 2)
+        wrapped = self._wrap_text_cells(clean_value, content_width)
+        wrapped = wrapped if wrapped else [clean_value]
+        lines = [
+            f"[{label_style}]{rich_escape(clean_label)}[/{label_style}]  "
+            f"[{value_style}]{rich_escape(wrapped[0])}[/{value_style}]"
+        ]
+        label_pad = " " * max(cell_len(clean_label), 1)
+        for chunk in wrapped[1:max_lines]:
+            lines.append(
+                f"[{label_style}]{label_pad}[/{label_style}]  "
+                f"[{value_style}]{rich_escape(chunk)}[/{value_style}]"
+            )
+        return lines
+
+    def _build_chat_section_block(self, title: str, lines: List[str], *, width: int) -> Group:
+        body = [Text.from_markup(line) for line in lines if str(line or "").strip()]
+        if not body:
+            body = [Text.from_markup("[dim]暂无内容[/dim]")]
+        divider = Text.from_markup("[bright_black]" + ("─" * max(12, width - 4)) + "[/bright_black]")
+        return Group(
+            Text.from_markup(f"[bold #d7875f]{rich_escape(title)}[/bold #d7875f]"),
+            divider,
+            *body,
+        )
+
+    def _build_chat_task_snapshot(self, *, width: int = 32) -> Dict[str, Any]:
+        task = dict(self._chat_task_snapshot or {})
+        title = str(task.get("title") or "等待新的任务").strip()
+        stage = str(task.get("status") or "idle").strip().lower()
+        stage_label = {
+            "idle": "待命",
+            "planning": "规划中",
+            "reading": "阅读中",
+            "editing": "修改中",
+            "verifying": "验证中",
+            "done": "已完成",
+            "blocked": "受阻",
+            "needs_input": "待你决定",
+        }.get(stage, "待命")
+        stage_progress = {
+            "idle": 5,
+            "planning": 25,
+            "reading": 45,
+            "editing": 68,
+            "verifying": 86,
+            "done": 100,
+            "blocked": 100,
+            "needs_input": 92,
+        }.get(stage, 5)
+        verification_status = str(task.get("verification_status") or "").strip().lower()
+        verification_summary = str(task.get("verification_summary") or "").strip()
+        verification_label = "未运行"
+        if verification_status == "passed":
+            verification_label = "已通过"
+        elif verification_status == "failed":
+            verification_label = "失败"
+        elif verification_summary:
+            verification_label = verification_summary
+        resumed = bool((task.get("metadata") or {}).get("resumed"))
+        progress_label = "续接任务" if resumed else "新任务"
+        latest_summary = self._compact_sentence(str(task.get("latest_summary") or "").strip(), max(18, width - 6))
+        next_action = self._compact_sentence(str(task.get("next_action") or "").strip(), max(18, width - 6))
+        read_count = len(list(task.get("read_files") or []))
+        changed_count = len(list(task.get("changed_files") or []))
+        return {
+            "title": title,
+            "stage": stage,
+            "stage_label": stage_label,
+            "stage_progress": stage_progress,
+            "verification_label": verification_label,
+            "progress_label": progress_label,
+            "latest_summary": latest_summary,
+            "next_action": next_action,
+            "read_count": read_count,
+            "changed_count": changed_count,
+        }
+
+    def _build_chat_recent_lines(self, *, max_messages: int = 6, width: int = 60) -> List[str]:
+        if not self._chat_messages:
+            return ["[dim]还没有最近对话[/dim]"]
+        lines: List[str] = []
+        line_budget = max_messages + 4
+        for item in self._chat_messages[-max_messages:]:
+            role = str(item.get("role") or "assistant").strip().lower()
+            content = self.sanitize_chat_message_content(role, item.get("content") or "")
+            if not content:
+                continue
+            role_label = "[cyan]你[/cyan]" if role == "user" else "[green]Agent[/green]"
+            wrapped = self._wrap_text_cells(content, width)
+            wrapped = wrapped if wrapped else [content]
+            first_line = wrapped[0]
+            lines.append(f"{role_label}  [white]{rich_escape(first_line)}[/white]")
+            for chunk in wrapped[1:3]:
+                lines.append(f"[dim]   ·[/dim] [white]{rich_escape(chunk)}[/white]")
+            if len(lines) >= line_budget:
+                break
+        return lines[:line_budget] or ["[dim]还没有最近对话[/dim]"]
+
+    def _normalize_chat_preview_line(self, text: str) -> str:
+        line = str(text or "").strip()
+        if not line:
+            return ""
+        if line.startswith(("```", "~~~")):
+            return ""
+        if re.fullmatch(r"[\-\=\*_`~:\s]+", line):
+            return ""
+        if "|" in line:
+            cells = [cell.strip() for cell in line.split("|") if cell.strip()]
+            if not cells:
+                return ""
+            if all(re.fullmatch(r"[-:]+", cell) for cell in cells):
+                return ""
+            line = " | ".join(cells[:4])
+        line = re.sub(r"^#{1,6}\s*", "", line)
+        line = re.sub(r"^\s*[-*+]\s+", "", line)
+        line = re.sub(r"^\s*\d+[.)]\s+", "", line)
+        line = re.sub(r"`{1,3}([^`]*)`{1,3}", r"\1", line)
+        line = re.sub(r"\s+", " ", line).strip()
+        return line
+
+    def _build_chat_preview_lines(self, content: str, *, width: int, max_lines: int) -> List[str]:
+        normalized_lines: List[str] = []
+        raw_lines = [line for line in str(content or "").splitlines() if str(line).strip()]
+        for raw_line in raw_lines:
+            normalized = self._normalize_chat_preview_line(raw_line)
+            if normalized:
+                normalized_lines.append(normalized)
+        if not normalized_lines:
+            fallback = re.sub(r"\s+", " ", str(content or "").strip())
+            if fallback:
+                normalized_lines = [fallback]
+        preview_lines: List[str] = []
+        overflow = False
+        for raw_line in normalized_lines:
+            wrapped = self._wrap_text_cells(raw_line, width) or [self._fit_text_cells(raw_line, width)]
+            for chunk in wrapped:
+                if len(preview_lines) >= max_lines:
+                    overflow = True
+                    break
+                preview_lines.append(chunk)
+            if overflow:
+                break
+        if not preview_lines:
+            return []
+        if overflow or len(normalized_lines) > len(preview_lines):
+            preview_lines[-1] = self._fit_text_cells(preview_lines[-1], max(2, width - 1))
+            if not preview_lines[-1].endswith("…"):
+                preview_lines[-1] = self._fit_text_cells(preview_lines[-1] + "…", width)
+        return preview_lines
+
+    @staticmethod
+    def _chat_message_default_preview_lines(role: str) -> int:
+        normalized_role = str(role or "").strip().lower()
+        return 3 if normalized_role == "user" else 4
+
+    def _chat_message_preview_body_lines(
+        self,
+        item: Dict[str, Any],
+        *,
+        bubble_width: int,
+        max_body_lines: int | None = None,
+    ) -> List[str]:
+        role = str(item.get("role") or "assistant").strip().lower()
+        content = self.sanitize_chat_message_content(role, item.get("content") or "")
+        if not content:
+            return []
+        body_width = max(16, bubble_width - 4)
+        full_lines: List[str] = []
+        raw_lines = str(content or "").splitlines()
+        if not raw_lines:
+            raw_lines = [str(content or "")]
+        for raw_line in raw_lines:
+            if raw_line == "":
+                full_lines.append("")
+                continue
+            wrapped = self._wrap_text_cells(raw_line, body_width)
+            if wrapped:
+                full_lines.extend(wrapped)
+            else:
+                full_lines.append("")
+        if max_body_lines is None:
+            return full_lines or [content]
+        limit = max(1, int(max_body_lines or 1))
+        return list(full_lines[:limit]) or [content]
+
+    def _chat_message_tool_lines(self, item: Dict[str, Any], *, bubble_width: int) -> List[Text]:
+        tool_calls = self._normalize_chat_message_tool_calls(item.get("tool_calls") or [])
+        if not tool_calls:
+            return []
+        label = "工具"
+        body_width = max(16, bubble_width - 4)
+        content_width = max(8, body_width - cell_len(label) - 2)
+        tool_text = " -> ".join(tool_calls)
+        wrapped = self._wrap_text_cells(tool_text, content_width) or [tool_text]
+        label_pad = " " * max(cell_len(label), 1)
+        lines: List[Text] = []
+
+        first_line = Text()
+        first_line.append(label, style="grey70")
+        first_line.append("  ")
+        first_line.append(wrapped[0], style="magenta")
+        lines.append(first_line)
+
+        for chunk in wrapped[1:]:
+            line = Text()
+            line.append(label_pad, style="grey70")
+            line.append("  ")
+            line.append(chunk, style="magenta")
+            lines.append(line)
+        return lines
+
+    def _format_chat_timestamp(self, timestamp: str) -> str:
+        raw = str(timestamp or "").strip()
+        if not raw:
+            return "刚刚"
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            now = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
+            if parsed.date() == now.date():
+                return parsed.strftime("%H:%M")
+            return parsed.strftime("%m-%d %H:%M")
+        except Exception:
+            return self._fit_text_cells(raw, 14)
+
+    def _build_chat_message_card(
+        self,
+        item: Dict[str, Any],
+        *,
+        width: int,
+        bubble_width: int,
+        max_body_lines: int | None = None,
+    ):
+        role = str(item.get("role") or "assistant").strip().lower()
+        content = self.sanitize_chat_message_content(role, item.get("content") or "")
+        if not content:
+            return None
+        is_user = role == "user"
+        role_label = "你" if is_user else "Agent"
+        role_style = "cyan" if is_user else "green"
+        body_lines_raw = self._chat_message_preview_body_lines(
+            item,
+            bubble_width=bubble_width,
+            max_body_lines=max_body_lines,
+        )
+        body_lines = [Text(chunk, style="white") for chunk in (body_lines_raw or [content])]
+        tool_lines = self._chat_message_tool_lines(item, bubble_width=bubble_width)
+        header_line = (
+            f"[{role_style}]{role_label}[/{role_style}]  "
+            f"[grey70]{self._format_chat_timestamp(str(item.get('timestamp') or ''))}[/grey70]"
+        )
+        card_lines: List[Any] = [Text.from_markup(header_line), *body_lines]
+        if tool_lines:
+            card_lines.append(Text(""))
+            card_lines.extend(tool_lines)
+        message_panel = Panel(
+            Group(*card_lines),
+            border_style=role_style,
+            box=ROUNDED,
+            padding=(0, 1),
+            width=max(20, int(bubble_width or 20)),
+            expand=True,
+        )
+        return message_panel
+
+    def _build_chat_status_section(self, *, width: int = 60) -> tuple[str, List[str]]:
+        snapshot = self._build_chat_task_snapshot(width=width)
+        lines: List[str] = []
+        lines.extend(
+            self._format_chat_kv_lines(
+                "任务",
+                snapshot["title"],
+                width=width,
+                value_style="bold white",
+                max_lines=2,
+            )
+        )
+        lines.append(
+            f"[grey70]阶段[/grey70]  [cyan]{snapshot['stage_label']}[/cyan]  "
+            f"[grey70]{snapshot['stage_progress']}%[/grey70]"
+        )
+        lines.append(
+            f"[grey70]流程[/grey70]  [magenta]{self._make_bar(snapshot['stage_progress'], 100, 10)}[/magenta]"
+        )
+        lines.append(
+            f"[grey70]文件[/grey70]  [cyan]读 {snapshot['read_count']}[/cyan]  "
+            f"[green]改 {snapshot['changed_count']}[/green]"
+        )
+        lines.append(f"[grey70]验证[/grey70]  [white]{rich_escape(snapshot['verification_label'])}[/white]")
+        lines.extend(self._build_chat_context_summary_lines(width=width))
+        return (
+            "当前状态",
+            lines,
+        )
+
+    def _chat_status_panel_width(self) -> int:
+        try:
+            console_width = int(getattr(self.console, "width", 0) or 0)
+        except Exception:
+            console_width = 0
+        if console_width <= 0:
+            return 34
+        left_ratio, right_ratio, _ = self._chat_home_layout_metrics()
+        usable_width = max(console_width - 10, 48)
+        left_width = int((usable_width * left_ratio) / max(left_ratio + right_ratio, 1))
+        return max(30, min(left_width, 46))
+
+    def _chat_avatar_art(self, *, max_width: int, max_height: int) -> str:
+        compact_art = str(getattr(self.avatar.current, "TINY", "") or "").strip("\n")
+        full_art = self.avatar.get_art("happy").strip("\n")
+        candidates = []
+        if compact_art:
+            candidates.append(compact_art)
+        candidates.append(full_art)
+        for art in candidates:
+            lines = [line.rstrip() for line in art.splitlines() if str(line).strip()]
+            if not lines:
+                continue
+            art_width = max((cell_len(line) for line in lines), default=0)
+            art_height = len(lines)
+            if art_width <= max_width and art_height <= max_height:
+                return "\n".join(lines)
+        if compact_art:
+            return compact_art
+        return ""
+
+    def _build_chat_pet_block(self, *, width: int):
+        pet = self._get_pet_snapshot()
+        preset_label = self.avatar.list_presets().get(self.avatar.preset_name, {}).get("name", self.avatar.preset_name)
+        avatar_art = self._chat_avatar_art(max_width=max(12, width - 4), max_height=6)
+        if avatar_art:
+            avatar_text = Text(avatar_art, style="cyan")
+            avatar_text.no_wrap = True
+            return Group(Align.center(avatar_text))
+        return Group(
+            *(
+                Text.from_markup(line)
+                for line in self._format_chat_kv_lines("伙伴", str(pet["name"]), width=width, value_style="bold cyan")
+            ),
+            *(
+                Text.from_markup(line)
+                for line in self._format_chat_kv_lines("形象", str(preset_label), width=width, value_style="white")
+            ),
+        )
+
+    def _build_chat_identity_block(self):
+        section_width = self._chat_status_panel_width()
+        total_messages = len(self._chat_messages)
+        user_messages = sum(1 for item in self._chat_messages if str(item.get("role") or "").strip().lower() == "user")
+        assistant_messages = sum(
+            1 for item in self._chat_messages if str(item.get("role") or "").strip().lower() == "assistant"
+        )
+        mode_label = "Chat Coding" if self._chat_task_snapshot else "Chat Session"
+        overview_lines: List[str] = []
+        overview_lines.extend(
+            self._format_chat_kv_lines("模式", mode_label, width=section_width, value_style="bold cyan")
+        )
+        overview_lines.extend(
+            self._format_chat_kv_lines("状态", self._humanize_work_state(), width=section_width, value_style="cyan")
+        )
+        overview_lines.extend(
+            self._format_chat_kv_lines(
+                "会话",
+                f"{max(user_messages, assistant_messages, 0)} 轮 / {total_messages} 条消息",
+                width=section_width,
+                value_style="white",
+            )
+        )
+        overview_lines.extend(
+            self._format_chat_kv_lines(
+                "角色",
+                f"你 {user_messages} / Agent {assistant_messages}",
+                width=section_width,
+                value_style="white",
+            )
+        )
+
+        section_title, section_lines = self._build_chat_status_section(width=section_width)
+        return Group(
+            Text.from_markup("[bold #d7875f]Vibelution Chat[/bold #d7875f]"),
+            Text.from_markup("[dim]会话概览[/dim]"),
+            Text(""),
+            self._build_chat_pet_block(width=section_width),
+            Text(""),
+            self._build_chat_section_block("概览", overview_lines, width=section_width),
+            self._build_chat_section_block(section_title, section_lines, width=section_width),
+        )
+
+    def _chat_home_layout_metrics(self) -> tuple[int, int, int]:
+        try:
+            console_width = int(getattr(self.console, "width", 0) or 0)
+        except Exception:
+            console_width = 0
+        if console_width >= 120:
+            return (3, 8, 74)
+        if console_width >= 100:
+            return (3, 8, 68)
+        return (4, 7, 56)
+
+    def _chat_dialog_height_budget(self) -> int:
+        try:
+            console_height = int(getattr(self.console, "height", 0) or 0)
+        except Exception:
+            console_height = 0
+        if console_height <= 0:
+            return 0
+        home_height = max(12, console_height - 4)
+        return max(8, home_height - 7)
+
+    def _measure_renderable_height(self, renderable: Any, *, width: int) -> int:
+        try:
+            options = self.console.options.update(width=max(20, int(width or 20)))
+            lines = self.console.render_lines(renderable, options=options, pad=False, new_lines=False)
+            return max(1, len(lines))
+        except Exception:
+            return 1
+
+    def _visible_chat_message_cards(self, *, width: int, bubble_width: int, height_budget: int) -> List[Any]:
+        selected_cards: List[Any] = []
+        used_height = 0
+        gap_height = 1
+        for item in reversed(self._chat_messages):
+            card = self._build_chat_message_card(
+                item,
+                width=width,
+                bubble_width=bubble_width,
+                max_body_lines=None,
+            )
+            if card is None:
+                continue
+            card_height = self._measure_renderable_height(card, width=width)
+            needed = card_height if not selected_cards else card_height + gap_height
+            if selected_cards and used_height + needed > height_budget:
+                break
+            if not selected_cards and card_height > height_budget:
+                selected_cards.append(card)
+                break
+            selected_cards.append(card)
+            used_height += needed
+        selected_cards.reverse()
+        return selected_cards
+
+    def _build_chat_dialog_block(self, *, width: int, height_budget: int | None = None):
+        total_messages = len(self._chat_messages)
+        bubble_width = max(28, int(width or 28))
+        header = Table.grid(expand=True)
+        header.add_column(ratio=1)
+        header.add_column(no_wrap=True)
+        header.add_row(
+            Text.from_markup("[bold #d7875f]最近对话[/bold #d7875f]"),
+            Text.from_markup(f"[grey70]{total_messages} 条消息[/grey70]"),
+        )
+
+        cards: List[Any] = []
+        if not self._chat_messages:
+            cards.append(
+                Panel(
+                    Text.from_markup("[dim]还没有最近对话[/dim]"),
+                    border_style="bright_black",
+                    box=ROUNDED,
+                    padding=(0, 1),
+                    expand=True,
+                )
+            )
+        else:
+            if height_budget and height_budget > 0:
+                visible_cards = self._visible_chat_message_cards(
+                    width=width,
+                    bubble_width=bubble_width,
+                    height_budget=max(6, int(height_budget)),
+                )
+            else:
+                visible_cards = [
+                    card
+                    for item in self._chat_messages
+                    for card in [self._build_chat_message_card(item, width=width, bubble_width=bubble_width)]
+                    if card is not None
+                ]
+            if not visible_cards:
+                visible_cards = [
+                    card
+                    for item in self._chat_messages[-1:]
+                    for card in [self._build_chat_message_card(item, width=width, bubble_width=bubble_width)]
+                    if card is not None
+                ]
+            for card in visible_cards:
+                cards.append(card)
+                cards.append(Text(""))
+            if cards and isinstance(cards[-1], Text) and cards[-1].plain == "":
+                cards.pop()
+        dialog_body = Group(*cards)
+        return Group(
+            header,
+            Text.from_markup("[dim]完整消息保留；空间不足时减少显示条数，不截断单条消息[/dim]"),
+            Text(""),
+            Align(dialog_body, align="left", vertical="bottom"),
+        )
+
+    def _build_chat_home_panel(self):
+        left_ratio, right_ratio, right_text_width = self._chat_home_layout_metrics()
+        dialog_height_budget = self._chat_dialog_height_budget()
+        inner = Layout()
+        inner.split_row(
+            Layout(self._build_chat_identity_block(), name="chat_status", ratio=left_ratio),
+            Layout(VerticalDivider(), name="chat_divider", size=1),
+            Layout(
+                self._build_chat_dialog_block(width=right_text_width, height_budget=dialog_height_budget),
+                name="chat_dialog",
+                ratio=right_ratio,
+            ),
+        )
+        return Panel(
+            inner,
+            border_style="#d7875f",
+            box=ROUNDED,
+            padding=(1, 2),
+        )
+
+    def _build_chat_input_panel(self) -> Panel:
+        mode_label = "Chat Coding" if self._chat_task_snapshot else "Chat Session"
+        header = Table.grid(expand=True)
+        header.add_column(ratio=1)
+        header.add_column(no_wrap=True)
+        header.add_row(
+            Text.from_markup("[bold #d7875f]消息输入[/bold #d7875f]"),
+            Text.from_markup(f"[grey70]{mode_label}  Enter 发送  /back 返回[/grey70]"),
+        )
+        lines = [
+            header,
+            Text.from_markup(
+                f"[cyan]你[/cyan]  [bright_black]│[/bright_black] "
+                f"[dim]{self._chat_prompt_placeholder()}[/dim]"
+            ),
+        ]
+        return Panel(
+            Group(*lines),
+            border_style="#d7875f",
+            box=ROUNDED,
+            padding=(0, 1),
+            expand=True,
+        )
+
+    def _context_usage_ratio(self) -> tuple[int, int, int]:
+        current = max(0, int(self._current_context_tokens or 0))
+        limit = max(0, int(self._context_token_limit or 0))
+        pct = int((current / limit) * 100) if limit > 0 else 0
+        return current, limit, pct
+
+    def _chat_context_status_markup(self) -> str:
+        current, limit, pct = self._context_usage_ratio()
+        if limit <= 0:
+            return "[grey70]上下文[/grey70]  [dim]等待首轮请求[/dim]"
+        if pct >= 90:
+            pct_style = "bold red"
+            bar_style = "red"
+        elif pct >= 75:
+            pct_style = "yellow"
+            bar_style = "yellow"
+        else:
+            pct_style = "cyan"
+            bar_style = "cyan"
+        return (
+            f"[grey70]上下文[/grey70]  "
+            f"[{bar_style}]{self._make_bar(current, limit, 8)}[/{bar_style}]  "
+            f"[white]{format_token_count(current)}[/white]"
+            f"[dim] / {format_token_count(limit)}[/dim]  "
+            f"[{pct_style}]{pct}%[/{pct_style}]"
+        )
+
+    def _build_chat_context_summary_lines(self, *, width: int) -> List[str]:
+        current, limit, pct = self._context_usage_ratio()
+        if limit <= 0:
+            return self._format_chat_kv_lines("上下文", "等待首轮请求", width=width, value_style="dim", max_lines=2)
+        usage_lines = self._format_chat_kv_lines(
+            "上下文",
+            f"{format_token_count(current)} / {format_token_count(limit)}",
+            width=width,
+            value_style="white",
+            max_lines=2,
+        )
+        if pct >= 90:
+            pct_style = "bold red"
+            bar_style = "red"
+        elif pct >= 75:
+            pct_style = "yellow"
+            bar_style = "yellow"
+        else:
+            pct_style = "cyan"
+            bar_style = "cyan"
+        usage_lines.append(
+            f"[grey70]占比[/grey70]  [{pct_style}]{pct}%[/{pct_style}]  "
+            f"[{bar_style}]{self._make_bar(current, limit, 8)}[/{bar_style}]"
+        )
+        return usage_lines
+
+    def chat_prompt_label(self) -> str:
+        try:
+            width = int(getattr(self.console, "width", 0) or 0)
+        except Exception:
+            width = 0
+        if width >= 120:
+            indent = 66
+        elif width >= 96:
+            indent = 44
+        elif width >= 80:
+            indent = 24
+        else:
+            indent = 8
+        return (" " * max(0, indent)) + "你"
+
+    def _locate_chat_input_bounds(self) -> tuple[int, int, int] | None:
+        if self._shell_mode != "chat":
+            return None
+        placeholder = self._chat_prompt_placeholder()
+        try:
+            renderable = self._status_renderable()
+            lines = self.console.render_lines(
+                renderable,
+                options=self.console.options,
+                pad=True,
+                new_lines=False,
+            )
+        except Exception:
+            return None
+        plain_lines = ["".join(segment.text for segment in line) for line in lines]
+        for row, line in enumerate(plain_lines):
+            column = line.find(placeholder)
+            if column >= 0:
+                right_border = line.rfind("│")
+                width = max(8, right_border - column - 1) if right_border > column else len(placeholder)
+                return (column, row, width)
+        return None
+
+    def _locate_chat_prompt_cursor(self) -> tuple[int, int] | None:
+        bounds = self._locate_chat_input_bounds()
+        if bounds is None:
+            return None
+        column, row, _width = bounds
+        return (column, row)
+
+    def position_chat_prompt_cursor(self) -> bool:
+        if self._shell_mode != "chat":
+            return False
+        controller = getattr(self.console, "control", None)
+        if not callable(controller):
+            return False
+        try:
+            bounds = self._locate_chat_input_bounds()
+            if bounds is None:
+                return False
+            column, row, _width = bounds
+            controller(
+                Control.move_to(column, row),
+            )
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _tail_fit_text_cells(text: str, width: int) -> str:
+        if width <= 0:
+            return ""
+        fitted = ""
+        for ch in reversed(text or ""):
+            if cell_len(ch + fitted) > width:
+                break
+            fitted = ch + fitted
+        return fitted
+
+    def _paint_chat_input_buffer(self, text: str, bounds: tuple[int, int, int]) -> None:
+        column, row, width = bounds
+        prefix = "> "
+        prefix_width = cell_len(prefix)
+        visible = self._tail_fit_text_cells(text, max(0, width - prefix_width))
+        display = prefix + visible
+        padding = " " * max(0, width - cell_len(display))
+        controller = getattr(self.console, "control", None)
+        stream = getattr(self.console, "file", None)
+        if not callable(controller) or stream is None:
+            return
+        controller(Control.move_to(column, row))
+        stream.write(display + padding)
+        stream.flush()
+        controller(Control.move_to(column + cell_len(display), row))
+
+    def _read_chat_input_inline_windows(self, bounds: tuple[int, int, int]) -> str:
+        import msvcrt
+
+        buffer = ""
+        self._paint_chat_input_buffer(buffer, bounds)
+        while True:
+            ch = msvcrt.getwch()
+            if ch in ("\r", "\n"):
+                return buffer
+            if ch == "\003":
+                raise KeyboardInterrupt
+            if ch in ("\b", "\x7f"):
+                buffer = buffer[:-1]
+                self._paint_chat_input_buffer(buffer, bounds)
+                continue
+            if ch in ("\x00", "\xe0"):
+                _ = msvcrt.getwch()
+                continue
+            if not ch or not ch.isprintable():
+                continue
+            buffer += ch
+            self._paint_chat_input_buffer(buffer, bounds)
+
+    def _read_chat_input_inline_posix(self, bounds: tuple[int, int, int]) -> str:
+        import termios
+        import tty
+
+        buffer = ""
+        stream = sys.stdin
+        fileno = stream.fileno()
+        old_settings = termios.tcgetattr(fileno)
+        self._paint_chat_input_buffer(buffer, bounds)
+        try:
+            tty.setraw(fileno)
+            while True:
+                ch = stream.read(1)
+                if ch in ("\r", "\n"):
+                    return buffer
+                if ch == "\x03":
+                    raise KeyboardInterrupt
+                if ch in ("\x7f", "\b"):
+                    buffer = buffer[:-1]
+                    self._paint_chat_input_buffer(buffer, bounds)
+                    continue
+                if ch == "\x1b":
+                    seq = stream.read(2)
+                    if seq.startswith("["):
+                        continue
+                if not ch or not ch.isprintable():
+                    continue
+                buffer += ch
+                self._paint_chat_input_buffer(buffer, bounds)
+        finally:
+            termios.tcsetattr(fileno, termios.TCSADRAIN, old_settings)
+
+    def read_chat_input(self) -> str:
+        if self._shell_mode != "chat":
+            return self.console.input("> ", markup=False, emoji=False)
+        bounds = self._locate_chat_input_bounds()
+        if bounds is not None and getattr(sys.stdin, "isatty", lambda: False)():
+            try:
+                if sys.platform.startswith("win"):
+                    return self._read_chat_input_inline_windows(bounds)
+                return self._read_chat_input_inline_posix(bounds)
+            except Exception:
+                pass
+        positioned = self.position_chat_prompt_cursor()
+        if positioned and bounds is not None:
+            self._paint_chat_input_buffer("", bounds)
+            return self.console.input("", markup=False, emoji=False)
+        fallback = self.chat_prompt_label().strip() or "你"
+        return self.console.input(f"[bold white]{fallback}:[/bold white] ", markup=True, emoji=False)
+
     def _build_pet_panel(self):
         pet = self._get_pet_snapshot()
         runtime_metrics = self._derive_runtime_metrics(pet)
@@ -1634,6 +2611,8 @@ class UIManager:
         return Panel(inner, title="宠物空间", border_style="magenta", box=ROUNDED, padding=(0, 1))
 
     def _build_conversation_panel(self):
+        if self._shell_mode == "chat":
+            return self._build_chat_home_panel()
         thought_lines: List[str] = []
         main_live = self._build_live_thought_block(
             "思考(进行中)",
@@ -1721,6 +2700,13 @@ class UIManager:
         )
 
     def _status_renderable(self):
+        if self._shell_mode == "chat":
+            layout = Layout()
+            layout.split_column(
+                Layout(self._build_conversation_panel(), name="chat_home", ratio=1),
+                Layout(self._build_chat_input_panel(), name="chat_input", size=4),
+            )
+            return layout
         layout = Layout()
         layout.split_column(Layout(name="body", ratio=1), Layout(name="logs", size=7))
         layout["body"].split_row(Layout(name="pet", size=60), Layout(name="conversation", ratio=1))
@@ -1729,11 +2715,15 @@ class UIManager:
         layout["logs"].update(self._build_logs_panel())
         return layout
 
+    def render_shell_snapshot(self):
+        return self._status_renderable()
+
     # ======================== Live ========================
 
-    def start_live(self):
+    def start_live(self, transient: bool = False):
         if UIManager._test_mode:
             return
+        self._ensure_terminal_footprint(self._shell_mode)
         if self._live is None:
             try:
                 from core.logging.logger import reset_token_console
@@ -1746,7 +2736,7 @@ class UIManager:
                 self._status_renderable(),
                 console=self.console,
                 refresh_per_second=6,
-                transient=False,
+                transient=bool(transient),
                 auto_refresh=False,
                 redirect_stdout=False,
                 redirect_stderr=False,
@@ -1792,6 +2782,7 @@ class UIManager:
             self._turn_input_tokens = max(0, int(input_tokens or 0))
         if output_tokens is not None:
             self._turn_output_tokens = max(0, int(output_tokens or 0))
+        self._save_runtime_state()
         self._update_status_line()
 
     def refresh_pet_display(self):

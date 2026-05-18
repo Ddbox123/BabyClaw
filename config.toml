@@ -16,40 +16,11 @@ preset = "moose"
 
 [llm]
 
-[llm.providers]
-
-[llm.providers.remote_main]
-kind = "minimax"
-api_key = ""
-api_key_env = "MINIMAX_API_KEY"
-base_url = "https://api.minimaxi.com/v1"
-compat_mode = "openai"
-requires_api_key = true
-context_window = 204800
-
-[llm.providers.local_main]
-kind = "local"
-api_key = ""
-api_key_env = ""
-base_url = "http://localhost:8000/v1"
-compat_mode = "openai"
-requires_api_key = false
-context_window = 65536
-
-[llm.providers.deepseek_main]
-kind = "deepseek"
-api_key_env = "DEEPSEEK_API_KEY"
-base_url = "https://api.deepseek.com"
-compat_mode = "openai"
-requires_api_key = true
-context_window = 131072
-provider_id = "deepseek_main"
-
 [llm.profiles]
 
 [llm.profiles.primary]
-provider_id = "deepseek_main"
 model = "deepseek-v4-pro"
+api_key_env = "VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY"
 temperature = 0.7
 max_output_tokens = 8192
 timeout = 120
@@ -57,74 +28,144 @@ connect_timeout = 20
 streaming = true
 tool_calling_mode = "auto"
 discovery_enabled = true
-api_key_env = "VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY"
+
+[llm.profiles.primary.provider]
+kind = "deepseek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com"
+compat_mode = "openai"
+requires_api_key = true
+context_window = 131072
 
 [llm.profiles.mental_model]
-provider_id = "remote_main"
-model = "MiniMax-M2.7"
-temperature = 1
-max_output_tokens = 8192
+model = "deepseek-v4-flash"
+api_key_env = "VIBELUTION_LLM_DEEPSEEK_V4_FLASH_API_KEY"
+transport = "chat_completions"
+contract = "reasoning_chat"
+reasoning_state_field = "reasoning_content"
+temperature = 0.7
+max_output_tokens = 384000
 timeout = 120
 connect_timeout = 20
 streaming = true
 tool_calling_mode = "auto"
 discovery_enabled = true
+
+[llm.profiles.mental_model.provider]
+kind = "deepseek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com"
+compat_mode = "openai"
+requires_api_key = true
+context_window = 1000000
 
 [llm.profiles.subagent_worker]
-provider_id = "remote_main"
-model = "MiniMax-M2.7"
-temperature = 1
-max_output_tokens = 8192
+model = "deepseek-v4-flash"
+api_key_env = "VIBELUTION_LLM_DEEPSEEK_V4_FLASH_API_KEY"
+transport = "chat_completions"
+contract = "reasoning_chat"
+reasoning_state_field = "reasoning_content"
+temperature = 0.7
+max_output_tokens = 384000
 timeout = 120
 connect_timeout = 20
 streaming = true
 tool_calling_mode = "auto"
 discovery_enabled = true
+
+[llm.profiles.subagent_worker.provider]
+kind = "deepseek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com"
+compat_mode = "openai"
+requires_api_key = true
+context_window = 1000000
 
 [llm.profiles.subagent_explorer]
-provider_id = "remote_main"
-model = "MiniMax-M2.7"
-temperature = 0.3
-max_output_tokens = 4096
+model = "deepseek-v4-pro"
+api_key_env = "VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY"
+temperature = 0.7
+max_output_tokens = 8192
 timeout = 120
 connect_timeout = 20
 streaming = true
 tool_calling_mode = "auto"
 discovery_enabled = true
+
+[llm.profiles.subagent_explorer.provider]
+kind = "deepseek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com"
+compat_mode = "openai"
+requires_api_key = true
+context_window = 131072
 
 [llm.profiles.supervised_baseline]
-provider_id = "remote_main"
-model = "MiniMax-M2.7"
-temperature = 1
-max_output_tokens = 8192
+model = "deepseek-v4-flash"
+api_key_env = "VIBELUTION_LLM_DEEPSEEK_V4_FLASH_API_KEY"
+transport = "chat_completions"
+contract = "reasoning_chat"
+reasoning_state_field = "reasoning_content"
+temperature = 0.7
+max_output_tokens = 384000
 timeout = 120
 connect_timeout = 20
 streaming = true
 tool_calling_mode = "auto"
 discovery_enabled = true
+
+[llm.profiles.supervised_baseline.provider]
+kind = "deepseek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com"
+compat_mode = "openai"
+requires_api_key = true
+context_window = 1000000
 
 [llm.profiles.supervised_candidate]
-provider_id = "remote_main"
-model = "MiniMax-M2.7"
-temperature = 1
-max_output_tokens = 8192
+model = "deepseek-v4-flash"
+api_key_env = "VIBELUTION_LLM_DEEPSEEK_V4_FLASH_API_KEY"
+transport = "chat_completions"
+contract = "reasoning_chat"
+reasoning_state_field = "reasoning_content"
+temperature = 0.7
+max_output_tokens = 384000
 timeout = 120
 connect_timeout = 20
 streaming = true
 tool_calling_mode = "auto"
 discovery_enabled = true
 
+[llm.profiles.supervised_candidate.provider]
+kind = "deepseek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com"
+compat_mode = "openai"
+requires_api_key = true
+context_window = 1000000
+
 [llm.profiles.compression]
-provider_id = "remote_main"
-model = "MiniMax-M2.7"
-temperature = 1
-max_output_tokens = 8192
+model = "deepseek-v4-flash"
+api_key_env = "VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY"
+transport = "chat_completions"
+contract = "reasoning_chat"
+reasoning_state_field = "reasoning_content"
+strict_compatibility = false
+temperature = 0.7
+max_output_tokens = 384000
 timeout = 120
 connect_timeout = 20
 streaming = true
 tool_calling_mode = "auto"
 discovery_enabled = true
-api_key_env = "VIBELUTION_LLM_REMOTE_MAIN_MINIMAX_M2_7_API_KEY"
+
+[llm.profiles.compression.provider]
+kind = "deepseek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com"
+compat_mode = "openai"
+requires_api_key = true
+context_window = 1000000
 
 [llm.discovery]
 enabled = true
@@ -136,21 +177,7 @@ output_reserve_ratio = 0.125
 
 [llm.model_library]
 
-[llm.model_library.remote_main_minimax_m2_7]
-provider_id = "remote_main"
-model = "MiniMax-M2.7"
-label = "MiniMax-M2.7"
-api_key_env = "VIBELUTION_LLM_REMOTE_MAIN_MINIMAX_M2_7_API_KEY"
-temperature = 1
-max_output_tokens = 8192
-timeout = 120
-connect_timeout = 20
-streaming = true
-tool_calling_mode = "auto"
-discovery_enabled = true
-
 [llm.model_library.deepseek_v4_pro]
-provider_id = "deepseek_main"
 model = "deepseek-v4-pro"
 label = "DeepSeek V4 Pro"
 api_key_env = "VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY"
@@ -162,6 +189,79 @@ streaming = true
 tool_calling_mode = "auto"
 discovery_enabled = true
 
+[llm.model_library.deepseek_v4_pro.provider]
+kind = "deepseek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com"
+compat_mode = "openai"
+requires_api_key = true
+context_window = 131072
+
+[llm.model_library.deepseek_v4_flash]
+model = "deepseek-v4-flash"
+label = "DeepSeek V4 Flash"
+transport = "chat_completions"
+contract = "reasoning_chat"
+reasoning_state_field = "reasoning_content"
+strict_compatibility = false
+temperature = 0.7
+max_output_tokens = 384000
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+api_key_env = "VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY"
+
+[llm.model_library.deepseek_v4_flash.provider]
+kind = "deepseek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com"
+compat_mode = "openai"
+requires_api_key = true
+context_window = 1000000
+
+[llm.model_library.openai_gpt_5_5]
+model = "gpt-5.5"
+label = "OpenAI GPT-5.5"
+api_key_env = "VIBELUTION_LLM_OPENAI_GPT_5_5_API_KEY"
+transport = "chat_completions"
+contract = "tool_chat"
+temperature = 0.7
+max_output_tokens = 128000
+timeout = 120
+connect_timeout = 20
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+
+[llm.model_library.openai_gpt_5_5.provider]
+kind = "openai"
+api_key_env = "OPENAI_API_KEY"
+base_url = "https://api.openai.com/v1"
+compat_mode = "openai"
+requires_api_key = true
+context_window = 1050000
+
+[llm.model_library.share_ai]
+model = "gpt-5.3-codex"
+label = "gpt-5.3-codex"
+api_key_env = "VIBELUTION_LLM_SHARE_AI_API_KEY"
+transport = "chat_completions"
+contract = "tool_chat"
+strict_compatibility = true
+streaming = true
+tool_calling_mode = "auto"
+discovery_enabled = true
+
+[llm.model_library.share_ai.provider]
+kind = "minimax"
+api_key_env = "MINIMAX_API_KEY"
+base_url = "https://api.minimaxi.com/v1"
+compat_mode = "openai"
+requires_api_key = true
+context_window = 204800
+
 [agent]
 name = "SelfEvolvingAgent"
 workspace = "workspace"
@@ -172,6 +272,15 @@ auto_backup = true
 backup_interval = 3000
 auto_restart_threshold = 0
 exploration_mode = false
+default_mode = "self_evolution"
+
+[agent.modes]
+chat_enabled = true
+self_evolution_enabled = true
+supervised_evolution_enabled = true
+default_shell_mode = "chat"
+default_headless_mode = "self_evolution"
+explicit_evolution_request_behavior = "route_to_workbench"
 
 [context_compression]
 enabled = true
@@ -421,6 +530,24 @@ auto_check_approved = true
 allowed_target_dirs = [
     "workspace/prompts/"
 ]
+intake_mode = "manual_review"
+
+[evolution.chat_dataset]
+enabled = true
+source_modes = [
+    "chat"
+]
+auto_capture = true
+segmentation_strategy = "task_contiguous"
+min_turns = 2
+max_turns = 12
+require_tool_call_or_analysis_or_conclusion = true
+exclude_pure_chitchat = true
+candidate_dir = "workspace/evaluation/chat_candidates"
+review_queue_path = "workspace/evaluation/chat_review_queue.jsonl"
+approved_raw_dir = "workspace/evaluation/chat_approved/raw"
+approved_jsonl_path = "workspace/evaluation/datasets/chat_reviewed_multiturn.jsonl"
+rejected_log_path = "workspace/evaluation/chat_rejected.jsonl"
 
 [memory]
 storage_dir = "workspace/memory"

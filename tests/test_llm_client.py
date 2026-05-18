@@ -129,6 +129,36 @@ def test_deepseek_payload_preserves_reasoning_content_for_assistant_history():
     assert payload["messages"][0]["tool_calls"][0]["id"] == "call_1"
 
 
+def test_deepseek_payload_omits_explicit_tool_choice_in_thinking_mode():
+    config = make_config(
+        **{
+            "llm.providers.default.kind": "deepseek",
+            "llm.providers.default.api_key": "test-key",
+            "llm.providers.default.base_url": "https://api.deepseek.com",
+            "llm.profiles.primary.provider_id": "default",
+            "llm.profiles.primary.model": "deepseek-v4-pro",
+        }
+    )
+
+    client = LLMClient(config=config, backend=lambda payload: payload)
+    payload = client._build_payload(
+        [{"role": "user", "content": "ping"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read one file",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+    )
+
+    assert "tools" in payload
+    assert "tool_choice" not in payload
+
+
 def test_invoke_preserves_reasoning_content_in_ai_message():
     config = make_config(
         **{
@@ -196,6 +226,40 @@ def test_openai_compatible_payload_flattens_structured_content_blocks():
     payload = client._build_payload([{"role": "system", "content": content}])
 
     assert payload["messages"][0]["content"] == "plain"
+
+
+def test_openai_codex_model_uses_known_context_window():
+    config = make_config(
+        **{
+            "llm.providers.default.kind": "openai",
+            "llm.providers.default.api_key": "test-key",
+            "llm.providers.default.base_url": "https://api.openai.com/v1",
+            "llm.providers.default.context_window": 123456,
+            "llm.profiles.primary.provider_id": "default",
+            "llm.profiles.primary.model": "gpt-5.3-codex",
+        }
+    )
+
+    client = LLMClient(config=config, backend=lambda payload: payload)
+
+    assert client.resolved_spec.context_window == 400000
+
+
+def test_openai_gpt_5_5_uses_known_context_window():
+    config = make_config(
+        **{
+            "llm.providers.default.kind": "openai",
+            "llm.providers.default.api_key": "test-key",
+            "llm.providers.default.base_url": "https://api.openai.com/v1",
+            "llm.providers.default.context_window": 123456,
+            "llm.profiles.primary.provider_id": "default",
+            "llm.profiles.primary.model": "gpt-5.5",
+        }
+    )
+
+    client = LLMClient(config=config, backend=lambda payload: payload)
+
+    assert client.resolved_spec.context_window == 1050000
 
 
 def test_tool_schema_is_sanitized_before_payload():

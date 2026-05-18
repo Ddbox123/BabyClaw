@@ -47,6 +47,8 @@ PROVIDER_API_KEY_ENV_ALIASES: Dict[str, List[str]] = {
     "minimax": ["MINIMAX2_7_API_KEY", "minimax2.7"],
 }
 
+VALID_AGENT_MODES = ("chat", "self_evolution", "supervised_evolution")
+
 
 def get_provider_api_key_env(provider: str) -> Optional[str]:
     """返回 provider 对应的 API Key 环境变量名。"""
@@ -54,31 +56,34 @@ def get_provider_api_key_env(provider: str) -> Optional[str]:
     return PROVIDER_API_KEY_ENV_MAP.get(normalized)
 
 
+def _read_windows_user_env_var(name: str) -> Optional[str]:
+    if os.name != "nt":
+        return None
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", f"[Environment]::GetEnvironmentVariable('{name}', 'User')"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        value = result.stdout.strip()
+        return value or None
+    except Exception:
+        return None
+
+
 def _read_env_var(name: str) -> Optional[str]:
-    """读取环境变量；仅在显式开启时兼容 Windows 用户级变量回退。"""
+    """读取环境变量；Windows 下在进程环境缺失时回退到用户级环境变量。"""
     value = os.environ.get(name)
     if value:
         return value
-
-    allow_user_env_fallback = os.environ.get("VIBELUTION_ENABLE_USER_ENV_FALLBACK", "").strip().lower()
-    if os.name == "nt" and allow_user_env_fallback in {"1", "true", "yes", "on"}:
-        try:
-            import subprocess
-
-            result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", f"[Environment]::GetEnvironmentVariable('{name}', 'User')"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-            value = result.stdout.strip()
-            if value:
-                return value
-        except Exception:
-            return None
-
-    return None
+    fallback_enabled = str(os.environ.get("VIBELUTION_ENABLE_USER_ENV_FALLBACK", "") or "").strip().lower()
+    if fallback_enabled not in {"1", "true", "yes", "on"}:
+        return None
+    return _read_windows_user_env_var(name)
 
 
 def _is_local_base_url(base_url: str) -> bool:
@@ -164,6 +169,7 @@ class LLMProfile(BaseModel):
     profile_id: str = Field(default="")
     provider_id: str = Field(default="default")
     model: str = Field(default="qwen-plus")
+    api_key_env: str = Field(default="")
     transport: str = Field(default="chat_completions")
     contract: str = Field(default="tool_chat")
     reasoning_state_field: str = Field(default="")
@@ -307,17 +313,44 @@ class LLMConfig(BaseModel):
             raise ValueError(f"missing provider: {resolved_provider_id}")
         return provider
 
+    @staticmethod
+    def _provider_identity(provider: Optional[ProviderConfig]) -> tuple:
+        if provider is None:
+            return tuple()
+        return (
+            str(provider.kind or "").strip().lower(),
+            str(provider.api_key or "").strip(),
+            str(provider.api_key_env or "").strip(),
+            str(provider.base_url or "").strip(),
+            tuple(sorted((provider.extra_headers or {}).items())),
+            str(provider.compat_mode or "").strip().lower(),
+            bool(provider.requires_api_key),
+            int(provider.context_window or 0),
+        )
+
     def get_model_library_entry_for_profile(self, profile: LLMProfile) -> tuple[str, Dict[str, Any]] | tuple[None, None]:
+        profile_provider = self.get_provider(profile.provider_id)
         for model_id, item in self.model_library.items():
             if not isinstance(item, dict):
                 continue
-            if item.get("provider_id") == profile.provider_id and item.get("model") == profile.model:
+            if item.get("model") != profile.model:
+                continue
+            item_provider_id = str(item.get("provider_id") or "").strip()
+            if item_provider_id == profile.provider_id:
+                return model_id, item
+            item_provider = self.providers.get(item_provider_id)
+            if self._provider_identity(item_provider) == self._provider_identity(profile_provider):
                 return model_id, item
         return None, None
 
     def resolve_api_key_for_profile(self, profile_id: Optional[str] = None, role: str = "primary") -> Optional[str]:
         profile = self.get_profile(profile_id=profile_id, role=role)
         provider = self.get_provider(profile.provider_id)
+        profile_model_env = str(getattr(profile, "api_key_env", "") or "").strip()
+        if profile_model_env:
+            value = _read_env_var(profile_model_env)
+            if value:
+                return value
         _, model_entry = self.get_model_library_entry_for_profile(profile)
         if isinstance(model_entry, dict):
             model_env = str(model_entry.get("api_key_env") or "").strip()
@@ -330,6 +363,9 @@ class LLMConfig(BaseModel):
     def get_api_key_source_label_for_profile(self, profile_id: Optional[str] = None, role: str = "primary") -> str:
         profile = self.get_profile(profile_id=profile_id, role=role)
         provider = self.get_provider(profile.provider_id)
+        profile_model_env = str(getattr(profile, "api_key_env", "") or "").strip()
+        if profile_model_env and _read_env_var(profile_model_env):
+            return f"profile-env:{profile_model_env}"
         _, model_entry = self.get_model_library_entry_for_profile(profile)
         if isinstance(model_entry, dict):
             model_env = str(model_entry.get("api_key_env") or "").strip()
@@ -360,6 +396,36 @@ class LLMConfig(BaseModel):
 # ============================================================================
 # Agent 行为配置
 # ============================================================================
+
+class AgentModesConfig(BaseModel):
+    """Agent 运行模式配置。"""
+    model_config = ConfigDict(extra="ignore")
+
+    chat_enabled: bool = Field(default=True, description="是否启用 chat 模式")
+    self_evolution_enabled: bool = Field(default=True, description="是否启用 self_evolution 模式")
+    supervised_evolution_enabled: bool = Field(default=True, description="是否启用 supervised_evolution 模式")
+    default_shell_mode: str = Field(default="chat", description="交互工作台默认模式")
+    default_headless_mode: str = Field(default="self_evolution", description="无交互运行默认模式")
+    explicit_evolution_request_behavior: str = Field(
+        default="route_to_workbench",
+        description="chat 模式遇到显式进化请求时的行为",
+    )
+
+    @field_validator("default_shell_mode", "default_headless_mode")
+    @classmethod
+    def validate_mode_name(cls, v: str) -> str:
+        value = (v or "").strip().lower()
+        if value not in VALID_AGENT_MODES:
+            raise ValueError(f"mode must be one of: {', '.join(VALID_AGENT_MODES)}")
+        return value
+
+    @field_validator("explicit_evolution_request_behavior")
+    @classmethod
+    def validate_explicit_behavior(cls, v: str) -> str:
+        value = (v or "route_to_workbench").strip().lower()
+        if value not in {"route_to_workbench", "reply_only"}:
+            raise ValueError("explicit_evolution_request_behavior must be route_to_workbench or reply_only")
+        return value
 
 class AgentConfig(BaseModel):
     """
@@ -419,6 +485,14 @@ class AgentConfig(BaseModel):
         default=False,
         description="是否启用探索模式"
     )
+    default_mode: str = Field(
+        default="self_evolution",
+        description="Agent 默认运行模式"
+    )
+    modes: AgentModesConfig = Field(
+        default_factory=AgentModesConfig,
+        description="Agent 运行模式配置"
+    )
 
     @field_validator("awake_interval", "max_iterations", "backup_interval")
     @classmethod
@@ -427,6 +501,14 @@ class AgentConfig(BaseModel):
         if v <= 0:
             raise ValueError(f"Value must be positive, got {v}")
         return v
+
+    @field_validator("default_mode")
+    @classmethod
+    def validate_default_mode(cls, v: str) -> str:
+        value = (v or "self_evolution").strip().lower()
+        if value not in VALID_AGENT_MODES:
+            raise ValueError(f"default_mode must be one of: {', '.join(VALID_AGENT_MODES)}")
+        return value
 
 
 # ============================================================================
@@ -968,6 +1050,76 @@ class NetworkConfig(BaseModel):
 # 进化引擎配置
 # ============================================================================
 
+class ChatDatasetCaptureConfig(BaseModel):
+    """chat 对话采样为进化数据的配置。"""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(default=True, description="是否启用 chat 数据采集")
+    source_modes: List[str] = Field(
+        default_factory=lambda: ["chat"],
+        description="允许采样的 Agent 模式",
+    )
+    auto_capture: bool = Field(default=True, description="是否静默自动采样候选片段")
+    segmentation_strategy: str = Field(
+        default="task_contiguous",
+        description="对话分段策略",
+    )
+    min_turns: int = Field(default=2, ge=1, description="候选片段最少轮数")
+    max_turns: int = Field(default=12, ge=1, description="候选片段最多轮数")
+    require_tool_call_or_analysis_or_conclusion: bool = Field(
+        default=True,
+        description="是否要求工具/分析/结论信号至少满足其一",
+    )
+    exclude_pure_chitchat: bool = Field(default=True, description="是否排除纯闲聊")
+    candidate_dir: str = Field(
+        default="workspace/evaluation/chat_candidates",
+        description="候选片段原始文件目录",
+    )
+    review_queue_path: str = Field(
+        default="workspace/evaluation/chat_review_queue.jsonl",
+        description="候选审核队列索引路径",
+    )
+    approved_raw_dir: str = Field(
+        default="workspace/evaluation/chat_approved/raw",
+        description="已通过原始片段目录",
+    )
+    approved_jsonl_path: str = Field(
+        default="workspace/evaluation/datasets/chat_reviewed_multiturn.jsonl",
+        description="审核通过后的结构化数据集 JSONL 路径",
+    )
+    rejected_log_path: str = Field(
+        default="workspace/evaluation/chat_rejected.jsonl",
+        description="被拒绝候选的审计日志路径",
+    )
+
+    @field_validator("source_modes")
+    @classmethod
+    def validate_source_modes(cls, v: List[str]) -> List[str]:
+        cleaned: List[str] = []
+        for item in v or []:
+            mode = str(item or "").strip().lower()
+            if not mode:
+                continue
+            if mode not in VALID_AGENT_MODES:
+                raise ValueError(f"source mode must be one of: {', '.join(VALID_AGENT_MODES)}")
+            if mode not in cleaned:
+                cleaned.append(mode)
+        return cleaned or ["chat"]
+
+    @field_validator("segmentation_strategy")
+    @classmethod
+    def validate_segmentation_strategy(cls, v: str) -> str:
+        value = (v or "task_contiguous").strip().lower()
+        if value not in {"task_contiguous"}:
+            raise ValueError("segmentation_strategy must be task_contiguous")
+        return value
+
+    @model_validator(mode="after")
+    def validate_turn_window(self) -> "ChatDatasetCaptureConfig":
+        if self.max_turns < self.min_turns:
+            raise ValueError("max_turns must be >= min_turns")
+        return self
+
 class EvolutionConfig(BaseModel):
     """进化引擎配置"""
     model_config = ConfigDict(extra="ignore")
@@ -975,6 +1127,10 @@ class EvolutionConfig(BaseModel):
     enabled: bool = Field(
         default=True,
         description="是否启用自动进化"
+    )
+    intake_mode: str = Field(
+        default="manual_review",
+        description="Library 引入模式：manual_review 或 auto"
     )
     config_path: str = Field(
         default="workspace/evolution_config.json",
@@ -1018,6 +1174,18 @@ class EvolutionConfig(BaseModel):
         default_factory=lambda: ["workspace/prompts/"],
         description="允许进化修改的目录白名单"
     )
+    chat_dataset: ChatDatasetCaptureConfig = Field(
+        default_factory=ChatDatasetCaptureConfig,
+        description="chat 对话数据采样配置"
+    )
+
+    @field_validator("intake_mode")
+    @classmethod
+    def validate_intake_mode(cls, v: str) -> str:
+        value = (v or "manual_review").strip().lower()
+        if value not in {"manual_review", "auto"}:
+            raise ValueError("intake_mode must be manual_review or auto")
+        return value
 
 
 # ============================================================================
@@ -1658,6 +1826,7 @@ __all__ = [
     "RetryPolicyConfig",
     # Agent 配置
     "AgentConfig",
+    "AgentModesConfig",
     # 上下文压缩配置
     "ContextCompressionConfig",
     "CompressionLevelsConfig",
@@ -1680,6 +1849,7 @@ __all__ = [
     "NetworkConfig",
     # 进化引擎配置
     "EvolutionConfig",
+    "ChatDatasetCaptureConfig",
     # 记忆系统配置
     "MemoryConfig",
     # 策略系统配置

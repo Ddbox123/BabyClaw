@@ -43,6 +43,12 @@ from .promotion import (
     apply_gym_promotion_proposal,
     rollback_gym_promotion_proposal,
 )
+from .advisory import (
+    ActiveAdvisoryBaseline,
+    build_active_advisory_snapshot,
+    load_active_advisory_baselines,
+    summarize_active_advisory_baselines,
+)
 from .selection import TierScoreSummary, TierSelectionDecision, select_by_training_tier
 from .vibelution_adapter import VibelutionAgentHarnessAdapter
 from .runner import (
@@ -78,6 +84,7 @@ __all__ = [
     "GymPromotionActivation",
     "GymPromotionApplication",
     "GymPromotionRollback",
+    "ActiveAdvisoryBaseline",
     "HarnessVariant",
     "ImprovementEpisode",
     "PromotionProposal",
@@ -89,6 +96,7 @@ __all__ = [
     "append_generated_case",
     "activate_gym_promotion_proposal",
     "apply_gym_promotion_proposal",
+    "build_active_advisory_snapshot",
     "build_builtin_collection_registry",
     "build_coordination_workflow_exercise",
     "build_generated_case",
@@ -97,6 +105,7 @@ __all__ = [
     "build_mixed_readiness_gate_exercise",
     "format_gym_run_result",
     "list_builtin_collections",
+    "load_active_advisory_baselines",
     "materialize_collection_cases",
     "materialize_collection_exercise",
     "materialize_coordination_workflow_cases",
@@ -110,5 +119,6 @@ __all__ = [
     "run_gym_collection_episode",
     "run_promotion_gate_episode",
     "select_by_training_tier",
+    "summarize_active_advisory_baselines",
     "validate_agent_harness_adapter",
 ]

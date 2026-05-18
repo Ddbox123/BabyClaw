@@ -7,6 +7,8 @@ Architecture:
     - RuntimeInputKind: 输入类型枚举
     - RuntimeInput: 不可变数据结构
     - build_external_request_message: 外部请求消息
+    - build_chat_user_message: 对话用户输入
+    - build_supervised_evolution_request_message: 监督进化请求
     - build_runtime_notice_message: 运行时通知消息
     - build_delegation_evidence_message: 委派证据消息
     - build_delegation_failure_message: 委派失败消息
@@ -22,6 +24,8 @@ from langchain_core.messages import SystemMessage
 class RuntimeInputKind(str, Enum):
     """运行时输入类型枚举。"""
     EXTERNAL_REQUEST = "external_request"
+    CHAT_USER_MESSAGE = "chat_user_message"
+    SUPERVISED_EVOLUTION_REQUEST = "supervised_evolution_request"
     RUNTIME_NOTICE = "runtime_notice"
     DELEGATION_EVIDENCE = "delegation_evidence"
     DELEGATION_FAILURE = "delegation_failure"
@@ -36,6 +40,8 @@ class RuntimeInput:
 
 _TITLES = {
     RuntimeInputKind.EXTERNAL_REQUEST: "外部任务输入",
+    RuntimeInputKind.CHAT_USER_MESSAGE: "对话用户输入",
+    RuntimeInputKind.SUPERVISED_EVOLUTION_REQUEST: "监督进化请求",
     RuntimeInputKind.RUNTIME_NOTICE: "运行时提示",
     RuntimeInputKind.DELEGATION_EVIDENCE: "委派证据",
     RuntimeInputKind.DELEGATION_FAILURE: "委派失败",
@@ -53,6 +59,16 @@ def build_runtime_input_message(item: RuntimeInput) -> SystemMessage:
 def build_external_request_message(content: str) -> SystemMessage:
     """构建外部请求消息。"""
     return SystemMessage(content=f"{EXTERNAL_REQUEST_HEADER}\n{content.strip()}")
+
+
+def build_chat_user_message(content: str) -> SystemMessage:
+    """构建 chat 模式用户输入消息。"""
+    return build_runtime_input_message(RuntimeInput(RuntimeInputKind.CHAT_USER_MESSAGE, content))
+
+
+def build_supervised_evolution_request_message(content: str) -> SystemMessage:
+    """构建监督进化请求消息。"""
+    return build_runtime_input_message(RuntimeInput(RuntimeInputKind.SUPERVISED_EVOLUTION_REQUEST, content))
 
 
 def build_runtime_notice_message(content: str) -> SystemMessage:

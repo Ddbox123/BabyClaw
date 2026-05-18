@@ -263,6 +263,27 @@ def test_activate_gym_promotion_proposal_rejects_rolled_back_proposal(tmp_path: 
     assert not (tmp_path / "workspace" / "gym" / "active_promotions.json").exists()
 
 
+def test_rollback_gym_promotion_proposal_removes_active_registry_entry(tmp_path: Path):
+    result = run_gym_collection_episode(
+        collection_id="foundation_local_stability",
+        project_root=tmp_path,
+        adapter=RunnerFakeAdapter(),
+        episode_id="active_rollback_episode",
+    )
+    apply_gym_promotion_proposal(result.promotion_proposal_path, project_root=tmp_path)
+    activation = activate_gym_promotion_proposal(result.promotion_proposal_path, project_root=tmp_path)
+
+    rollback = rollback_gym_promotion_proposal(result.promotion_proposal_path, project_root=tmp_path)
+
+    assert rollback.status == "rolled_back"
+    proposal = json.loads(Path(result.promotion_proposal_path).read_text(encoding="utf-8"))
+    assert proposal["status"] == "rolled_back"
+    assert proposal["rolled_back_from_status"] == "active"
+
+    registry = json.loads((tmp_path / "workspace" / "gym" / "active_promotions.json").read_text(encoding="utf-8"))
+    assert activation.target_key not in registry["active"]
+
+
 def test_activate_gym_promotion_proposal_supersedes_previous_active_for_target(tmp_path: Path):
     first = run_gym_collection_episode(
         collection_id="foundation_local_stability",

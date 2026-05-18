@@ -165,8 +165,8 @@ def rollback_gym_promotion_proposal(
     status = str(proposal.get("status") or "").strip()
     if status == "rolled_back":
         return _rollback_from_rolled_back_proposal(active_proposal_path, proposal, root)
-    if status != "applied":
-        raise ValueError(f"Gym promotion proposal must be applied before rollback; got {status or 'missing'}")
+    if status not in {"applied", "active"}:
+        raise ValueError(f"Gym promotion proposal must be applied or active before rollback; got {status or 'missing'}")
 
     episode_id = _required_text(proposal, "episode_id")
     decision_path = Path(
@@ -175,6 +175,13 @@ def rollback_gym_promotion_proposal(
     trace_index_path = Path(str(proposal.get("trace_index_path") or trace_index_path_for_decision(decision_path))).resolve()
     _load_json_object(decision_path, label="Gym decision")
     _validate_trace_index(trace_index_path)
+    registry_path = None
+    target_key = None
+    if status == "active":
+        registry_path = Path(
+            str(proposal.get("activation_registry_path") or root / "workspace" / "gym" / "active_promotions.json")
+        ).resolve()
+        target_key = str(proposal.get("target_key") or _fallback_target_key(proposal))
 
     rolled_back_at = utcnow_iso()
     ledger_path = root / "workspace" / "gym" / "rolled_back_promotions.jsonl"
@@ -192,9 +199,18 @@ def rollback_gym_promotion_proposal(
         ledger_path=str(ledger_path),
     )
 
+    if registry_path is not None and target_key:
+        _deactivate_active_registry_entry(
+            registry_path=registry_path,
+            target_key=target_key,
+            proposal_id=rollback.proposal_id,
+            deactivated_at=rolled_back_at,
+        )
+
     proposal.update(
         {
             "status": "rolled_back",
+            "rolled_back_from_status": status,
             "rolled_back_by": rolled_back_by,
             "rolled_back_at": rolled_back_at,
             "rollback_reason": reason,
@@ -487,6 +503,26 @@ def _mark_previous_active_superseded(
         }
     )
     previous_path.write_text(json.dumps(previous, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _deactivate_active_registry_entry(
+    *,
+    registry_path: Path,
+    target_key: str,
+    proposal_id: str,
+    deactivated_at: str,
+) -> None:
+    registry = _load_registry(registry_path)
+    active_entries = registry.get("active")
+    if not isinstance(active_entries, dict):
+        active_entries = {}
+        registry["active"] = active_entries
+    current_entry = active_entries.get(target_key)
+    if isinstance(current_entry, dict) and str(current_entry.get("proposal_id") or "") == proposal_id:
+        active_entries.pop(target_key, None)
+        registry["updated_at"] = deactivated_at
+        registry_path.parent.mkdir(parents=True, exist_ok=True)
+        registry_path.write_text(json.dumps(registry, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 __all__ = [

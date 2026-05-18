@@ -15,6 +15,8 @@ litellm>=1.51.0
 
 # 配置管理 (Pydantic v2)
 pydantic>=2.0.0
+fastapi>=0.111.0
+uvicorn>=0.30.0
 
 # 可选依赖（根据需要安装）
 # beautifulsoup4>=4.12.0  # 用于更高级的 HTML 解析

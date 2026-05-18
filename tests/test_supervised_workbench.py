@@ -5,10 +5,14 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from core.gym import run_gym_collection_episode
+from core.gym.promotion import activate_gym_promotion_proposal, apply_gym_promotion_proposal
 from core.evaluation.supervised_workbench import (
+    execute_gym_promotion_action,
     format_bundle_preview,
     format_decision_history,
     format_file_excerpt,
+    load_gym_promotion_lifecycle,
     format_lineage_summary,
     list_recent_decision_records,
     prepare_dataset_run,
@@ -16,6 +20,7 @@ from core.evaluation.supervised_workbench import (
     select_dataset_by_input,
     select_decision_record,
 )
+from tests.test_gym_runner import RunnerFakeAdapter
 
 
 def test_format_lineage_summary_reads_index(tmp_path: Path):
@@ -216,3 +221,86 @@ def test_format_file_excerpt_truncates_long_file(tmp_path: Path):
 
     assert rendered.startswith("abc")
     assert "已截断" in rendered
+
+
+def test_load_gym_promotion_lifecycle_reads_proposed_proposal_from_supervised_decision(tmp_path: Path):
+    result = run_gym_collection_episode(
+        collection_id="foundation_local_stability",
+        project_root=tmp_path,
+        adapter=RunnerFakeAdapter(),
+        episode_id="supervised_lifecycle_proposed",
+    )
+    decision_path = _write_supervised_decision(tmp_path, result.promotion_proposal_path, result.decision_path)
+
+    lifecycle = load_gym_promotion_lifecycle(str(decision_path), project_root=tmp_path)
+
+    assert lifecycle.status == "proposed"
+    assert lifecycle.available_actions == ("apply",)
+    assert lifecycle.proposal_path == str(Path(result.promotion_proposal_path).resolve())
+    assert lifecycle.gym_decision_path == str(Path(result.decision_path).resolve())
+    assert lifecycle.trace_index_path == str(Path(result.trace_index_path).resolve())
+    assert lifecycle.runtime_effect == "not_applied"
+    assert lifecycle.agent_consumption == "advisory"
+
+
+def test_load_gym_promotion_lifecycle_for_active_proposal_exposes_only_rollback(tmp_path: Path):
+    result = run_gym_collection_episode(
+        collection_id="foundation_local_stability",
+        project_root=tmp_path,
+        adapter=RunnerFakeAdapter(),
+        episode_id="supervised_lifecycle_active",
+    )
+    apply_gym_promotion_proposal(result.promotion_proposal_path, project_root=tmp_path)
+    activation = activate_gym_promotion_proposal(result.promotion_proposal_path, project_root=tmp_path)
+    decision_path = _write_supervised_decision(tmp_path, result.promotion_proposal_path, result.decision_path)
+
+    lifecycle = load_gym_promotion_lifecycle(str(decision_path), project_root=tmp_path)
+
+    assert lifecycle.status == "active"
+    assert lifecycle.available_actions == ("rollback",)
+    assert lifecycle.active_registry_match is True
+    assert lifecycle.target_key == activation.target_key
+
+
+def test_execute_gym_promotion_action_refreshes_lifecycle(tmp_path: Path):
+    result = run_gym_collection_episode(
+        collection_id="foundation_local_stability",
+        project_root=tmp_path,
+        adapter=RunnerFakeAdapter(),
+        episode_id="supervised_lifecycle_apply",
+    )
+    decision_path = _write_supervised_decision(tmp_path, result.promotion_proposal_path, result.decision_path)
+
+    action = execute_gym_promotion_action(str(decision_path), "apply", project_root=tmp_path)
+
+    assert action.action == "apply"
+    assert action.lifecycle.status == "applied"
+    assert "status: applied" in action.summary
+
+
+def _write_supervised_decision(tmp_path: Path, proposal_path: str, gym_decision_path: str) -> Path:
+    decisions_dir = tmp_path / "workspace" / "supervised_evolution" / "decisions"
+    decisions_dir.mkdir(parents=True, exist_ok=True)
+    decision_path = decisions_dir / "supervised_with_gym.json"
+    payload = {
+        "session_id": "supervised_with_gym",
+        "bundle_name": "demo_bundle",
+        "decision": "PROMOTE",
+        "reason": "candidate 通过监督进化与 Gym gate",
+        "ended_at": "2026-05-16T00:00:00Z",
+        "gates": [
+            {
+                "name": "gym_promotion",
+                "status": "pass",
+                "reason": "promotion gate pass",
+                "metrics": {
+                    "promotion_proposal_path": proposal_path,
+                    "decision_path": gym_decision_path,
+                },
+            }
+        ],
+        "decision_path": str(decision_path),
+        "policy_action": {},
+    }
+    decision_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return decision_path

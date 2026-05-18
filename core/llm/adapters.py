@@ -115,6 +115,9 @@ class ProviderAdapter:
         host = urlparse(str(self.provider.base_url or "").strip()).hostname or ""
         return "deepseek.com" in host.lower()
 
+    def supports_explicit_tool_choice(self) -> bool:
+        return True
+
 
 class OpenAICompatibleAdapter(ProviderAdapter):
     """Adapter for OpenAI-compatible HTTP endpoints."""
@@ -171,6 +174,11 @@ class DeepSeekAdapter(ProviderAdapter):
 
     def _litellm_provider_prefix(self) -> str:
         return "deepseek"
+
+    def supports_explicit_tool_choice(self) -> bool:
+        # DeepSeek V4 thinking mode rejects tool_choice on the official
+        # OpenAI-compatible endpoint; omit it and let the model decide.
+        return False
 
 
 def get_provider_adapter(provider: ProviderConfig, profile: LLMProfile) -> ProviderAdapter:

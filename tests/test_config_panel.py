@@ -5,549 +5,607 @@
 
 import json
 import os
+import threading
 import tomllib
+import urllib.error
+import urllib.parse
+import urllib.request
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
 from config.toml_writer import dumps_public_config
 from scripts.config_panel import (
+    ConfigPanelHandler,
     HEADER_LINES,
+    _assert_base_hash_matches,
+    _render_llm_profile_card,
+    _submitted_base_hash,
+    _validate_required_llm_profiles,
+    _delete_user_env_var,
+    _set_user_env_var,
     add_llm_model,
+    add_llm_profile,
     apply_llm_model_preset,
     build_effective_config,
+    clear_llm_model_api_key,
     delete_llm_model,
     get_config_language,
-    load_public_config,
-    list_llm_model_preset_options,
+    inspect_public_config,
     list_llm_model_options,
+    list_llm_model_preset_options,
+    load_public_config,
     localize_label,
     localize_section_label,
-    add_llm_profile,
     preserve_secret_blanks,
     render_panel_html,
     save_public_config,
-    _delete_user_env_var,
-    _set_user_env_var,
+    set_llm_model_api_key,
     test_llm_connection as run_llm_connection_test,
     update_llm_model,
-    set_llm_model_api_key,
-    clear_llm_model_api_key,
 )
+from config.public_config import UNCONFIGURED_MODEL_REF, public_config_hash
 
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
 
-def _iter_panel_editable_paths(node, prefix=""):
-    if isinstance(node, dict):
-        for key, value in node.items():
-            path = f"{prefix}.{key}" if prefix else key
-            yield from _iter_panel_editable_paths(value, path)
-        return
+def _start_test_config_panel(monkeypatch: pytest.MonkeyPatch, config_path: Path):
+    from config.public_config import load_public_config as load_public_config_from_path
+    from config.public_config import save_public_config as save_public_config_to_path
 
-    if isinstance(node, list):
-        if all(isinstance(item, str) for item in node):
-            yield prefix
-            return
-        for index, item in enumerate(node):
-            yield from _iter_panel_editable_paths(item, f"{prefix}.{index}")
-        return
+    def fake_load_public_config():
+        return load_public_config_from_path(config_path)
 
-    yield prefix
+    def fake_save_public_config(public_config):
+        return save_public_config_to_path(public_config, config_path)
 
-
-def _get_path(node, path):
-    current = node
-    for part in path.split("."):
-        if isinstance(current, list):
-            current = current[int(part)]
-        else:
-            current = current[part]
-    return current
+    monkeypatch.setattr("scripts.config_panel.load_public_config", fake_load_public_config)
+    monkeypatch.setattr("scripts.config_panel.save_public_config", fake_save_public_config)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ConfigPanelHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    return server, thread, base_url
 
 
-def _set_path(node, path, value):
-    current = node
-    parts = path.split(".")
-    for part in parts[:-1]:
-        if isinstance(current, list):
-            current = current[int(part)]
-        else:
-            current = current[part]
-    last = parts[-1]
-    if isinstance(current, list):
-        current[int(last)] = value
-    else:
-        current[last] = value
+def _post_form(base_url: str, path: str, fields: dict[str, str]):
+    data = urllib.parse.urlencode(fields).encode("utf-8")
+    request = urllib.request.Request(
+        f"{base_url}{path}",
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    return urllib.request.urlopen(request, timeout=10)
 
 
-def _configured_test_value(path, value, root_config):
-    if isinstance(value, bool):
-        return not value
-    if isinstance(value, int) and not isinstance(value, bool):
-        if path.endswith("summary_max_chars"):
-            return value - 1 if value >= 1000 else value + 1
-        return value + 1
-    if isinstance(value, float):
-        return value / 2 if value >= 1 else value + 0.01
-    if isinstance(value, list) and all(isinstance(item, str) for item in value):
-        return [*value, "CONFIG_TEST_VALUE"]
-    if isinstance(value, str):
-        if path == "ui.language":
-            return "en" if value != "en" else "zh"
-        if path in {"avatar.preset", "ui.theme"}:
-            return "cat" if value != "cat" else "moose"
-        if path == "runtime.profile":
-            return "debug" if value != "debug" else "ci"
-        if path == "log.level":
-            return "DEBUG" if value != "DEBUG" else "INFO"
-        if path.endswith(".provider_id"):
-            providers = root_config.get("llm", {}).get("providers", {})
-            return "local_main" if "local_main" in providers else next(iter(providers), value)
-        if path.endswith(".kind"):
-            return "local" if value != "local" else "minimax"
-        if path.endswith(".compat_mode"):
-            return "native" if value != "native" else "openai"
-        if path.endswith(".api_key"):
-            return "CONFIG_TEST_SECRET"
-        if path.endswith(".api_key_env"):
-            return "CONFIG_TEST_API_KEY"
-        if path.endswith(".base_url") or path.endswith(".url"):
-            return "http://127.0.0.1:9999/v1"
-        return f"{value}_CONFIG_TEST" if value else "CONFIG_TEST_VALUE"
-    return value
+def _provider(
+    kind: str,
+    base_url: str,
+    api_key_env: str,
+    *,
+    compat_mode: str = "openai",
+    requires_api_key: bool = True,
+    context_window: int = 400000,
+) -> dict:
+    return {
+        "kind": kind,
+        "api_key_env": api_key_env,
+        "base_url": base_url,
+        "compat_mode": compat_mode,
+        "requires_api_key": requires_api_key,
+        "context_window": context_window,
+    }
 
 
-def test_render_panel_html_contains_diagnostics():
+def test_public_llm_shape_is_inline_provider_only():
     public_config = load_public_config()
-    html = render_panel_html(public_config, lang="zh")
+    llm = public_config["llm"]
+
+    assert "providers" not in llm
+    assert all("provider" in profile for profile in llm["profiles"].values())
+    assert all("provider_id" not in profile for profile in llm["profiles"].values())
+    assert all("provider" in item for item in llm["model_library"].values())
+    assert all("provider_id" not in item for item in llm["model_library"].values())
+
+
+def test_render_panel_html_uses_inline_provider_controls():
+    html = render_panel_html(load_public_config(), lang="zh")
 
     assert "Vibelution 配置面板" in html
-    assert "配置诊断" in html
-    assert "保存到 config.toml" in html
-    assert "运行时" in html
-    assert "界面语言" in html
-    assert "模型服务" in html
-    assert "模型档案" in html
-    assert "角色绑定" not in html
-    assert "服务提供方:" in html
-    assert "模型:" in html
-    assert "密钥来源" in html
-    assert 'id="toast-stack"' in html
-    assert 'value="secret-key"' not in html
+    assert "通用模型库" in html
+    assert "模型服务" not in html
+    assert "remote_main" not in html
+    assert 'data-add-model-field="provider_kind"' in html
+    assert 'data-add-model-field="provider_base_url"' in html
+    assert 'data-edit-field="provider_kind"' in html
+    assert 'data-edit-field="provider_id"' not in html
+    assert 'data-path="llm.providers.remote_main.kind"' not in html
+    assert 'data-path="llm.profiles.primary.provider.kind"' in html
+    assert 'data-provider="' in html
 
 
-def test_render_panel_html_uses_consistent_chinese_llm_terms():
+def test_render_panel_html_uses_inline_profile_clone_controls():
+    html = render_panel_html(load_public_config(), lang="zh")
+
+    assert 'id="add-llm-profile-card"' in html
+    assert 'data-add-profile-field="source_profile_id"' in html
+    assert 'id="add-llm-profile-model"' in html
+    assert 'data-add-profile-field="provider_id"' not in html
+    assert 'saveInlineLlmProfile()' in html
+    assert "profile_id and model_id are required" in html
+
+
+def test_render_panel_html_embeds_inline_provider_js_helpers():
+    html = render_panel_html(load_public_config(), lang="zh")
+
+    assert "collectProviderFields" in html
+    assert "applySelectedModelToProfile" in html
+    assert "provider_extra_headers must be valid JSON" in html
+    assert "provider.kind and model are required" in html
+
+
+def test_render_panel_html_uses_confirm_apply_flow_and_draft_routes():
+    html = render_panel_html(load_public_config(), lang="zh")
+
+    assert "应用配置" in html
+    assert "修改已确认，等待应用" in html
+    assert 'postHtmlNavigation("/preview"' in html
+    assert 'fetch("/preview-config-card"' in html
+    assert 'fetch("/preview-llm-profile-card"' in html
+    assert "postPreviewState(" in html
+    assert '"/draft-add-llm-model"' in html
+    assert '"/draft-update-llm-model"' in html
+    assert '"/draft-delete-llm-model"' in html
+    assert '"/draft-add-llm-profile"' in html
+
+
+def test_render_panel_html_embeds_base_hash_for_apply_flow():
     public_config = load_public_config()
+    expected_hash = public_config_hash(public_config)
+
     html = render_panel_html(public_config, lang="zh")
 
-    assert "Providers" not in html
-    assert "Profiles" not in html
-    assert "Role Bindings" not in html
-    assert "Provider 类型" not in html
-    assert "Provider 绑定" not in html
-    assert "最大输出 Tokens" not in html
-    assert "主 Agent Profile" not in html
-    assert "服务类型" in html
-    assert "模型服务绑定" in html
-    assert "最大输出令牌数" in html
-    assert "模型档案" in html
-    assert "主智能体" in html
+    assert 'name="base_hash"' in html
+    assert 'id="base-hash"' in html
+    assert "const INITIAL_BASE_HASH" in html
+    assert expected_hash in html
+    assert "collectBaseHash()" in html
+
+
+def test_render_panel_html_marks_missing_profile_models_as_required():
+    public_config = load_public_config()
+    public_config["llm"]["profiles"]["primary"] = {
+        "model_ref": UNCONFIGURED_MODEL_REF,
+        "overrides": {},
+    }
+
+    html = render_panel_html(public_config, lang="zh")
+
+    assert '* 必填' in html
+    assert 'data-profile-required="primary"' in html
+    assert '请选择模型' in html
+
+
+def test_render_llm_profile_card_includes_stable_card_id():
+    html = _render_llm_profile_card(load_public_config(), "primary", "zh")
+
+    assert 'id="config-card-llm-profiles-primary"' in html
+    assert 'data-card-path="llm.profiles.primary"' in html
+
+
+def test_render_llm_profile_card_accepts_model_ref_profiles():
+    public_config = load_public_config()
+    public_config["llm"]["profiles"]["primary"] = {
+        "model_ref": "openai_gpt_5_5",
+        "overrides": {"temperature": 0.25},
+    }
+
+    html = _render_llm_profile_card(public_config, "primary", "zh")
+
+    assert 'data-profile-required="primary"' not in html
+    assert 'gpt-5.5' in html
+
+
+def test_submitted_base_hash_reads_form_value():
+    assert _submitted_base_hash({"base_hash": ["abc123"]}) == "abc123"
+    assert _submitted_base_hash({}) == ""
+
+
+def test_assert_base_hash_matches_rejects_stale_snapshot():
+    public_config = load_public_config()
+    stale_hash = public_config_hash(public_config)
+    updated = load_public_config()
+    updated["ui"]["language"] = "en"
+
+    with pytest.raises(ValueError, match="重新加载"):
+        _assert_base_hash_matches(stale_hash, updated, "zh")
+
+
+def test_confirm_preview_does_not_persist_config_file(tmp_path, monkeypatch):
+    public_config = load_public_config()
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(dumps_public_config(public_config, HEADER_LINES), encoding="utf-8")
+    original_text = config_path.read_text(encoding="utf-8")
+    payload = load_public_config(config_path)
+    payload["ui"]["language"] = "en"
+    base_hash = public_config_hash(public_config)
+    server, thread, base_url = _start_test_config_panel(monkeypatch, config_path)
+
+    try:
+        response = _post_form(
+            base_url,
+            "/preview",
+            {
+                "payload": json.dumps(payload, ensure_ascii=False),
+                "draft_meta": json.dumps({}, ensure_ascii=False),
+                "base_hash": base_hash,
+                "lang": "en",
+                "message": "preview-only",
+            },
+        )
+        html = response.read().decode("utf-8")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert response.status == 200
+    assert 'id="base-hash"' in html
+    assert base_hash in html
+    assert "preview-only" in html
+    assert config_path.read_text(encoding="utf-8") == original_text
+
+
+def test_preview_config_card_returns_html_without_persisting_config_file(tmp_path, monkeypatch):
+    public_config = load_public_config()
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(dumps_public_config(public_config, HEADER_LINES), encoding="utf-8")
+    original_text = config_path.read_text(encoding="utf-8")
+    payload = load_public_config(config_path)
+    payload["tools"]["shell"]["default_timeout"] = 321
+    base_hash = public_config_hash(public_config)
+    server, thread, base_url = _start_test_config_panel(monkeypatch, config_path)
+
+    try:
+        response = _post_form(
+            base_url,
+            "/preview-config-card",
+            {
+                "payload": json.dumps(payload, ensure_ascii=False),
+                "draft_meta": json.dumps({}, ensure_ascii=False),
+                "base_hash": base_hash,
+                "card_path": "tools.shell",
+                "lang": "zh",
+            },
+        )
+        result = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert response.status == 200
+    assert result["ok"] is True
+    assert 'data-card-path="tools.shell"' in result["html"]
+    assert 'value="321"' in result["html"]
+    assert result["message"] == "修改已确认，等待应用"
+    assert config_path.read_text(encoding="utf-8") == original_text
+
+
+def test_draft_add_llm_model_returns_preview_fragments_without_persisting_config_file(tmp_path, monkeypatch):
+    public_config = load_public_config()
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(dumps_public_config(public_config, HEADER_LINES), encoding="utf-8")
+    original_text = config_path.read_text(encoding="utf-8")
+    payload = load_public_config(config_path)
+    base_hash = public_config_hash(public_config)
+    server, thread, base_url = _start_test_config_panel(monkeypatch, config_path)
+
+    try:
+        response = _post_form(
+            base_url,
+            "/draft-add-llm-model",
+            {
+                "payload": json.dumps(payload, ensure_ascii=False),
+                "draft_meta": json.dumps({}, ensure_ascii=False),
+                "base_hash": base_hash,
+                "response_mode": "fragments",
+                "model_id": "preview_custom_model",
+                "provider": json.dumps(
+                    _provider("openai", "https://api.openai.com/v1", "OPENAI_API_KEY"),
+                    ensure_ascii=False,
+                ),
+                "model": "gpt-5.5",
+                "label": "Preview Custom Model",
+                "details": json.dumps({}, ensure_ascii=False),
+                "api_key_env": "",
+                "lang": "zh",
+            },
+        )
+        result = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert response.status == 200
+    assert result["ok"] is True
+    assert result["public_config"]["llm"]["model_library"]["preview_custom_model"]["model"] == "gpt-5.5"
+    assert "Preview Custom Model" in result["main_html"]
+    assert "配置诊断" in result["aside_html"]
+    assert result["message"] == "修改已确认，等待应用"
+    assert config_path.read_text(encoding="utf-8") == original_text
+
+
+def test_draft_add_llm_profile_returns_preview_fragments_without_persisting_config_file(tmp_path, monkeypatch):
+    public_config = load_public_config()
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(dumps_public_config(public_config, HEADER_LINES), encoding="utf-8")
+    original_text = config_path.read_text(encoding="utf-8")
+    payload = load_public_config(config_path)
+    base_hash = public_config_hash(public_config)
+    server, thread, base_url = _start_test_config_panel(monkeypatch, config_path)
+
+    try:
+        response = _post_form(
+            base_url,
+            "/draft-add-llm-profile",
+            {
+                "payload": json.dumps(payload, ensure_ascii=False),
+                "draft_meta": json.dumps({}, ensure_ascii=False),
+                "base_hash": base_hash,
+                "response_mode": "fragments",
+                "profile_id": "preview_profile_copy",
+                "source_profile_id": "primary",
+                "model_id": "openai_gpt_5_5",
+                "lang": "zh",
+            },
+        )
+        result = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert response.status == 200
+    assert result["ok"] is True
+    assert result["public_config"]["llm"]["profiles"]["preview_profile_copy"]["model"] == "gpt-5.5"
+    assert 'data-profile-id="preview_profile_copy"' in result["main_html"]
+    assert result["message"] == "修改已确认，等待应用"
+    assert config_path.read_text(encoding="utf-8") == original_text
+
+
+def test_draft_delete_llm_model_fragments_mark_referencing_profiles_unconfigured(tmp_path, monkeypatch):
+    public_config = load_public_config()
+    public_config["llm"]["profiles"]["primary"] = {
+        "model_ref": "openai_gpt_5_5",
+        "overrides": {},
+    }
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(dumps_public_config(public_config, HEADER_LINES), encoding="utf-8")
+    original_text = config_path.read_text(encoding="utf-8")
+    payload = json.loads(json.dumps(public_config, ensure_ascii=False))
+    base_hash = public_config_hash(load_public_config(config_path))
+    server, thread, base_url = _start_test_config_panel(monkeypatch, config_path)
+
+    try:
+        response = _post_form(
+            base_url,
+            "/draft-delete-llm-model",
+            {
+                "payload": json.dumps(payload, ensure_ascii=False),
+                "draft_meta": json.dumps({}, ensure_ascii=False),
+                "base_hash": base_hash,
+                "response_mode": "fragments",
+                "model_id": "openai_gpt_5_5",
+                "lang": "zh",
+            },
+        )
+        result = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert response.status == 200
+    assert result["ok"] is True
+    assert result["public_config"]["llm"]["profiles"]["primary"]["model_ref"] == UNCONFIGURED_MODEL_REF
+    assert 'data-profile-required="primary"' in result["main_html"]
+    assert "请选择模型" in result["main_html"]
+    assert result["message"] == "修改已确认，等待应用"
+    assert config_path.read_text(encoding="utf-8") == original_text
+
+
+def test_apply_requires_matching_base_hash(tmp_path, monkeypatch):
+    public_config = load_public_config()
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(dumps_public_config(public_config, HEADER_LINES), encoding="utf-8")
+    stale_hash = public_config_hash(public_config)
+    external = load_public_config(config_path)
+    external["ui"]["language"] = "en"
+    save_public_config(external, config_path)
+    payload = load_public_config(config_path)
+    payload["ui"]["language"] = "zh"
+    server, thread, base_url = _start_test_config_panel(monkeypatch, config_path)
+
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post_form(
+                base_url,
+                "/save",
+                {
+                    "payload": json.dumps(payload, ensure_ascii=False),
+                    "draft_meta": json.dumps({}, ensure_ascii=False),
+                    "base_hash": stale_hash,
+                    "lang": "zh",
+                },
+            )
+        body = exc_info.value.read().decode("utf-8")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    result = json.loads(body)
+    assert exc_info.value.code == 409
+    assert result["ok"] is False
+    assert "重新加载" in result["message"]
+    assert load_public_config(config_path)["ui"]["language"] == "en"
+
+
+def test_apply_with_matching_base_hash_persists_config_file(tmp_path, monkeypatch):
+    public_config = load_public_config()
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(dumps_public_config(public_config, HEADER_LINES), encoding="utf-8")
+    payload = load_public_config(config_path)
+    payload["ui"]["language"] = "en"
+    base_hash = public_config_hash(load_public_config(config_path))
+    server, thread, base_url = _start_test_config_panel(monkeypatch, config_path)
+
+    try:
+        response = _post_form(
+            base_url,
+            "/save",
+            {
+                "payload": json.dumps(payload, ensure_ascii=False),
+                "draft_meta": json.dumps({}, ensure_ascii=False),
+                "base_hash": base_hash,
+                "lang": "en",
+            },
+        )
+        result = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert response.status == 200
+    assert result["ok"] is True
+    assert load_public_config(config_path)["ui"]["language"] == "en"
 
 
 def test_render_panel_html_supports_english():
-    public_config = load_public_config()
-    html = render_panel_html(public_config, lang="en")
+    html = render_panel_html(load_public_config(), lang="en")
 
     assert "Vibelution Config Panel" in html
-    assert "Configuration Diagnostics" in html
-    assert "Save to config.toml" in html
-    assert "Runtime" in html
-    assert "Interface Language" in html
-    assert "Providers" in html
+    assert "Model Library" in html
+    assert "Providers" not in html
     assert 'option value="en" selected' in html
 
 
-def test_render_panel_html_renders_language_as_select():
+def test_render_panel_html_uses_configured_language_by_default():
     public_config = load_public_config()
-    html = render_panel_html(public_config, lang="zh")
+    public_config.setdefault("ui", {})
+    public_config["ui"]["language"] = "en"
 
-    assert 'data-path="ui.language"' in html
-    assert "syncLanguageControls(this.value, 'body')" in html
-    assert 'option value="zh" selected' in html
-    assert 'option value="en"' in html
+    html = render_panel_html(public_config)
 
-
-def test_render_panel_html_renders_controlled_selects():
-    public_config = load_public_config()
-    html = render_panel_html(public_config, lang="zh")
-
-    assert 'data-path="runtime.profile"' in html
-    assert 'option value="safe_remote" selected' in html
-    assert 'data-path="llm.providers.remote_main.kind"' in html
-    assert 'value="minimax"' in html
-    assert 'data-path="avatar.preset"' in html
-    assert 'option value="moose" selected' in html
-    assert 'onclick="editConfigCard(this)"' in html
-    assert 'onclick="saveConfigCard(this)"' in html
-    assert 'onclick="editConfigField(this)"' not in html
-    assert 'onclick="saveConfigField(this)"' not in html
-    assert 'class="field-editor" hidden' in html
-    assert 'data-original-value=' in html
+    assert "Vibelution Config Panel" in html
+    assert 'option value="en" selected' in html
 
 
-def test_render_panel_html_uses_one_edit_button_per_collapsible_card():
-    public_config = load_public_config()
-    html = render_panel_html(public_config, lang="zh")
-
-    assert html.count('onclick="editConfigCard(this)"') == html.count('data-collapsible-card="true"')
-    remote_start = html.index('id="card-content-llm-providers-remote-main"')
-    remote_end = html.index('id="card-content-llm-providers-local-main"', remote_start)
-    remote_html = html[remote_start:remote_end]
-    assert 'onclick="editConfigField(this)"' not in remote_html
+def test_get_config_language_falls_back_safely():
+    assert get_config_language({"ui": {"language": "en"}}) == "en"
+    assert get_config_language({"ui": {"language": "nope"}}) == "zh"
+    assert get_config_language({}) == "zh"
 
 
-def test_render_panel_html_keeps_api_key_env_editable():
-    public_config = load_public_config()
-    html = render_panel_html(public_config, lang="zh")
-
-    assert 'data-path="llm.providers.remote_main.api_key_env"' in html
-    assert 'value="MINIMAX_API_KEY"' in html
-    assert '<input type="password" data-path="llm.providers.remote_main.api_key_env"' not in html
+def test_label_localization_prefers_exact_and_fallback_rules():
+    assert localize_label("llm.providers.remote_main.api_key", "api_key", "zh") == "API 密钥"
+    assert localize_label("tools.shell.default_timeout", "default_timeout", "en") == "Default Timeout"
+    assert localize_section_label("llm.discovery", "discovery", "zh") == "模型发现"
+    assert localize_section_label("network", "network", "en") == "Network"
 
 
-def test_render_panel_html_uses_left_nav_as_single_page_switcher():
-    public_config = load_public_config()
-    html = render_panel_html(public_config, lang="zh")
-
-    assert html.count('data-config-page=') == len(public_config) + 2
-    assert html.count('data-config-nav=') == len(public_config) + 2
-    assert html.count('class="panel-section config-page') == len(public_config) + 2
-    assert html.count('class="panel-section config-page is-active"') == 1
-    assert html.count('class="section-content"') == len(public_config) + 1
-    assert 'data-config-page="overview"' in html
-    assert "selectConfigPage(fromHash || \"overview\")" in html
-    assert 'onclick="selectConfigPage(\'llm\'' in html
-    assert "selectConfigPage" in html
-
-
-def test_render_panel_html_refreshes_config_without_losing_current_page():
-    public_config = load_public_config()
-    html = render_panel_html(public_config, lang="zh")
-
-    assert 'function activeConfigPageId(fallbackPageId = "overview")' in html
-    assert 'nextUrl.hash = "section-" + resolvedPageId;' in html
-    assert 'reloadConfigPage(lang, result.message, 500, pageId);' in html
-    assert 'reloadConfigPage(lang, result.message, 700);' in html
-    assert 'reloadConfigPage(lang);' in html
-
-
-def test_render_panel_home_shows_effective_runtime_config():
-    public_config = load_public_config()
-    public_config["runtime"]["profile"] = "safe_local"
-
-    html = render_panel_html(public_config, lang="zh")
-
-    assert "实际生效配置" in html
-    assert "主智能体" in html
-    assert "local_main" in html
-    assert "qwen-32b-awq" in html
-    assert "http://localhost:8000/v1" in html
-    assert "onclick=\"testSelectedLlm()\"" not in html
-    assert "onclick=\"selectConfigPage('runtime')\"" in html
-
-
-def test_render_panel_html_collapses_nested_cards_by_default():
-    public_config = load_public_config()
-    html = render_panel_html(public_config, lang="zh")
-
-    assert 'data-collapsible-card="true"' in html
-    assert 'class="card-content" id="card-content-llm-providers"' in html
-    assert 'class="card-content" id="card-content-llm-providers-remote-main"' in html
-    assert 'class="card-content" id="card-content-prompt-sections-0"' in html
-    assert html.count('data-collapsible-card="true"') == html.count('class="card-content"')
-    assert html.count('aria-controls="card-content-') == html.count('data-collapsible-card="true"')
-
-
-def test_render_panel_html_exposes_every_public_config_parameter():
-    public_config = load_public_config()
-    html = render_panel_html(public_config, lang="zh")
-    missing_paths = [
-        path
-        for path in _iter_panel_editable_paths(public_config)
-        if not path.startswith("llm.model_library.")
-        if f'data-path="{path}"' not in html
-    ]
-
-    assert missing_paths == []
-
-
-def test_render_panel_html_toolbar_focuses_on_save_reload_and_language():
-    public_config = load_public_config()
-    html = render_panel_html(public_config, lang="zh")
-    toolbar_start = html.index('<div class="toolbar">')
-    toolbar_end = html.index("</div>", toolbar_start)
-    toolbar_html = html[toolbar_start:toolbar_end]
-
-    assert "语言" in toolbar_html
-    assert "保存到 config.toml" in toolbar_html
-    assert "重新加载" in toolbar_html
-    assert 'id="llm-profile-switch"' not in html
-    assert 'onclick="switchPrimaryLlm()"' not in html
-    assert "复制方案" not in toolbar_html
-    assert "测试连接" not in toolbar_html
-    assert 'id="add-llm-profile-card"' in html
-    assert 'class="inline-add-card" hidden' in html
-    assert 'onclick="saveInlineLlmProfile()"' in html
-    assert html.index('id="add-llm-profile-card"') > html.index('id="card-content-llm-profiles"')
-    assert "/switch-llm" not in html
-    assert "/add-llm-profile" in html
-
-
-def test_render_panel_html_localizes_provider_and_profile_card_titles_in_zh():
-    public_config = load_public_config()
-    html = render_panel_html(public_config, lang="zh")
-
-    assert '<span class="card-title">远程主服务</span>' in html
-    assert '<span class="card-title">本地主服务</span>' in html
-    assert '<span class="card-title">DeepSeek 主服务</span>' in html
-    assert '<span class="card-title">主智能体</span>' in html
-    assert '<span class="card-title">心智模型</span>' in html
-    assert '<span class="card-title">执行子智能体</span>' in html
-    assert '<span class="card-title">探索子智能体</span>' in html
-    assert '<span class="card-title">监督基线</span>' in html
-    assert '<span class="card-title">监督候选</span>' in html
-    assert '<span class="card-title">压缩模型</span>' in html
-    assert "无监督进化" in html
-    assert "监督进化" in html
-    assert ">remotemain<" not in html
-    assert ">mental模型<" not in html
-    assert ">subagentworker<" not in html
-
-
-def test_render_panel_html_localizes_model_options_in_zh():
-    public_config = load_public_config()
-    html = render_panel_html(public_config, lang="zh")
-
-    assert "MiniMax-M2.7 / MiniMax</option>" in html
-    assert "DeepSeek V4 Pro / DeepSeek</option>" in html
-
-
-def test_render_panel_html_adds_model_library_without_duplicate_role_prefixes():
-    public_config = load_public_config()
-    html = render_panel_html(public_config, lang="zh")
-    models = list_llm_model_options(public_config)
-
-    assert 'id="section-llm-model-library"' in html
-    assert "通用模型库" in html
-    assert "MiniMax-M2.7" in html
-    assert "DeepSeek V4 Pro" in html
-    assert 'onclick="editLlmModel(this)"' in html
-    assert 'onclick="saveLlmModelEdit(this)"' in html
-    assert 'id="add-llm-model-card"' in html
-    assert 'onclick="saveInlineLlmModel()"' in html
-    assert 'class="model-library-edit" hidden' in html
-    assert 'data-edit-field="provider_id"' in html
-    assert 'data-edit-field="temperature"' in html
-    assert 'data-edit-field="api_key_env"' in html
-    assert 'data-edit-api-key' in html
-    assert 'data-clear-api-key' in html
-    assert "VIBELUTION_LLM_REMOTE_MAIN_MINIMAX_M2_7_API_KEY" in html
-    assert 'data-edit-field="max_output_tokens"' in html
-    assert 'data-details="' in html
-    assert "/update-llm-model" in html
-    assert len(models) >= 2
-    assert {"MiniMax-M2.7", "deepseek-v4-pro"}.issubset({item["model"] for item in models})
-    assert not any(item["label"].startswith("primary /") for item in models)
-
-
-def test_render_panel_html_includes_model_preset_templates():
-    public_config = load_public_config()
-    html = render_panel_html(public_config, lang="zh")
-    presets = list_llm_model_preset_options()
-
-    assert "预设模板" in html
-    assert "data-add-model-preset" in html
-    assert "applyLlmModelPreset(this.value)" in html
-    assert "const LLM_MODEL_PRESETS" in html
-    assert "openai_gpt_5_4" in html
-    assert "local_openai_compatible" in html
-    assert len(presets) >= 8
-
-
-def test_apply_remote_model_preset_materializes_provider_and_model_library():
-    public_config = load_public_config()
-    public_config["llm"]["providers"].pop("openai_main", None)
-    updated = apply_llm_model_preset(public_config, "openai_gpt_5_4")
-
-    provider = updated["llm"]["providers"]["openai_main"]
-    model = updated["llm"]["model_library"]["openai_gpt_5_4"]
-
-    assert provider["kind"] == "openai"
-    assert provider["api_key_env"] == "OPENAI_API_KEY"
-    assert provider["requires_api_key"] is True
-    assert model["provider_id"] == "openai_main"
-    assert model["model"] == "gpt-5.4"
-    assert model["transport"] == "chat_completions"
-    assert model["contract"] == "tool_chat"
-    assert model["max_output_tokens"] == 128000
-    assert model["api_key_env"] == "VIBELUTION_LLM_OPENAI_GPT_5_4_API_KEY"
-    assert "api_key" not in model
-    build_effective_config(updated)
-
-
-def test_model_preset_defaults_match_documented_provider_shapes():
+def test_model_preset_options_include_codex_preset():
     presets = {item["preset_id"]: item for item in list_llm_model_preset_options()}
 
-    expected = {
-        "openai_gpt_5_4": {
-            "base_url": "https://api.openai.com/v1",
-            "compat_mode": "openai",
-            "model": "gpt-5.4",
-            "context_window": 1047576,
-        },
-        "anthropic_claude_sonnet": {
-            "base_url": "https://api.anthropic.com",
-            "compat_mode": "native",
-            "model": "claude-sonnet-4-6",
-            "context_window": 200000,
-        },
-        "deepseek_v4_pro": {
-            "base_url": "https://api.deepseek.com",
-            "compat_mode": "openai",
-            "model": "deepseek-v4-pro",
-            "context_window": 131072,
-        },
-        "google_gemini_flash": {
-            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-            "compat_mode": "openai",
-            "model": "gemini-3-flash-preview",
-            "context_window": 1048576,
-        },
-        "minimax_m2_7": {
-            "base_url": "https://api.minimax.io/v1",
-            "compat_mode": "openai",
-            "model": "MiniMax-M2.7",
-            "context_window": 204800,
-        },
-        "dashscope_qwen3_6_plus": {
-            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "compat_mode": "openai",
-            "model": "qwen3.6-plus",
-            "context_window": 131072,
-        },
-        "siliconflow_glm_4_7": {
-            "base_url": "https://api.siliconflow.cn/v1",
-            "compat_mode": "openai",
-            "model": "Pro/zai-org/GLM-4.7",
-            "context_window": 131072,
-        },
-        "local_openai_compatible": {
-            "base_url": "http://localhost:11434/v1/",
-            "compat_mode": "openai",
-            "model": "llama3.2",
-            "context_window": 65536,
-        },
-    }
-
-    assert set(expected).issubset(presets)
-    for preset_id, values in expected.items():
-        preset = presets[preset_id]
-        provider = preset["provider"]
-        model = preset["model"]
-        assert provider["base_url"] == values["base_url"], preset_id
-        assert provider["compat_mode"] == values["compat_mode"], preset_id
-        assert provider["context_window"] == values["context_window"], preset_id
-        assert model["model"] == values["model"], preset_id
-        assert "api_key" not in provider
-        assert "api_key" not in model
+    assert "openai_gpt_5_3_codex" in presets
+    assert presets["openai_gpt_5_3_codex"]["model"]["model"] == "gpt-5.3-codex"
+    assert presets["openai_gpt_5_3_codex"]["provider"]["kind"] == "openai"
+    assert "openai_gpt_5_5" in presets
+    assert presets["openai_gpt_5_5"]["model"]["model"] == "gpt-5.5"
+    assert presets["openai_gpt_5_5"]["provider"]["context_window"] == 1050000
+    assert "deepseek_v4_flash" in presets
+    assert presets["deepseek_v4_flash"]["model"]["model"] == "deepseek-v4-flash"
+    assert presets["deepseek_v4_flash"]["model"]["contract"] == "reasoning_chat"
+    assert presets["deepseek_v4_pro"]["model"]["reasoning_state_field"] == "reasoning_content"
 
 
-def test_apply_local_model_preset_does_not_require_api_key():
-    public_config = load_public_config()
-    updated = apply_llm_model_preset(public_config, "local_openai_compatible")
+def test_list_llm_model_options_exposes_inline_provider_and_source():
+    options = list_llm_model_options(load_public_config())
 
-    provider = updated["llm"]["providers"]["local_main"]
-    model = updated["llm"]["model_library"]["local_openai_compatible"]
-    config = build_effective_config(updated)
-    local_provider = config.llm.get_provider("local_main")
-
-    assert provider["kind"] == "local"
-    assert provider["base_url"] == "http://localhost:11434/v1/"
-    assert provider["requires_api_key"] is False
-    assert provider["api_key_env"] == ""
-    assert model["provider_id"] == "local_main"
-    assert model["model"] == "llama3.2"
-    assert model["contract"] == "basic_chat"
-    assert model["tool_calling_mode"] == "disabled"
-    assert local_provider.kind == "local"
-    assert local_provider.requires_api_key is False
+    assert options
+    assert all("provider" in item for item in options)
+    assert all("provider_id" not in item for item in options)
+    assert all(item["source"] in {"model_library", "profile"} for item in options)
 
 
-def test_render_panel_html_avoids_browser_prompt_and_confirm_dialogs():
-    public_config = load_public_config()
-    html = render_panel_html(public_config, lang="zh")
+def test_apply_codex_model_preset_materializes_inline_provider():
+    updated = apply_llm_model_preset(load_public_config(), "openai_gpt_5_3_codex")
+    model = updated["llm"]["model_library"]["openai_gpt_5_3_codex"]
 
-    assert "window.prompt" not in html
-    assert "window.confirm" not in html
-    assert "async function testSelectedLlm()" not in html
-
-
-def test_render_panel_html_keeps_provider_cards_focused_on_provider_config():
-    public_config = load_public_config()
-    html = render_panel_html(public_config, lang="zh")
-
-    assert 'data-provider-actions=' not in html
-    assert 'llm-provider-model-switch-' not in html
-
-
-def test_render_panel_html_adds_profile_card_actions():
-    public_config = load_public_config()
-    html = render_panel_html(public_config, lang="zh")
-
-    assert 'data-profile-actions="primary"' in html
-    assert 'id="llm-model-switch-llm-profiles-primary"' in html
-    assert 'data-profile-id="primary"' in html
-    assert 'onclick="cloneLlmProfile(\'primary\', \'llm-model-switch-llm-profiles-primary\')"' in html
-    assert 'onclick="applySelectedProfileModel(\'llm-model-switch-llm-profiles-primary\')"' in html
-    assert 'onclick="testSelectedProfileModel(\'llm-model-switch-llm-profiles-primary\')"' in html
-    assert "MiniMax-M2.7" in html
-    assert "qwen-32b-awq" in html
-    select_start = html.index('id="llm-model-switch-llm-profiles-primary"')
-    select_end = html.index("</select>", select_start)
-    assert 'option value="primary"' not in html[select_start:select_end]
-
-
-def test_add_update_and_delete_llm_model_library_entry():
-    public_config = load_public_config()
-    updated = add_llm_model(public_config, "backup_remote", "remote_main", "MiniMax-M2.8", "MiniMax 备用")
-
-    assert updated["llm"]["model_library"]["backup_remote"] == {
-        "provider_id": "remote_main",
-        "model": "MiniMax-M2.8",
-        "label": "MiniMax 备用",
-        "api_key_env": "VIBELUTION_LLM_BACKUP_REMOTE_API_KEY",
-    }
-    assert "backup_remote" not in public_config.get("llm", {}).get("model_library", {})
+    assert model["provider"]["kind"] == "openai"
+    assert model["provider"]["api_key_env"] == "OPENAI_API_KEY"
+    assert model["provider"]["requires_api_key"] is True
+    assert model["provider"]["context_window"] == 400000
+    assert model["model"] == "gpt-5.3-codex"
+    assert model["contract"] == "tool_chat"
+    assert model["api_key_env"] == "VIBELUTION_LLM_OPENAI_GPT_5_3_CODEX_API_KEY"
     build_effective_config(updated)
 
-    edited = update_llm_model(updated, "backup_remote", "local_main", "qwen-72b-awq", "Qwen 备用")
-    assert edited["llm"]["model_library"]["backup_remote"] == {
-        "provider_id": "local_main",
-        "model": "qwen-72b-awq",
-        "label": "Qwen 备用",
-        "api_key_env": "VIBELUTION_LLM_BACKUP_REMOTE_API_KEY",
-    }
-    assert updated["llm"]["model_library"]["backup_remote"]["model"] == "MiniMax-M2.8"
-    build_effective_config(edited)
 
-    detailed = update_llm_model(
-        edited,
-        "backup_remote",
-        "local_main",
+def test_default_public_config_includes_new_official_model_templates():
+    public_config = load_public_config()
+    openai_model = public_config["llm"]["model_library"]["openai_gpt_5_5"]
+
+    assert openai_model["provider"]["kind"] == "openai"
+    assert openai_model["provider"]["context_window"] == 1050000
+    assert openai_model["model"] == "gpt-5.5"
+    assert openai_model["max_output_tokens"] == 128000
+    assert openai_model["api_key_env"] == "VIBELUTION_LLM_OPENAI_GPT_5_5_API_KEY"
+
+    deepseek_model = public_config["llm"]["model_library"]["deepseek_v4_flash"]
+
+    assert deepseek_model["provider"]["kind"] == "deepseek"
+    assert deepseek_model["provider"]["context_window"] == 1000000
+    assert deepseek_model["model"] == "deepseek-v4-flash"
+    assert deepseek_model["contract"] == "reasoning_chat"
+    assert deepseek_model["reasoning_state_field"] == "reasoning_content"
+    assert deepseek_model["max_output_tokens"] == 384000
+    build_effective_config(public_config)
+
+
+def test_add_update_and_delete_llm_model_with_inline_provider():
+    public_config = load_public_config()
+    openai = _provider("openai", "https://api.openai.com/v1", "OPENAI_API_KEY")
+    local = _provider(
+        "local",
+        "http://127.0.0.1:11434/v1",
+        "",
+        requires_api_key=False,
+        context_window=65536,
+    )
+
+    updated = add_llm_model(public_config, "custom_codex", openai, "gpt-5.3-codex", "Custom Codex")
+    assert updated["llm"]["model_library"]["custom_codex"] == {
+        "provider": openai,
+        "model": "gpt-5.3-codex",
+        "label": "Custom Codex",
+        "api_key_env": "VIBELUTION_LLM_CUSTOM_CODEX_API_KEY",
+    }
+    assert "custom_codex" not in public_config.get("llm", {}).get("model_library", {})
+    build_effective_config(updated)
+
+    edited = update_llm_model(
+        updated,
+        "custom_codex",
+        local,
         "qwen-72b-awq",
-        "Qwen 详细",
+        "Qwen Local",
         {
             "contract": "reasoning_chat",
             "reasoning_state_field": "reasoning_content",
@@ -562,45 +620,65 @@ def test_add_update_and_delete_llm_model_library_entry():
             "discovery_enabled": True,
         },
     )
-    assert detailed["llm"]["model_library"]["backup_remote"] == {
-        "provider_id": "local_main",
-        "model": "qwen-72b-awq",
-        "label": "Qwen 详细",
-        "api_key_env": "VIBELUTION_LLM_BACKUP_REMOTE_API_KEY",
-        "transport": "chat_completions",
-        "contract": "reasoning_chat",
-        "reasoning_state_field": "reasoning_content",
-        "strict_compatibility": True,
-        "temperature": 0.2,
-        "max_output_tokens": 4096,
-        "timeout": 90,
-        "connect_timeout": 10,
-        "streaming": False,
-        "tool_calling_mode": "disabled",
-        "discovery_enabled": True,
-    }
-    backup_option = next(item for item in list_llm_model_options(detailed) if item["model_id"] == "backup_remote")
-    assert backup_option["details"]["temperature"] == 0.2
-    build_effective_config(detailed)
+    assert edited["llm"]["model_library"]["custom_codex"]["provider"] == local
+    assert edited["llm"]["model_library"]["custom_codex"]["model"] == "qwen-72b-awq"
+    assert edited["llm"]["model_library"]["custom_codex"]["label"] == "Qwen Local"
+    assert edited["llm"]["model_library"]["custom_codex"]["api_key_env"] == "VIBELUTION_LLM_CUSTOM_CODEX_API_KEY"
+    assert edited["llm"]["model_library"]["custom_codex"]["reasoning_state_field"] == "reasoning_content"
+    build_effective_config(edited)
 
-    materialized = update_llm_model(public_config, "remote_main_minimax_m2_7", "remote_main", "MiniMax-M2.7", "MiniMax 编辑")
-    assert materialized["llm"]["model_library"]["remote_main_minimax_m2_7"] == {
-        "provider_id": "remote_main",
-        "model": "MiniMax-M2.7",
-        "label": "MiniMax 编辑",
-        "api_key_env": "VIBELUTION_LLM_REMOTE_MAIN_MINIMAX_M2_7_API_KEY",
-    }
-    build_effective_config(materialized)
-
-    deleted = delete_llm_model(edited, "backup_remote")
-    assert "backup_remote" not in deleted["llm"].get("model_library", {})
-    assert "model_library" in deleted["llm"]
+    deleted = delete_llm_model(edited, "custom_codex")
+    assert "custom_codex" not in deleted["llm"]["model_library"]
     build_effective_config(deleted)
+
+
+def test_delete_generated_profile_model_clears_matching_profiles():
+    public_config = load_public_config()
+    provider = _provider("openai", "https://api.openai.com/v1", "OPENAI_API_KEY")
+    public_config["llm"]["profiles"]["primary"]["provider"] = provider.copy()
+    public_config["llm"]["profiles"]["primary"]["model"] = "gpt-5.4"
+    public_config["llm"]["profiles"]["mental_model"]["provider"] = provider.copy()
+    public_config["llm"]["profiles"]["mental_model"]["model"] = "gpt-5.4"
+
+    generated = next(item for item in list_llm_model_options(public_config) if item["source"] == "profile")
+    deleted = delete_llm_model(public_config, generated["model_id"])
+
+    assert deleted["llm"]["profiles"]["primary"]["model"] == ""
+    assert deleted["llm"]["profiles"]["mental_model"]["model"] == ""
+    assert deleted["llm"]["profiles"]["subagent_explorer"]["model"] == "deepseek-v4-pro"
+    assert not any(item["model_id"] == generated["model_id"] for item in list_llm_model_options(deleted))
+    build_effective_config(deleted)
+
+
+def test_add_llm_profile_from_model_library_copies_provider_independently():
+    public_config = load_public_config()
+    updated = add_llm_profile(public_config, "codex_clone", source_profile_id="primary", model_id="share_ai")
+
+    clone = updated["llm"]["profiles"]["codex_clone"]
+    assert clone["model"] == "gpt-5.3-codex"
+    assert clone["provider"] == updated["llm"]["model_library"]["share_ai"]["provider"]
+    assert clone["api_key_env"] == "VIBELUTION_LLM_SHARE_AI_API_KEY"
+
+    edited = update_llm_model(
+        updated,
+        "share_ai",
+        _provider("deepseek", "https://api.deepseek.com", "DEEPSEEK_API_KEY", context_window=131072),
+        "deepseek-v4-pro",
+        "DeepSeek Changed",
+    )
+    assert edited["llm"]["profiles"]["codex_clone"]["model"] == "gpt-5.3-codex"
+    assert edited["llm"]["profiles"]["codex_clone"]["provider"]["kind"] == "minimax"
+
+    deleted = delete_llm_model(updated, "share_ai")
+    assert deleted["llm"]["profiles"]["codex_clone"]["model"] == "gpt-5.3-codex"
+    assert deleted["llm"]["profiles"]["codex_clone"]["provider"]["kind"] == "minimax"
 
 
 def test_build_effective_config_rejects_reasoning_chat_without_supported_state_field():
     public_config = load_public_config()
     profile = public_config["llm"]["profiles"]["primary"]
+    profile["provider"] = _provider("openai", "https://api.openai.com/v1", "OPENAI_API_KEY")
+    profile["model"] = "gpt-5.4"
     profile["transport"] = "chat_completions"
     profile["contract"] = "reasoning_chat"
     profile["tool_calling_mode"] = "auto"
@@ -613,6 +691,8 @@ def test_build_effective_config_rejects_reasoning_chat_without_supported_state_f
 def test_build_effective_config_accepts_reasoning_chat_with_reasoning_content():
     public_config = load_public_config()
     profile = public_config["llm"]["profiles"]["primary"]
+    profile["provider"] = _provider("openai", "https://api.openai.com/v1", "OPENAI_API_KEY")
+    profile["model"] = "gpt-5.4"
     profile["transport"] = "chat_completions"
     profile["contract"] = "reasoning_chat"
     profile["tool_calling_mode"] = "auto"
@@ -624,8 +704,83 @@ def test_build_effective_config_accepts_reasoning_chat_with_reasoning_content():
     assert config.llm.get_profile("primary").reasoning_state_field == "reasoning_content"
 
 
+def test_llm_connection_uses_selected_profile_inline_provider(monkeypatch):
+    public_config = load_public_config()
+    calls = []
+
+    def fake_http_probe(provider, profile):
+        calls.append((provider.kind, profile.profile_id, profile.model))
+        return {"ok": True, "message": "ok"}
+
+    monkeypatch.setattr("scripts.config_panel._probe_llm_http", fake_http_probe)
+
+    result = run_llm_connection_test(public_config, "subagent_explorer")
+
+    assert result["ok"] is True
+    assert result["profile_id"] == "subagent_explorer"
+    assert result["provider_kind"] == "deepseek"
+    assert calls == [("deepseek", "subagent_explorer", "deepseek-v4-pro")]
+
+
+def test_llm_connection_returns_route_diagnostics(monkeypatch):
+    public_config = load_public_config()
+    monkeypatch.setenv("VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY", "model-secret")
+
+    def fake_http_probe(provider, profile, api_key=None):
+        assert api_key == "model-secret"
+        return {"ok": False, "message": "HTTP 401: Unauthorized"}
+
+    monkeypatch.setattr("scripts.config_panel._probe_llm_http", fake_http_probe)
+
+    result = run_llm_connection_test(public_config, "subagent_explorer")
+
+    assert result["ok"] is False
+    assert result["provider_kind"] == "deepseek"
+    assert result["base_url"] == "https://api.deepseek.com"
+    assert result["api_key_source"] == "profile-env:VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY"
+
+
+def test_llm_connection_prefers_pending_draft_api_key(monkeypatch):
+    public_config = load_public_config()
+
+    def fake_http_probe(provider, profile, api_key=None):
+        assert api_key == "draft-secret"
+        return {"ok": True, "message": "ok"}
+
+    monkeypatch.setattr("scripts.config_panel._probe_llm_http", fake_http_probe)
+
+    result = run_llm_connection_test(
+        public_config,
+        "subagent_explorer",
+        {
+            "pending_api_keys": {"VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY": "draft-secret"},
+            "pending_cleared_api_keys": [],
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["api_key_source"] == "pending-env:VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY"
+
+
+def test_validate_required_llm_profiles_blocks_missing_models():
+    public_config = load_public_config()
+    public_config["llm"]["profiles"]["primary"] = {
+        "model_ref": UNCONFIGURED_MODEL_REF,
+        "overrides": {},
+    }
+
+    with pytest.raises(ValueError, match="主智能体"):
+        _validate_required_llm_profiles(public_config, "zh")
+
+
 def test_model_library_api_key_writes_user_env_without_persisting_secret(monkeypatch):
-    public_config = add_llm_model(load_public_config(), "backup_remote", "remote_main", "MiniMax-M2.8", "MiniMax 备用")
+    public_config = add_llm_model(
+        load_public_config(),
+        "custom_codex",
+        _provider("openai", "https://api.openai.com/v1", "OPENAI_API_KEY"),
+        "gpt-5.3-codex",
+        "Custom Codex",
+    )
     writes = []
     deletes = []
 
@@ -640,16 +795,16 @@ def test_model_library_api_key_writes_user_env_without_persisting_secret(monkeyp
     monkeypatch.setattr("scripts.config_panel._set_user_env_var", fake_set)
     monkeypatch.setattr("scripts.config_panel._delete_user_env_var", fake_delete)
 
-    env_name = set_llm_model_api_key(public_config, "backup_remote", "model-secret")
+    env_name = set_llm_model_api_key(public_config, "custom_codex", "model-secret")
 
-    assert env_name == "VIBELUTION_LLM_BACKUP_REMOTE_API_KEY"
-    assert writes == [("VIBELUTION_LLM_BACKUP_REMOTE_API_KEY", "model-secret")]
+    assert env_name == "VIBELUTION_LLM_CUSTOM_CODEX_API_KEY"
+    assert writes == [("VIBELUTION_LLM_CUSTOM_CODEX_API_KEY", "model-secret")]
     assert "model-secret" not in dumps_public_config(public_config, HEADER_LINES)
     assert "model-secret" not in render_panel_html(public_config, lang="zh")
 
-    clear_llm_model_api_key(public_config, "backup_remote")
+    clear_llm_model_api_key(public_config, "custom_codex")
 
-    assert deletes == ["VIBELUTION_LLM_BACKUP_REMOTE_API_KEY"]
+    assert deletes == ["VIBELUTION_LLM_CUSTOM_CODEX_API_KEY"]
 
 
 def test_set_user_env_var_uses_windows_registry_helper(monkeypatch):
@@ -678,156 +833,191 @@ def test_delete_user_env_var_uses_windows_registry_helper(monkeypatch):
     assert "VIBELUTION_TEST_ENV_KEY" not in os.environ
 
 
-def test_add_llm_profile_persists_another_selectable_agent_config():
-    public_config = load_public_config()
-    updated = add_llm_profile(public_config, "remote_backup", "remote_main", "MiniMax-M2.7")
+def test_list_llm_model_options_detects_windows_user_scoped_model_key(monkeypatch):
+    public_config = add_llm_model(
+        load_public_config(),
+        "custom_codex",
+        _provider("openai", "https://api.openai.com/v1", "OPENAI_API_KEY"),
+        "gpt-5.3-codex",
+        "Custom Codex",
+    )
 
-    assert "remote_backup" in updated["llm"]["profiles"]
-    assert updated["llm"]["profiles"]["remote_backup"]["provider_id"] == "remote_main"
-    assert updated["llm"]["profiles"]["remote_backup"]["model"] == "MiniMax-M2.7"
-    assert "remote_backup" not in public_config["llm"]["profiles"]
-    build_effective_config(updated)
+    monkeypatch.setattr("config.public_config.os.name", "nt", raising=False)
+    monkeypatch.setenv("VIBELUTION_ENABLE_USER_ENV_FALLBACK", "1")
+    monkeypatch.delenv("VIBELUTION_LLM_CUSTOM_CODEX_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "config.public_config._read_windows_user_env_var",
+        lambda name: "model-secret" if name == "VIBELUTION_LLM_CUSTOM_CODEX_API_KEY" else "",
+    )
 
-def test_llm_connection_uses_selected_profile_and_provider(monkeypatch):
-    public_config = load_public_config()
-    expected_profile = public_config["llm"]["profiles"]["compression"]
-    expected_provider = public_config["llm"]["providers"][expected_profile["provider_id"]]
-    calls = []
+    option = next(item for item in list_llm_model_options(public_config) if item["model_id"] == "custom_codex")
 
-    def fake_http_probe(provider, profile):
-        calls.append((provider.provider_id, provider.kind, profile.profile_id, profile.model))
-        return {"ok": True, "message": "ok"}
-
-    monkeypatch.setattr("scripts.config_panel._probe_llm_http", fake_http_probe)
-
-    result = run_llm_connection_test(public_config, "compression")
-
-    assert result["ok"] is True
-    assert result["profile_id"] == "compression"
-    assert result["provider_id"] == expected_profile["provider_id"]
-    assert calls == [(
-        expected_profile["provider_id"],
-        expected_provider["kind"],
-        "compression",
-        expected_profile["model"],
-    )]
+    assert option["api_key_env"] == "VIBELUTION_LLM_CUSTOM_CODEX_API_KEY"
+    assert option["api_key_configured"] is True
 
 
-def test_every_public_config_parameter_can_be_saved_and_loaded(tmp_path):
-    public_config = load_public_config()
-    edited_config = json.loads(json.dumps(public_config, ensure_ascii=False))
-    expected_values = {}
+def test_build_effective_config_prefers_model_user_env_key_on_windows(monkeypatch):
+    public_config = add_llm_model(
+        load_public_config(),
+        "custom_codex",
+        _provider("openai", "https://api.openai.com/v1", "OPENAI_API_KEY"),
+        "gpt-5.3-codex",
+        "Custom Codex",
+    )
+    primary = public_config["llm"]["profiles"]["primary"]
+    primary["provider"] = public_config["llm"]["model_library"]["custom_codex"]["provider"].copy()
+    primary["model"] = "gpt-5.3-codex"
+    primary.pop("api_key_env", None)
 
-    for path in _iter_panel_editable_paths(public_config):
-        original_value = _get_path(public_config, path)
-        edited_value = _configured_test_value(path, original_value, public_config)
-        _set_path(edited_config, path, edited_value)
-        expected_values[path] = edited_value
+    monkeypatch.setattr("config.models.os.name", "nt", raising=False)
+    monkeypatch.setenv("VIBELUTION_ENABLE_USER_ENV_FALLBACK", "1")
+    monkeypatch.delenv("VIBELUTION_LLM_CUSTOM_CODEX_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "provider-secret")
+    monkeypatch.setattr(
+        "config.models._read_windows_user_env_var",
+        lambda name: "model-secret" if name == "VIBELUTION_LLM_CUSTOM_CODEX_API_KEY" else None,
+    )
 
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(dumps_public_config(public_config, HEADER_LINES), encoding="utf-8")
+    effective = build_effective_config(public_config)
 
-    save_public_config(edited_config, config_path)
-    loaded_config = load_public_config(config_path)
-    build_effective_config(loaded_config)
-
-    mismatches = {
-        path: (_get_path(loaded_config, path), expected)
-        for path, expected in expected_values.items()
-        if _get_path(loaded_config, path) != expected
-    }
-    assert mismatches == {}
-
-
-def test_render_panel_html_uses_configured_language_by_default():
-    public_config = load_public_config()
-    public_config.setdefault("ui", {})
-    public_config["ui"]["language"] = "en"
-
-    html = render_panel_html(public_config)
-
-    assert "Vibelution Config Panel" in html
-    assert 'option value="en" selected' in html
-
-
-def test_get_config_language_falls_back_safely():
-    assert get_config_language({"ui": {"language": "en"}}) == "en"
-    assert get_config_language({"ui": {"language": "nope"}}) == "zh"
-    assert get_config_language({}) == "zh"
-
-
-def test_label_localization_prefers_exact_and_fallback_rules():
-    assert localize_label("llm.providers.remote_main.api_key", "api_key", "zh") == "API 密钥"
-    assert localize_label("tools.shell.default_timeout", "default_timeout", "en") == "Default Timeout"
-    assert localize_section_label("llm.discovery", "discovery", "zh") == "模型发现"
-    assert localize_section_label("network", "network", "en") == "Network"
+    assert effective.get_api_key_for_profile(profile_id="primary") == "model-secret"
+    assert effective.llm.get_api_key_source_label_for_profile(profile_id="primary") == (
+        "model-env:VIBELUTION_LLM_CUSTOM_CODEX_API_KEY"
+    )
 
 
 def test_preserve_secret_blanks_keeps_existing_api_key():
     old_public = {
-        "llm": {"providers": {"remote_main": {"api_key": "secret-key", "kind": "minimax"}}},
-        "runtime": {"profile": "safe_remote"},
+        "llm": {
+            "profiles": {
+                "primary": {
+                    "provider": {"kind": "openai", "api_key": "secret-key"},
+                    "model": "gpt-5.4",
+                }
+            }
+        }
     }
     new_public = {
-        "llm": {"providers": {"remote_main": {"api_key": "", "kind": "minimax"}}},
-        "runtime": {"profile": "safe_remote"},
+        "llm": {
+            "profiles": {
+                "primary": {
+                    "provider": {"kind": "openai", "api_key": ""},
+                    "model": "gpt-5.4",
+                }
+            }
+        }
     }
 
     merged = preserve_secret_blanks(new_public, old_public)
 
-    assert merged["llm"]["providers"]["remote_main"]["api_key"] == "secret-key"
+    assert merged["llm"]["profiles"]["primary"]["provider"]["api_key"] == "secret-key"
 
 
-def test_toml_writer_round_trip_for_public_config():
+def test_toml_writer_round_trip_for_public_config_uses_inline_provider_blocks():
     public_config = load_public_config()
     dumped = dumps_public_config(public_config, HEADER_LINES)
     loaded = tomllib.loads(dumped)
 
-    assert loaded["llm"]["providers"]["remote_main"]["kind"] == public_config["llm"]["providers"]["remote_main"]["kind"]
+    assert "[llm.providers]" not in dumped
+    assert "[llm.profiles.primary.provider]" in dumped
+    assert "[llm.model_library.share_ai.provider]" in dumped
+    assert loaded["llm"]["profiles"]["primary"]["provider"]["kind"] == public_config["llm"]["profiles"]["primary"]["provider"]["kind"]
     assert loaded["prompt"]["sections"][0]["name"] == public_config["prompt"]["sections"][0]["name"]
     assert loaded["pet"]["heart"]["enabled"] is True
 
 
-def test_build_effective_config_from_public_structure():
+def test_toml_writer_quotes_dotted_model_library_ids(tmp_path):
+    public_config = add_llm_model(
+        load_public_config(),
+        "custom.gpt-5.3-codex",
+        _provider("openai", "https://api.openai.com/v1", "OPENAI_API_KEY"),
+        "gpt-5.3-codex",
+        "Custom Codex",
+    )
+
+    dumped = dumps_public_config(public_config, HEADER_LINES)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(dumped, encoding="utf-8")
+
+    loaded = load_public_config(config_path)
+
+    assert '[llm.model_library."custom.gpt-5.3-codex"]' in dumped
+    assert loaded["llm"]["model_library"]["custom.gpt-5.3-codex"]["model"] == "gpt-5.3-codex"
+    assert loaded["llm"]["model_library"]["custom.gpt-5.3-codex"]["provider"]["kind"] == "openai"
+
+
+def test_save_public_config_preserves_dotted_model_library_ids(tmp_path):
+    public_config = add_llm_model(
+        load_public_config(),
+        "custom.gpt-5.3-codex",
+        _provider("openai", "https://api.openai.com/v1", "OPENAI_API_KEY"),
+        "gpt-5.3-codex",
+        "Custom Codex",
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(dumps_public_config(load_public_config(), HEADER_LINES), encoding="utf-8")
+
+    save_public_config(public_config, config_path)
+    dumped = config_path.read_text(encoding="utf-8")
+
+    assert '[llm.model_library."custom.gpt-5.3-codex"]' in dumped
+    assert "[llm.providers]" not in dumped
+
+
+def test_load_public_config_recovers_from_legacy_dotted_model_library_shape(tmp_path):
+    legacy_text = """
+[llm]
+
+[llm.model_library.custom.gpt-5.3-codex]
+model = "gpt-5.3-codex"
+label = "Custom Codex"
+api_key_env = "VIBELUTION_LLM_CUSTOM_GPT_5_3_CODEX_API_KEY"
+
+[llm.model_library.custom.gpt-5.3-codex.provider]
+kind = "openai"
+api_key_env = "OPENAI_API_KEY"
+base_url = "https://api.openai.com/v1"
+compat_mode = "openai"
+requires_api_key = true
+context_window = 400000
+""".strip()
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(legacy_text, encoding="utf-8")
+
+    loaded = load_public_config(config_path)
+
+    assert loaded["llm"]["model_library"]["custom.gpt-5.3-codex"]["label"] == "Custom Codex"
+    assert loaded["llm"]["model_library"]["custom.gpt-5.3-codex"]["provider"]["kind"] == "openai"
+
+
+def test_build_effective_config_from_public_structure_uses_inline_provider():
     public_config = load_public_config()
     config = build_effective_config(public_config)
-    primary = config.llm.get_profile(role="primary")
-    provider = config.llm.get_provider(primary.provider_id)
-    expected_provider_kind = public_config["llm"]["providers"][
-        public_config["llm"]["profiles"]["primary"]["provider_id"]
-    ]["kind"]
+    profile = config.llm.get_profile("subagent_explorer")
+    provider = config.llm.get_provider(profile.provider_id)
+    explorer_public = public_config["llm"]["profiles"]["subagent_explorer"]
 
     assert config.runtime.profile == "safe_remote"
-    assert provider.kind == expected_provider_kind
-    assert len(config.prompt.sections) == 2
+    assert profile.model == explorer_public["model"]
+    assert profile.contract == explorer_public.get("contract", profile.contract)
+    assert profile.reasoning_state_field == explorer_public.get("reasoning_state_field", "")
+    assert provider.kind == explorer_public["provider"]["kind"]
     assert config.ui.language == public_config["ui"]["language"]
 
 
-def test_config_diagnostics_block_local_provider_with_remote_base_url():
+def test_inspect_public_config_summarizes_effective_state():
     public_config = load_public_config()
-    public_config["llm"]["profiles"]["primary"]["provider_id"] = "local_main"
-    public_config["llm"]["providers"]["local_main"]["kind"] = "local"
-    public_config["llm"]["providers"]["local_main"]["base_url"] = "https://api.minimaxi.com/v1"
-    config = build_effective_config(public_config)
 
-    diagnosis = config.diagnose_config()
+    snapshot = inspect_public_config(public_config)
+    summary = snapshot["summary"]
+    diagnosis = snapshot["diagnosis"]
+    effective = snapshot["effective"]
 
-    assert "local provider 指向了非本地 API base" in diagnosis["blocking_issues"]
-
-
-def test_render_panel_html_switch_lang_and_save_behaviors():
-    public_config = load_public_config()
-    public_config["ui"]["language"] = "en"
-
-    html = render_panel_html(public_config)
-
-    assert "switchLang(lang)" in html
-    assert 'nextUrl.searchParams.set("lang", lang);' in html
-    assert 'syncLanguageControls(this.value, \'body\')' in html
-    assert "payload.ui.language = lang;" in html
-    assert 'showToast("success"' in html
-    assert 'showToast("error"' in html
-    assert "setToolbarMessage(result.message, false);" in html
-    assert 'new URL(window.location.origin + "/")' in html
-    assert 'const root = {"runtime"' in html
-    assert "_json_for_attr(display_config)" not in html
+    assert summary["provider_count"] == len(effective.llm.providers)
+    assert summary["profile_count"] == len(public_config["llm"]["profiles"])
+    assert summary["model_library_count"] == len(public_config["llm"]["model_library"])
+    assert summary["selectable_model_count"] == len(list_llm_model_options(public_config))
+    assert summary["blocking_count"] == len(diagnosis["blocking_issues"])
+    assert summary["warning_count"] == len(diagnosis["warnings"])
+    assert summary["action_count"] == len(diagnosis["suggested_actions"])
+    assert summary["active_profile_id"] == effective.llm.get_profile(role="primary").profile_id

@@ -9,10 +9,8 @@ from __future__ import annotations
 
 import copy
 import os
-import sys
 from pathlib import Path
-from typing import Optional, Dict, Any, TYPE_CHECKING
-
+from typing import Optional, Dict, Any
 from .models import (
     AppConfig,
     LLMConfig,
@@ -20,24 +18,14 @@ from .models import (
     ContextCompressionConfig,
     ToolConfig,
     LogConfig,
-    LogThirdPartyConfig,
-    NetworkConfig,
+NetworkConfig,
+    ParserConfig,
     EvolutionConfig,
     MemoryConfig,
     StrategyConfig,
-    AnalysisConfig,
     UIConfig,
     DebugConfig,
-    RuntimeConfig,
-    SecurityConfig,
-    ToolsFileConfig,
-    ToolsShellConfig,
-    ToolsSearchConfig,
-    ToolsWebConfig,
-    CompressionLevelsConfig,
-    CompressionSummaryCharsConfig,
-    CompressionPreservationConfig,
-    # 宠物系统配置
+    SecurityConfig,    # 宠物系统配置
     PetConfig,
     GeneConfig,
     HeartConfig,
@@ -50,9 +38,7 @@ from .models import (
     SkinConfig,
     SoundConfig,
     PromptConfig,
-    SectionConfig,
-    get_provider_api_key_env,
-)
+get_provider_api_key_env,)
 from .providers import (
     MODEL_PRESETS,
     get_model_preset,
@@ -76,6 +62,32 @@ except ImportError:
 # ============================================================================
 
 DEFAULT_CONFIG_PATH = "config.toml"
+INLINE_PROVIDER_FIELDS = (
+    "kind",
+    "api_key",
+    "api_key_env",
+    "base_url",
+    "extra_headers",
+    "compat_mode",
+    "requires_api_key",
+    "context_window",
+)
+PUBLIC_INLINE_PROVIDER_FIELDS = tuple(field for field in INLINE_PROVIDER_FIELDS if field != "api_key")
+PROFILE_REFERENCE_OVERRIDE_FIELDS = (
+    "api_key_env",
+    "transport",
+    "contract",
+    "reasoning_state_field",
+    "strict_compatibility",
+    "temperature",
+    "max_output_tokens",
+    "timeout",
+    "connect_timeout",
+    "streaming",
+    "tool_calling_mode",
+    "discovery_enabled",
+)
+UNCONFIGURED_MODEL_REF = "__unconfigured__"
 
 
 def _materialize_role_bound_profiles(llm_section: Dict[str, Any]) -> None:
@@ -101,6 +113,155 @@ def _materialize_role_bound_profiles(llm_section: Dict[str, Any]) -> None:
         profiles[role_id] = migrated
 
 
+def _inline_provider_payload(provider: Any) -> Dict[str, Any]:
+    if not isinstance(provider, dict):
+        return {}
+    payload: Dict[str, Any] = {}
+    for key in INLINE_PROVIDER_FIELDS:
+        if key in provider:
+            payload[key] = copy.deepcopy(provider[key])
+    return payload
+
+
+def _public_inline_provider_payload(provider: Any) -> Dict[str, Any]:
+    if not isinstance(provider, dict):
+        return {}
+    payload: Dict[str, Any] = {}
+    for key in PUBLIC_INLINE_PROVIDER_FIELDS:
+        if key in provider:
+            payload[key] = copy.deepcopy(provider[key])
+    return payload
+
+
+def _profile_reference_override_payload(overrides: Any) -> Dict[str, Any]:
+    if not isinstance(overrides, dict):
+        return {}
+    payload: Dict[str, Any] = {}
+    for key in PROFILE_REFERENCE_OVERRIDE_FIELDS:
+        if key in overrides:
+            payload[key] = copy.deepcopy(overrides[key])
+    return payload
+
+
+def _unconfigured_profile_stub() -> Dict[str, Any]:
+    return {
+        "provider": {
+            "kind": "local",
+            "api_key_env": "",
+            "base_url": "http://localhost:11434/v1",
+            "compat_mode": "openai",
+            "requires_api_key": False,
+            "context_window": 65536,
+        },
+        "model": "",
+        "transport": "chat_completions",
+        "contract": "basic_chat",
+        "strict_compatibility": False,
+        "temperature": 0.0,
+        "max_output_tokens": 1,
+        "timeout": 5,
+        "connect_timeout": 5,
+        "streaming": False,
+        "tool_calling_mode": "disabled",
+        "discovery_enabled": False,
+    }
+
+
+def _materialize_model_ref_profiles(llm_section: Dict[str, Any]) -> None:
+    model_library = llm_section.get("model_library")
+    profiles = llm_section.get("profiles")
+    if not isinstance(model_library, dict) or not isinstance(profiles, dict):
+        return
+
+    for profile in profiles.values():
+        if not isinstance(profile, dict):
+            continue
+        if "model_ref" not in profile and "overrides" not in profile:
+            continue
+
+        model_ref = str(profile.get("model_ref", "") or "").strip()
+        overrides = _profile_reference_override_payload(profile.get("overrides"))
+        materialized: Dict[str, Any] = {}
+
+        if model_ref and model_ref != UNCONFIGURED_MODEL_REF:
+            item = model_library.get(model_ref, {})
+            if isinstance(item, dict):
+                provider = _inline_provider_payload(item.get("provider"))
+                if provider:
+                    materialized["provider"] = provider
+                model_name = str(item.get("model", "") or "").strip()
+                if model_name:
+                    materialized["model"] = model_name
+                for key in PROFILE_REFERENCE_OVERRIDE_FIELDS:
+                    if key in item:
+                        materialized[key] = copy.deepcopy(item[key])
+
+        if not materialized:
+            materialized = _unconfigured_profile_stub()
+
+        profile.pop("provider", None)
+        profile.pop("provider_id", None)
+        profile.pop("model_ref", None)
+        profile.pop("overrides", None)
+        profile.update(materialized)
+        profile.update(overrides)
+
+
+def _resolve_owner_provider_payload(
+    owner: Dict[str, Any],
+    legacy_providers: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    inline_provider = _inline_provider_payload(owner.get("provider"))
+    if inline_provider:
+        return inline_provider
+    provider_id = str(owner.get("provider_id", "")).strip()
+    if provider_id and isinstance(legacy_providers, dict):
+        return _inline_provider_payload(legacy_providers.get(provider_id))
+    return {}
+
+
+def _runtime_provider_id(owner_kind: str, owner_id: str) -> str:
+    return f"inline_{owner_kind}_{owner_id}"
+
+
+def _materialize_inline_llm_providers(llm_section: Dict[str, Any]) -> None:
+    legacy_providers = llm_section.get("providers")
+    runtime_providers: Dict[str, Any] = {}
+
+    model_library = llm_section.get("model_library")
+    if isinstance(model_library, dict):
+        for model_id, item in model_library.items():
+            if not isinstance(item, dict):
+                continue
+            provider_payload = _resolve_owner_provider_payload(item, legacy_providers)
+            item.pop("provider", None)
+            item.pop("provider_id", None)
+            if not provider_payload:
+                continue
+            runtime_id = _runtime_provider_id("model", str(model_id))
+            provider_payload["provider_id"] = runtime_id
+            runtime_providers[runtime_id] = provider_payload
+            item["provider_id"] = runtime_id
+
+    profiles = llm_section.get("profiles")
+    if isinstance(profiles, dict):
+        for profile_id, profile in profiles.items():
+            if not isinstance(profile, dict):
+                continue
+            provider_payload = _resolve_owner_provider_payload(profile, legacy_providers)
+            profile.pop("provider", None)
+            profile.pop("provider_id", None)
+            if not provider_payload:
+                continue
+            runtime_id = _runtime_provider_id("profile", str(profile_id))
+            provider_payload["provider_id"] = runtime_id
+            runtime_providers[runtime_id] = provider_payload
+            profile["provider_id"] = runtime_id
+
+    if runtime_providers or "providers" in llm_section:
+        llm_section["providers"] = runtime_providers
+
+
 def normalize_public_config_dict(config: Dict[str, Any]) -> Dict[str, Any]:
     """将公开 TOML 结构转换为运行时模型结构。"""
     result = copy.deepcopy(config)
@@ -123,7 +284,7 @@ def normalize_public_config_dict(config: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError(
                 "Legacy [llm] config keys are no longer supported: "
                 + ", ".join(found_legacy)
-                + ". Use [llm.providers.<id>] / [llm.profiles.<id>] / [llm.discovery] / [llm.model_library]."
+                + ". Use [llm.profiles.<id>.provider] / [llm.model_library.<id>.provider] / [llm.discovery]."
             )
         # Accept role_bindings only as an input compatibility shim; it is
         # normalized away before the config reaches the runtime/UI layers.
@@ -133,9 +294,11 @@ def normalize_public_config_dict(config: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError(
                 "Unsupported [llm] config keys: "
                 + ", ".join(unknown_llm_keys)
-                + ". Use [llm.providers.<id>] / [llm.profiles.<id>] / [llm.discovery] / [llm.model_library]."
+                + ". Use [llm.profiles.<id>] / [llm.model_library.<id>] / [llm.discovery]."
             )
         _materialize_role_bound_profiles(llm_section)
+        _materialize_model_ref_profiles(llm_section)
+        _materialize_inline_llm_providers(llm_section)
 
     if "pet" in result and isinstance(result["pet"], dict):
         pet_section = result["pet"]
@@ -162,6 +325,7 @@ def denormalize_config_dict(config: Dict[str, Any]) -> Dict[str, Any]:
     """将运行时模型结构转换为公开 TOML 结构。"""
     result = copy.deepcopy(config)
     if "llm" in result and isinstance(result["llm"], dict):
+        llm_section = result["llm"]
         for legacy_key in (
             "provider",
             "model_name",
@@ -172,7 +336,34 @@ def denormalize_config_dict(config: Dict[str, Any]) -> Dict[str, Any]:
             "api_timeout",
             "connect_timeout",
         ):
-            result["llm"].pop(legacy_key, None)
+            llm_section.pop(legacy_key, None)
+
+        runtime_providers = llm_section.get("providers", {})
+        profiles = llm_section.get("profiles")
+        if isinstance(profiles, dict):
+            for profile in profiles.values():
+                if not isinstance(profile, dict):
+                    continue
+                provider_id = str(profile.pop("provider_id", "")).strip()
+                provider_payload = _public_inline_provider_payload(
+                    runtime_providers.get(provider_id, {}) if isinstance(runtime_providers, dict) else {}
+                )
+                if provider_payload:
+                    profile["provider"] = provider_payload
+
+        model_library = llm_section.get("model_library")
+        if isinstance(model_library, dict):
+            for item in model_library.values():
+                if not isinstance(item, dict):
+                    continue
+                provider_id = str(item.pop("provider_id", "")).strip()
+                provider_payload = _public_inline_provider_payload(
+                    runtime_providers.get(provider_id, {}) if isinstance(runtime_providers, dict) else {}
+                )
+                if provider_payload:
+                    item["provider"] = provider_payload
+
+        llm_section.pop("providers", None)
 
     pet_section = result.setdefault("pet", {})
     for sub_key in (
@@ -282,8 +473,9 @@ class ConfigLoader:
         """
         将公开 TOML 结构转换为运行时模型结构。
 
-        新版公开配置以 `llm.providers` / `llm.profiles` /
-        `llm.discovery` / `llm.model_library` 为唯一入口。
+        新版公开配置以 `llm.profiles.<id>.provider` 与
+        `llm.model_library.<id>.provider` 为主入口，
+        旧版 `llm.providers.*` 会在加载时兼容迁移。
 
         Args:
             config: TOML 解析后的配置字典
@@ -368,6 +560,13 @@ class ConfigLoader:
             f"{prefix}AGENT_BACKUP_INTERVAL": "agent.backup_interval",
             f"{prefix}AGENT_AUTO_RESTART_THRESHOLD": "agent.auto_restart_threshold",
             f"{prefix}AGENT_EXPLORATION_MODE": "agent.exploration_mode",
+            f"{prefix}AGENT_DEFAULT_MODE": "agent.default_mode",
+            f"{prefix}AGENT_MODES_CHAT_ENABLED": "agent.modes.chat_enabled",
+            f"{prefix}AGENT_MODES_SELF_EVOLUTION_ENABLED": "agent.modes.self_evolution_enabled",
+            f"{prefix}AGENT_MODES_SUPERVISED_EVOLUTION_ENABLED": "agent.modes.supervised_evolution_enabled",
+            f"{prefix}AGENT_MODES_DEFAULT_SHELL_MODE": "agent.modes.default_shell_mode",
+            f"{prefix}AGENT_MODES_DEFAULT_HEADLESS_MODE": "agent.modes.default_headless_mode",
+            f"{prefix}AGENT_MODES_EXPLICIT_EVOLUTION_REQUEST_BEHAVIOR": "agent.modes.explicit_evolution_request_behavior",
 
             # === 上下文压缩配置 ===
             f"{prefix}COMPRESSION_ENABLED": "context_compression.enabled",
@@ -451,6 +650,18 @@ class ConfigLoader:
             f"{prefix}EVOLUTION_TEST_GATE_ENABLED": "evolution.test_gate_enabled",
             f"{prefix}EVOLUTION_TEST_GATE_TIMEOUT": "evolution.test_gate_timeout",
             f"{prefix}EVOLUTION_TEST_COMMAND": "evolution.test_command",
+            f"{prefix}EVOLUTION_CHAT_DATASET_ENABLED": "evolution.chat_dataset.enabled",
+            f"{prefix}EVOLUTION_CHAT_DATASET_AUTO_CAPTURE": "evolution.chat_dataset.auto_capture",
+            f"{prefix}EVOLUTION_CHAT_DATASET_SEGMENTATION_STRATEGY": "evolution.chat_dataset.segmentation_strategy",
+            f"{prefix}EVOLUTION_CHAT_DATASET_MIN_TURNS": "evolution.chat_dataset.min_turns",
+            f"{prefix}EVOLUTION_CHAT_DATASET_MAX_TURNS": "evolution.chat_dataset.max_turns",
+            f"{prefix}EVOLUTION_CHAT_DATASET_REQUIRE_SIGNAL": "evolution.chat_dataset.require_tool_call_or_analysis_or_conclusion",
+            f"{prefix}EVOLUTION_CHAT_DATASET_EXCLUDE_PURE_CHITCHAT": "evolution.chat_dataset.exclude_pure_chitchat",
+            f"{prefix}EVOLUTION_CHAT_DATASET_CANDIDATE_DIR": "evolution.chat_dataset.candidate_dir",
+            f"{prefix}EVOLUTION_CHAT_DATASET_REVIEW_QUEUE_PATH": "evolution.chat_dataset.review_queue_path",
+            f"{prefix}EVOLUTION_CHAT_DATASET_APPROVED_RAW_DIR": "evolution.chat_dataset.approved_raw_dir",
+            f"{prefix}EVOLUTION_CHAT_DATASET_APPROVED_JSONL_PATH": "evolution.chat_dataset.approved_jsonl_path",
+            f"{prefix}EVOLUTION_CHAT_DATASET_REJECTED_LOG_PATH": "evolution.chat_dataset.rejected_log_path",
 
             # === 记忆系统配置 ===
             f"{prefix}MEMORY_STORAGE_DIR": "memory.storage_dir",
@@ -491,6 +702,7 @@ class ConfigLoader:
         bool_keys = {
             "llm.discovery.enabled", "llm.discovery.auto_adjust",
             "agent.auto_backup", "agent.exploration_mode",
+            "agent.modes.chat_enabled", "agent.modes.self_evolution_enabled", "agent.modes.supervised_evolution_enabled",
             "context_compression.enabled", "context_compression.preservation.keep_tool_results",
             "context_compression.preservation.preserve_errors", "context_compression.preservation.extract_key_decisions",
             "tools.file.edit_enabled", "tools.file.create_enabled", "tools.file.syntax_check_enabled",
@@ -500,6 +712,9 @@ class ConfigLoader:
             "log.file_enabled", "log.detailed_traceback",
             "network.verify_ssl",
             "evolution.enabled", "evolution.test_gate_enabled",
+            "evolution.chat_dataset.enabled", "evolution.chat_dataset.auto_capture",
+            "evolution.chat_dataset.require_tool_call_or_analysis_or_conclusion",
+            "evolution.chat_dataset.exclude_pure_chitchat",
             "strategy.learning_enabled",
             "ui.show_ascii_art", "ui.show_welcome",
             "debug.enabled", "debug.verbose", "debug.trace_llm", "debug.trace_tools", "debug.track_token_usage",
@@ -523,9 +738,16 @@ class ConfigLoader:
                 current = current.setdefault(part, {})
             current[parts[-1]] = value
 
+        def remap_legacy_provider_path(path: str) -> str:
+            legacy_prefix = "llm.providers.default."
+            if path.startswith(legacy_prefix):
+                return "llm.profiles.primary.provider." + path[len(legacy_prefix):]
+            return path
+
         for env_var, path in env_mappings.items():
             value = os.environ.get(env_var)
             if value is not None:
+                path = remap_legacy_provider_path(path)
                 if path in bool_keys:
                     value = value.lower() in ("true", "1", "yes", "on")
                 elif path in float_keys:
@@ -536,6 +758,7 @@ class ConfigLoader:
                 elif path.split(".")[-1] in ("max_output_tokens", "timeout", "connect_timeout",
                             "awake_interval", "max_iterations", "max_runtime",
                             "backup_interval", "auto_restart_threshold",
+                            "min_turns", "max_turns",
                             "max_retries", "max_token_limit",
                             "keep_recent_steps", "summary_max_chars",
                             "max_compressions_per_session", "max_read_lines",
@@ -556,7 +779,7 @@ class ConfigLoader:
         for env_var, raw_value in os.environ.items():
             if not env_var.startswith(llm_prefix):
                 continue
-            path = env_var[len(prefix):].lower().replace("__", ".")
+            path = remap_legacy_provider_path(env_var[len(prefix):].lower().replace("__", "."))
             value = raw_value
             if path in bool_keys:
                 value = value.lower() in ("true", "1", "yes", "on")
@@ -581,12 +804,7 @@ class ConfigLoader:
         if provider_env_var:
             provider_api_key = os.environ.get(provider_env_var)
             if provider_api_key:
-                primary_profile = config.get("llm", {}).get("profiles", {}).get("primary", {})
-                primary_provider_id = primary_profile.get("provider_id")
-                if primary_provider_id:
-                    assign_path(config, f"llm.providers.{primary_provider_id}.api_key", provider_api_key)
-                else:
-                    assign_path(config, "llm.providers.default.api_key", provider_api_key)
+                assign_path(config, "llm.profiles.primary.provider.api_key", provider_api_key)
                 touched = True
 
         if not touched:
@@ -616,7 +834,9 @@ class ConfigLoader:
             config = self._apply_dict(config, toml_config)
 
         # 3. 从环境变量加载（较高优先级，会覆盖 TOML）
-        env_config = self._load_from_env(base_provider=config.llm.get_provider(role="primary").kind)
+        env_config = self._load_from_env(
+            base_provider=config.llm.get_provider(role="primary").kind,
+        )
         if env_config:
             config = self._apply_dict(config, env_config)
 
@@ -641,6 +861,11 @@ class ConfigLoader:
                 config = apply_runtime_profile(config)
                 if runtime_overrides:
                     config = self._apply_dict(config, {"runtime": runtime_overrides})
+
+        for provider in config.llm.providers.values():
+            resolved_api_key = provider.resolve_api_key()
+            if resolved_api_key:
+                provider.api_key = resolved_api_key
         return config
 
     def _flatten_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:

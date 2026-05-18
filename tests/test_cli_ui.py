@@ -4,6 +4,7 @@ CLI UI 渲染行为测试
 """
 
 import json
+from pathlib import Path
 
 from rich.console import Console
 
@@ -673,6 +674,19 @@ def test_pet_panel_renders_context_window_usage():
     assert "3%" in rendered
 
 
+def test_context_window_persists_runtime_state(tmp_path):
+    ui = UIManager()
+    ui.reset_workspace()
+    ui._runtime_state_path = tmp_path / "ui_runtime_state.json"
+
+    ui.note_context_window(2048, 8192)
+
+    data = json.loads(ui._runtime_state_path.read_text(encoding="utf-8"))
+    assert data["current_context_tokens"] == 2048
+    assert data["context_token_limit"] == 8192
+    assert data["status"] == "IDLE"
+
+
 def test_pet_panel_distinguishes_request_context_from_turn_usage():
     ui = UIManager()
     ui.reset_workspace()
@@ -705,6 +719,7 @@ def test_compact_sentence_truncates_cleanly():
 def test_conversation_panel_renders_delegation_evidence():
     ui = UIManager()
     ui.reset_workspace()
+    ui.set_shell_mode("self_evolution")
     ui.add_content("主任务流内容")
     ui.add_delegation_evidence("已定位重复调用源头", next_action="主 agent 收束", confidence="high")
 
@@ -720,6 +735,7 @@ def test_conversation_panel_renders_delegation_evidence():
 def test_conversation_panel_renders_subagent_process_and_thought():
     ui = UIManager()
     ui.reset_workspace()
+    ui.set_shell_mode("self_evolution")
     ui.start_subagent_activity("diagnose", "分析为什么重复调用工具", {"log": "log_info/demo.jsonl"})
     ui.finish_subagent_activity(
         status="completed",
@@ -747,6 +763,7 @@ def test_conversation_panel_renders_subagent_process_and_thought():
 def test_conversation_panel_merges_all_subagent_blocks_and_uses_taller_panel():
     ui = UIManager()
     ui.reset_workspace()
+    ui.set_shell_mode("self_evolution")
     for idx in range(1, 6):
         ui.add_subagent_process(f"过程块 {idx}\n第 {idx} 段")
     for idx in range(1, 4):
@@ -768,6 +785,7 @@ def test_conversation_panel_merges_all_subagent_blocks_and_uses_taller_panel():
 def test_conversation_panel_renders_live_subagent_thought_stream():
     ui = UIManager()
     ui.reset_workspace()
+    ui.set_shell_mode("self_evolution")
     ui.start_subagent_activity("diagnose", "分析为什么重复调用工具", {"log": "log_info/demo.jsonl"})
     ui.add_subagent_process("START read_file_tool agent.py")
     ui.stream_subagent_thought("先看 attention snapshot\n再看工具轨迹", done=False)
@@ -785,6 +803,7 @@ def test_conversation_panel_renders_live_subagent_thought_stream():
 def test_conversation_panel_renders_live_main_thought_stream_first():
     ui = UIManager()
     ui.reset_workspace()
+    ui.set_shell_mode("self_evolution")
     ui.add_content("主任务流内容")
     ui.stream_thought("先看当前目标\n再检查最近改动", done=False)
 
@@ -803,6 +822,7 @@ def test_conversation_panel_renders_live_main_thought_stream_first():
 def test_tool_events_are_labeled_as_main_agent_in_conversation():
     ui = UIManager()
     ui.reset_workspace()
+    ui.set_shell_mode("self_evolution")
 
     ui.print_tool_start("read_file_tool", {"path": "agent.py", "start_line": 1})
     ui.print_tool_result("read_file_tool", '{"status":"success","lines":80}', success=True)
@@ -820,6 +840,7 @@ def test_tool_events_are_labeled_as_main_agent_in_conversation():
 def test_conversation_panel_uses_fixed_thought_and_workspace_regions():
     ui = UIManager()
     ui.reset_workspace()
+    ui.set_shell_mode("self_evolution")
 
     ui.stream_thought("先看目标\n再看日志", done=False)
     ui.add_content("模型输出内容")
@@ -852,6 +873,7 @@ def test_agent_badge_only_appears_once_per_block():
 def test_conversation_panel_no_longer_uses_separate_subagent_panel():
     ui = UIManager()
     ui.reset_workspace()
+    ui.set_shell_mode("self_evolution")
     ui.start_subagent_activity("inspect", "检查统一任务流", {"path": "core/ui/cli_ui.py"})
 
     panel = ui._build_conversation_panel()
@@ -862,6 +884,511 @@ def test_conversation_panel_no_longer_uses_separate_subagent_panel():
     assert "子 Agent 过程与思路" not in rendered
     assert "委派证据" not in rendered
     assert "[子]" in rendered
+
+
+def test_chat_panel_renders_split_dialog_history():
+    ui = UIManager()
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+    ui.load_chat_messages(
+        [
+            {"role": "user", "content": "你好", "timestamp": "2026-05-01T12:00:00"},
+            {"role": "assistant", "content": "你好，我在。", "timestamp": "2026-05-01T12:00:01"},
+        ]
+    )
+
+    panel = ui._build_conversation_panel()
+    console = Console(record=True, width=120, height=36)
+    console.print(panel)
+    rendered = console.export_text()
+
+    assert "Vibelution Chat" in rendered
+    assert "会话概览" in rendered
+    assert "最近对话" in rendered
+    assert "2 条消息" in rendered
+    assert "使用提示" not in rendered
+    assert "当前状态" in rendered
+    assert "概览" in rendered
+    assert "角色" in rendered
+    assert "你" in rendered
+    assert "Agent" in rendered
+    assert "12:00" in rendered
+    assert "12:00:00" not in rendered
+    assert "你好，我在。" in rendered
+    assert "对话记录" not in rendered
+    assert "系统日志" not in rendered
+
+
+def test_chat_recent_dialog_hides_assistant_thought_content():
+    ui = UIManager()
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+    ui.load_chat_messages(
+        [
+            {"role": "user", "content": "你好", "timestamp": "2026-05-01T12:00:00"},
+            {
+                "role": "assistant",
+                "content": "<think>内部推理，不该展示</think>真正回复",
+                "timestamp": "2026-05-01T12:00:01",
+            },
+        ]
+    )
+
+    panel = ui._build_conversation_panel()
+    console = Console(record=True, width=120, height=36)
+    console.print(panel)
+    rendered = console.export_text()
+
+    assert "真正回复" in rendered
+    assert "内部推理，不该展示" not in rendered
+
+
+def test_chat_recent_dialog_keeps_continuation_text_bright():
+    ui = UIManager()
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+    ui.load_chat_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "这是一条比较长的回复，需要换行显示，看看续行是不是还保持统一亮度。",
+                "timestamp": "2026-05-01T12:00:01",
+            },
+        ]
+    )
+
+    lines = ui._build_chat_recent_lines(width=16)
+
+    assert len(lines) >= 2
+    assert "[white]" in lines[0]
+    assert lines[1].startswith("[dim]   ·[/dim] [white]")
+    assert "[/white]" in lines[1]
+
+
+def test_chat_dialog_block_renders_message_cards_with_recent_hint():
+    ui = UIManager()
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+    ui.load_chat_messages(
+        [
+            {"role": "user", "content": "先看这个页面", "timestamp": "2026-05-01T12:00:00"},
+            {"role": "assistant", "content": "好，我先看右侧布局。", "timestamp": "2026-05-01T12:00:02"},
+        ]
+    )
+
+    block = ui._build_chat_dialog_block(width=64)
+    console = Console(record=True, width=90, height=30)
+    console.print(block)
+    rendered = console.export_text()
+
+    assert "不截断单条消息" in rendered
+    assert "先看这个页面" in rendered
+    assert "好，我先看右侧布局。" in rendered
+    assert "12:00" in rendered
+
+
+def test_chat_dialog_block_keeps_full_multiline_assistant_reply():
+    ui = UIManager()
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+    ui.load_chat_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "\n".join(
+                    [
+                        "第1段：先说明现象。",
+                        "第2段：再说明定位过程。",
+                        "第3段：接着说明修改点。",
+                        "第4段：然后说明验证方法。",
+                        "第5段：最后补充后续建议。",
+                    ]
+                ),
+                "timestamp": "2026-05-01T12:00:01",
+            },
+        ]
+    )
+
+    block = ui._build_chat_dialog_block(width=64)
+    console = Console(record=True, width=90, height=30)
+    console.print(block)
+    rendered = console.export_text()
+
+    assert "第1段：先说明现象。" in rendered
+    assert "第4段：然后说明验证方法。" in rendered
+    assert "第5段：最后补充后续建议。" in rendered
+    assert "…" not in rendered
+
+
+def test_chat_dialog_block_renders_full_history_without_message_cap():
+    ui = UIManager()
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+    ui.load_chat_messages(
+        [
+            {"role": "user", "content": f"第{i}条消息", "timestamp": f"2026-05-01T12:00:0{i}"}
+            for i in range(6)
+        ]
+    )
+
+    block = ui._build_chat_dialog_block(width=64)
+    console = Console(record=True, width=90, height=48)
+    console.print(block)
+    rendered = console.export_text()
+
+    assert "第0条消息" in rendered
+    assert "第5条消息" in rendered
+
+
+def test_chat_panel_prefers_latest_messages_when_height_is_limited():
+    ui = UIManager()
+    ui.console = Console(record=True, width=120, height=36)
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+    ui.set_chat_task_snapshot({"title": "现在看看整个项目，然后向我汇报", "status": "reading"})
+    ui.load_chat_messages(
+        [
+            {"role": "user", "content": "这轮请求请你自己判断是否需要切控制台", "timestamp": "2026-05-16T19:35:00"},
+            {"role": "user", "content": "你好", "timestamp": "2026-05-16T19:35:10"},
+            {"role": "assistant", "content": "收到：你好", "timestamp": "2026-05-16T19:35:20"},
+            {"role": "user", "content": "你好啊", "timestamp": "2026-05-16T19:38:00"},
+            {"role": "assistant", "content": "收到：你好啊", "timestamp": "2026-05-16T19:38:05"},
+            {
+                "role": "user",
+                "content": "再试一条更长的消息，看看底部到底还能不能露出来，以及左右两栏会不会继续乱。",
+                "timestamp": "2026-05-16T19:39:00",
+            },
+            {"role": "assistant", "content": "可以，我继续检查布局，把底部消息也露出来。", "timestamp": "2026-05-16T19:39:08"},
+            {"role": "user", "content": "最后一条用户消息", "timestamp": "2026-05-16T19:40:00"},
+            {"role": "assistant", "content": "最后一条 assistant 回复", "timestamp": "2026-05-16T19:40:10"},
+        ]
+    )
+
+    panel = ui._build_conversation_panel()
+    console = ui.console
+    console.print(panel)
+    rendered = console.export_text()
+
+    assert "最后一条用户消息" in rendered
+    assert "最后一条 assistant 回复" in rendered
+    assert "这轮请求请你自己判断是否需要切控制台" not in rendered
+
+
+def test_chat_identity_block_uses_compact_workspace_summary():
+    ui = UIManager()
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+
+    panel = ui._build_conversation_panel()
+    console = Console(record=True, width=120, height=36)
+    console.print(panel)
+    rendered = console.export_text()
+
+    assert "Chat Session" in rendered
+    assert "角色" in rendered
+    assert "当前状态" in rendered
+    assert str(Path.cwd()) not in rendered
+
+
+def test_chat_identity_block_keeps_avatar_separate_from_summary_lines():
+    ui = UIManager()
+    ui.console = Console(record=True, width=120, height=36)
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+    ui.set_avatar_preset("moose")
+    ui.set_chat_task_snapshot({"title": "修复输入框定位问题", "status": "reading"})
+
+    panel = ui._build_conversation_panel()
+    console = ui.console
+    console.print(panel)
+    rendered = console.export_text()
+
+    mode_line = next(line for line in rendered.splitlines() if "模式" in line)
+    assert "(oo)" not in mode_line
+    assert "^__^" in rendered
+    assert "Chat Coding" in rendered
+    ui.set_avatar_preset("lobster")
+
+
+def test_chat_identity_block_shows_active_task_status():
+    ui = UIManager()
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+    ui.set_chat_task_snapshot(
+        {
+            "title": "修复输入框定位问题",
+            "status": "verifying",
+            "verification_status": "passed",
+            "verification_summary": "3 passed",
+            "metadata": {"resumed": True},
+        }
+    )
+
+    panel = ui._build_conversation_panel()
+    console = Console(record=True, width=120, height=36)
+    console.print(panel)
+    rendered = console.export_text()
+
+    assert "修复输入框定位问题" in rendered
+    assert "验证中" in rendered
+    assert "已通过" in rendered
+    assert "流程" in rendered
+    assert "Chat Coding" in rendered
+
+
+def test_chat_identity_block_stacks_avatar_above_summary_to_avoid_overlap():
+    ui = UIManager()
+    ui.console = Console(record=True, width=88, height=36)
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+    ui.set_chat_task_snapshot({"title": "修复输入框定位问题", "status": "reading"})
+
+    panel = ui._build_conversation_panel()
+    console = ui.console
+    console.print(panel)
+    rendered = console.export_text()
+
+    mode_line = next(line for line in rendered.splitlines() if "模式" in line)
+    assert "(oo)" not in mode_line
+    assert "概览" in rendered
+    assert "Chat Coding" in rendered
+    assert "当前状态" in rendered
+
+
+def test_chat_home_layout_gives_more_width_to_dialog_on_wide_terminal():
+    ui = UIManager()
+    ui.console = Console(record=True, width=120, height=36)
+
+    left_ratio, right_ratio, right_text_width = ui._chat_home_layout_metrics()
+
+    assert right_ratio > left_ratio
+    assert right_text_width > 62
+
+
+def test_chat_mode_requests_larger_terminal_target():
+    ui = UIManager()
+
+    assert ui._terminal_resize_target("chat") == (150, 44)
+    assert ui._terminal_resize_target("shell") == (140, 40)
+
+
+def test_chat_mode_resize_is_skipped_for_non_tty_console(monkeypatch):
+    ui = UIManager()
+    ui.console = Console(record=True, width=120, height=36)
+    called = {}
+
+    monkeypatch.setattr(ui, "_request_terminal_resize", lambda cols, rows: called.setdefault("size", (cols, rows)))
+
+    resized = ui._ensure_terminal_footprint("chat")
+
+    assert resized is False
+    assert called == {}
+
+
+def test_chat_dialog_block_keeps_full_markdown_reply_and_tool_calls():
+    ui = UIManager()
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+    ui.load_chat_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "\n".join(
+                    [
+                        "好的，我已经完成了对项目的全面浏览。以下是我的汇报：",
+                        "---",
+                        "## Vibelution 项目全景汇报",
+                        "### 一、项目规模",
+                        "| 指标 | 数值 |",
+                        "|------|------|",
+                        "```python",
+                        "print(123)",
+                        "```",
+                    ]
+                ),
+                "timestamp": "2026-05-01T12:00:01",
+                "tool_calls": ["read_file_tool", "run_test_for_tool"],
+            }
+        ]
+    )
+
+    block = ui._build_chat_dialog_block(width=64)
+    console = Console(record=True, width=90, height=30)
+    console.print(block)
+    rendered = console.export_text()
+
+    assert "## Vibelution 项目全景汇报" in rendered
+    assert "### 一、项目规模" in rendered
+    assert "| 指标 | 数值 |" in rendered
+    assert "|------|------|" in rendered
+    assert "```python" in rendered
+    assert "```" in rendered
+    assert "工具" in rendered
+    assert "read_file_tool -> run_test_for_tool" in rendered
+
+
+def test_chat_dialog_block_expands_latest_message_when_height_allows():
+    ui = UIManager()
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+    ui.load_chat_messages(
+        [
+            {"role": "user", "content": "现在看看整个项目，然后向我汇报", "timestamp": "2026-05-01T12:00:00"},
+            {
+                "role": "assistant",
+                "content": "\n".join(
+                    [
+                        "好的，我已经完成了对项目的全面浏览。以下是我的汇报：",
+                        "---",
+                        "## Vibelution 项目全景汇报",
+                        "### 一、项目规模",
+                        "| 指标 | 数值 |",
+                        "|------|------|",
+                        "已查看：agent.py, main.py, core/ui/cli_ui.py",
+                    ]
+                ),
+                "timestamp": "2026-05-01T12:00:01",
+            },
+        ]
+    )
+
+    block = ui._build_chat_dialog_block(width=74, height_budget=18)
+    console = Console(record=True, width=96, height=30)
+    console.print(block)
+    rendered = console.export_text()
+
+    assert "Vibelution 项目全景汇报" in rendered
+    assert "一、项目规模" in rendered
+    assert "指标 | 数值" in rendered
+    assert "已查看：agent.py, main.py, core/ui/cli_ui.py" in rendered
+
+
+def test_chat_dialog_block_message_card_reaches_right_edge():
+    ui = UIManager()
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+    ui.load_chat_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "这是一条需要尽量铺满右栏的消息。",
+                "timestamp": "2026-05-01T12:00:01",
+            }
+        ]
+    )
+
+    block = ui._build_chat_dialog_block(width=74, height_budget=18)
+    console = Console(record=True, width=96, height=20)
+    console.print(block)
+    rendered = console.export_text()
+
+    border_line = next(line for line in rendered.splitlines() if "┐" in line)
+    assert len(border_line.rstrip()) >= 70
+
+
+def test_chat_shell_snapshot_uses_dedicated_input_layout():
+    ui = UIManager()
+    ui.console = Console(record=True, width=120, height=36)
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+
+    console = ui.console
+    console.print(ui.render_shell_snapshot())
+    rendered = console.export_text()
+
+    assert "消息输入" in rendered
+    assert "输入消息..." in rendered
+    assert "Chat Session" in rendered
+    assert "Enter 发送  /back 返回" in rendered
+    assert "查看 chat 提示" not in rendered
+    assert "等待首轮请求" in rendered
+
+
+def test_chat_shell_snapshot_renders_live_context_usage_in_status_panel():
+    ui = UIManager()
+    ui.console = Console(record=True, width=120, height=36)
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+    ui.note_context_window(8192, 204800)
+
+    console = ui.console
+    console.print(ui.render_shell_snapshot())
+    rendered = console.export_text()
+
+    assert "上下文" in rendered
+    assert "8.2K / 204.8K" in rendered
+    assert "4%" in rendered
+    assert "消息输入" in rendered
+
+
+def test_chat_input_panel_switches_mode_label_for_coding_task():
+    ui = UIManager()
+    ui.console = Console(record=True, width=120, height=36)
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+    ui.set_chat_task_snapshot({"title": "修复 bug", "status": "editing"})
+
+    panel = ui._build_chat_input_panel()
+    console = Console(record=True, width=120, height=12)
+    console.print(panel)
+    rendered = console.export_text()
+
+    assert "消息输入" in rendered
+    assert "Chat Coding" in rendered
+    assert "输入消息..." in rendered
+    assert "上下文" not in rendered
+
+
+def test_chat_identity_block_shows_context_status():
+    ui = UIManager()
+    ui.console = Console(record=True, width=120, height=36)
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+    ui.note_context_window(845, 1_000_000)
+
+    panel = ui._build_conversation_panel()
+    console = ui.console
+    console.print(panel)
+    rendered = console.export_text()
+
+    assert "上下文" in rendered
+    assert "845 / 1M" in rendered
+    assert "0%" in rendered
+
+
+def test_chat_prompt_cursor_anchor_stays_inside_input_panel():
+    ui = UIManager()
+    ui.console = Console(record=True, width=120, height=40)
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+    ui.load_chat_messages(
+        [
+            {"role": "user", "content": "你好", "timestamp": "2026-05-01T12:00:00"},
+            {"role": "assistant", "content": "你好，我在。", "timestamp": "2026-05-01T12:00:01"},
+        ]
+    )
+
+    cursor = ui._locate_chat_prompt_cursor()
+
+    assert cursor is not None
+    column, row = cursor
+    assert column > 0
+    assert row > 0
+
+
+def test_chat_input_bounds_are_detected_from_input_panel():
+    ui = UIManager()
+    ui.console = Console(record=True, width=120, height=40)
+    ui.reset_workspace()
+    ui.set_shell_mode("chat")
+
+    bounds = ui._locate_chat_input_bounds()
+
+    assert bounds is not None
+    column, row, width = bounds
+    assert column > 0
+    assert row > 0
+    assert width >= 8
 
 
 def test_pet_panel_shows_subagent_running_status():

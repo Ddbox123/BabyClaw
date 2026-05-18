@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from config import AppConfig
 from core.evaluation.supervised_cli import run_supervised_cli_from_args, should_handle_supervised_cli
+from core.infrastructure.cli_utils import resolve_agent_mode_from_args
 
 
 def configure_console_encoding() -> None:
@@ -133,11 +134,20 @@ def run_agent_main(
         project_root = Path(__file__).resolve().parents[2]
         raise SystemExit(run_supervised_cli_from_args(args=args, project_root=project_root))
 
+    resolved_mode = resolve_agent_mode_from_args(args, config, interactive_shell=should_launch_workbench_fn(args, initial_prompt))
+
+    def instantiate_agent(*, mode: str | None = None):
+        runtime_mode = mode or resolved_mode
+        try:
+            return agent_cls(config=config, mode=runtime_mode)
+        except TypeError:
+            return agent_cls(config=config)
+
     if should_launch_workbench_fn(args, initial_prompt):
         ui.reset_workspace()
         shell = workbench_cls(config=config)
         try:
-            return shell.run(agent_factory=lambda: agent_cls(config=config))
+            return shell.run(agent_factory=instantiate_agent)
         except Exception as e:
             ui_error_fn(f"工作台启动异常: {type(e).__name__}: {e}", traceback.format_exc())
             sys.exit(1)
@@ -152,7 +162,7 @@ def run_agent_main(
         ui.print_header(resolve_primary_model_name(config))
 
     try:
-        agent = agent_cls(config=config)
+        agent = instantiate_agent()
         if not subagent_json_mode:
             ui.add_content(
                 f"[dim]Tools:[/dim] {len(agent.key_tools)} loaded  [dim]Awake:[/dim] {config.agent.awake_interval}s"

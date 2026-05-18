@@ -23,6 +23,7 @@ from config import Settings
 from core.infrastructure.llm_utils import parse_tool_args, parse_xml_tool_calls
 from core.infrastructure.runtime_input import build_external_request_message
 from core.prompt_manager import build_restart_focus_state_memory
+from core.orchestration.agent_modes import AgentMode, ModePolicy
 from core.orchestration.delegation_governor import DelegationGovernor
 from core.orchestration.round_state import RoundStateController
 from core.orchestration.response_processor import ResponseProcessor
@@ -881,6 +882,198 @@ class TestToolMessageFlow:
         assert ("think", "probe") in events
         assert not any(item[0] == "debug_turn_end" for item in events)
         assert any(item[0] == "conv_end" and item[1]["mode"] == "single_turn" for item in events)
+
+    def test_run_single_turn_enriches_chat_result_contract_from_tool_trace(self, monkeypatch):
+        agent = SelfEvolvingAgent.__new__(SelfEvolvingAgent)
+        agent.name = "tester"
+        agent.config = SimpleNamespace(
+            llm=SimpleNamespace(model_name="demo"),
+            agent=SimpleNamespace(max_iterations=3, awake_interval=1),
+        )
+        agent.mode_policy = ModePolicy(
+            mode=AgentMode.CHAT,
+            orchestrator_kind="chat",
+            keep_multi_turn_context=True,
+            allow_auto_loop=False,
+            capture_chat_dataset_candidates=False,
+            route_explicit_evolution_requests=False,
+            reset_context_before_turn=False,
+            reset_context_between_cases=False,
+            allow_direct_supervised_payload=False,
+            finish_after_direct_response=False,
+            runtime_input_builder=lambda text: text,
+        )
+        agent._effective_max_token_limit = 1024
+        agent.key_tools = [object()]
+        agent._last_turn_failed = False
+
+        def fake_think_and_act(user_prompt=None, goal_override=None):
+            agent._last_visible_response_text = "已修复并验证。"
+            agent._last_response_tool_calls = 3
+            agent._recent_tool_records = [
+                {
+                    "name": "read_file_tool",
+                    "args": {"file_path": "core/ui/cli_ui.py"},
+                    "result_preview": "read ok",
+                },
+                {
+                    "name": "apply_diff_edit_tool",
+                    "args": {"file_path": "core/ui/cli_ui.py"},
+                    "result_preview": "patched",
+                },
+                {
+                    "name": "run_test_for_tool",
+                    "args": {"source_path": "core/ui/cli_ui.py"},
+                    "result_preview": "3 passed in 0.40s",
+                },
+            ]
+            return True
+
+        agent.think_and_act = fake_think_and_act
+        monkeypatch.setattr(
+            agent_module.logger,
+            "start_session",
+            lambda metadata=None, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            agent_module.logger,
+            "end_session",
+            lambda summary=None: None,
+        )
+        monkeypatch.setattr(
+            agent_module._debug_logger,
+            "start_session",
+            lambda session_id: None,
+        )
+        monkeypatch.setattr(
+            agent_module._debug_logger,
+            "system",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            agent_module._debug_logger,
+            "info",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            agent_module._debug_logger,
+            "end_session",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            agent_module,
+            "get_session_state",
+            lambda: SimpleNamespace(get_attention_snapshot=lambda: {}),
+        )
+
+        result = agent.run_single_turn(initial_prompt="probe")
+
+        assert result["outcome"] == "done"
+        assert result["read_files"] == ["core/ui/cli_ui.py"]
+        assert result["changed_files"] == ["core/ui/cli_ui.py"]
+        assert result["verification_status"] == "passed"
+        assert result["no_change"] is False
+
+    def test_run_single_turn_surfaces_llm_error_when_no_visible_reply(self, monkeypatch):
+        agent = SelfEvolvingAgent.__new__(SelfEvolvingAgent)
+        agent.name = "tester"
+        agent.config = SimpleNamespace(
+            llm=SimpleNamespace(model_name="demo"),
+            agent=SimpleNamespace(max_iterations=3, awake_interval=1),
+        )
+        agent.mode_policy = ModePolicy(
+            mode=AgentMode.CHAT,
+            orchestrator_kind="chat",
+            keep_multi_turn_context=True,
+            allow_auto_loop=False,
+            capture_chat_dataset_candidates=False,
+            route_explicit_evolution_requests=False,
+            reset_context_before_turn=False,
+            reset_context_between_cases=False,
+            allow_direct_supervised_payload=False,
+            finish_after_direct_response=False,
+            runtime_input_builder=lambda text: text,
+        )
+        agent._effective_max_token_limit = 1024
+        agent.key_tools = [object()]
+        agent._last_turn_failed = False
+
+        def fake_think_and_act(user_prompt=None, goal_override=None):
+            agent._last_visible_response_text = ""
+            agent._last_response_tool_calls = 0
+            agent._recent_tool_records = []
+            agent._last_llm_error_message = "configuration_error: LiteLLM 未安装，无法执行模型调用；请安装 litellm"
+            agent._last_turn_failed = True
+            return True
+
+        agent.think_and_act = fake_think_and_act
+        monkeypatch.setattr(agent_module.logger, "start_session", lambda metadata=None, **kwargs: None)
+        monkeypatch.setattr(agent_module.logger, "end_session", lambda summary=None: None)
+        monkeypatch.setattr(agent_module._debug_logger, "start_session", lambda session_id: None)
+        monkeypatch.setattr(agent_module._debug_logger, "system", lambda *args, **kwargs: None)
+        monkeypatch.setattr(agent_module._debug_logger, "info", lambda *args, **kwargs: None)
+        monkeypatch.setattr(agent_module._debug_logger, "end_session", lambda: None)
+        monkeypatch.setattr(
+            agent_module,
+            "get_session_state",
+            lambda: SimpleNamespace(get_attention_snapshot=lambda: {}),
+        )
+
+        result = agent.run_single_turn(initial_prompt="probe")
+
+        assert result["status"] == "failed"
+        assert result["summary"] == "configuration_error: LiteLLM 未安装，无法执行模型调用；请安装 litellm"
+        assert result["raw_output"] == result["summary"]
+        assert result["error"] == result["summary"]
+
+    def test_run_single_turn_keeps_full_visible_reply_text(self, monkeypatch):
+        agent = SelfEvolvingAgent.__new__(SelfEvolvingAgent)
+        agent.name = "tester"
+        agent.config = SimpleNamespace(
+            llm=SimpleNamespace(model_name="demo"),
+            agent=SimpleNamespace(max_iterations=3, awake_interval=1),
+        )
+        agent.mode_policy = ModePolicy(
+            mode=AgentMode.CHAT,
+            orchestrator_kind="chat",
+            keep_multi_turn_context=True,
+            allow_auto_loop=False,
+            capture_chat_dataset_candidates=False,
+            route_explicit_evolution_requests=False,
+            reset_context_before_turn=False,
+            reset_context_between_cases=False,
+            allow_direct_supervised_payload=False,
+            finish_after_direct_response=False,
+            runtime_input_builder=lambda text: text,
+        )
+        agent._effective_max_token_limit = 1024
+        agent.key_tools = [object()]
+        agent._last_turn_failed = False
+        long_reply = "已完成。" + ("细节说明" * 220)
+
+        def fake_think_and_act(user_prompt=None, goal_override=None):
+            agent._last_visible_response_text = long_reply
+            agent._last_response_tool_calls = 0
+            agent._recent_tool_records = []
+            return True
+
+        agent.think_and_act = fake_think_and_act
+        monkeypatch.setattr(agent_module.logger, "start_session", lambda metadata=None, **kwargs: None)
+        monkeypatch.setattr(agent_module.logger, "end_session", lambda summary=None: None)
+        monkeypatch.setattr(agent_module._debug_logger, "start_session", lambda session_id: None)
+        monkeypatch.setattr(agent_module._debug_logger, "system", lambda *args, **kwargs: None)
+        monkeypatch.setattr(agent_module._debug_logger, "info", lambda *args, **kwargs: None)
+        monkeypatch.setattr(agent_module._debug_logger, "end_session", lambda: None)
+        monkeypatch.setattr(
+            agent_module,
+            "get_session_state",
+            lambda: SimpleNamespace(get_attention_snapshot=lambda: {}),
+        )
+
+        result = agent.run_single_turn(initial_prompt="probe")
+
+        assert result["summary"] == long_reply
+        assert result["raw_output"] == long_reply
 
     def test_delegation_governor_apply_result_uses_injected_ui_and_session(self):
         captured = {"finish": []}
@@ -1961,6 +2154,29 @@ class TestRuntimeStateMemoryFlow:
         assert isinstance(messages[1], SystemMessage)
         assert "外部任务输入" in messages[1].content
         assert "新的任务" in messages[1].content
+
+    def test_prepare_turn_messages_appends_user_message_for_chat_context(self):
+        previous = [
+            SystemMessage(content="old system"),
+            build_external_request_message("第一句"),
+            AIMessage(content="第一轮回复"),
+        ]
+
+        messages, resumed = TurnOutcomeController.prepare_turn_messages(
+            system_prompt="new system",
+            user_prompt="第二句",
+            effective_goal="第二句",
+            active_turn_messages=previous,
+            active_turn_goal="第一句",
+            build_system_message=agent_module.build_system_message,
+            build_external_request_message=build_external_request_message,
+            allow_append_user_message=True,
+        )
+
+        assert resumed is True
+        assert len(messages) == 4
+        assert isinstance(messages[0], dict)
+        assert messages[1:] == previous[1:] + [build_external_request_message("第二句")]
 
     def test_finish_turn_message_carryover_keeps_unfinished_context_and_clears_after_close(self):
         messages = [

@@ -66,11 +66,14 @@ def test_config_files_have_same_public_shape():
 
 def test_main_config_exposes_all_public_model_blocks():
     raw = _load_toml(MAIN_CONFIG)
-    assert "providers" in raw["llm"]
+    assert "providers" not in raw["llm"]
     assert "profiles" in raw["llm"]
     assert "discovery" in raw["llm"]
-    assert "remote_main" in raw["llm"]["providers"]
+    assert "model_library" in raw["llm"]
     assert "primary" in raw["llm"]["profiles"]
+    assert "provider" in raw["llm"]["profiles"]["primary"]
+    assert "share_ai" in raw["llm"]["model_library"]
+    assert "provider" in raw["llm"]["model_library"]["share_ai"]
 
 
 def test_config_loader_normalizes_nested_public_blocks():
@@ -88,6 +91,10 @@ def test_main_and_example_configs_load_through_entrypoints():
     main_loader = ConfigLoader(str(MAIN_CONFIG)).load()
     example_loader = ConfigLoader(str(EXAMPLE_CONFIG)).load()
     settings_config = Settings(config_path=str(MAIN_CONFIG)).config
+    main_primary_provider_kind = main_loader.llm.get_provider(main_loader.llm.get_profile("primary").provider_id).kind
+    settings_primary_provider_kind = settings_config.llm.get_provider(
+        settings_config.llm.get_profile("primary").provider_id
+    ).kind
 
     assert main_loader.prompt.default_components == settings_config.prompt.default_components
     assert "CONFIG_AWARENESS" in main_loader.prompt.default_components
@@ -96,4 +103,4 @@ def test_main_and_example_configs_load_through_entrypoints():
     assert len(main_loader.prompt.sections) == len(settings_config.prompt.sections) == 2
     assert example_loader.tools.restart_enabled is True
     assert main_loader.pet_heart.enabled is True
-    assert settings_config.llm.get_provider("local_main").api_key == ""
+    assert settings_primary_provider_kind == main_primary_provider_kind

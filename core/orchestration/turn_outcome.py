@@ -218,7 +218,16 @@ class TurnOutcomeController:
         active_turn_goal: str,
         build_system_message: Callable[[Any], Any],
         build_external_request_message: Callable[[str], Any],
+        allow_append_user_message: bool = False,
     ) -> tuple[list, bool]:
+        if allow_append_user_message and active_turn_messages:
+            messages = list(active_turn_messages or [])
+            if messages:
+                messages[0] = build_system_message(system_prompt)
+            else:
+                messages = [build_system_message(system_prompt)]
+            messages.append(build_external_request_message(user_prompt))
+            return messages, True
         if cls.can_resume_turn_messages(
             active_turn_messages=active_turn_messages,
             active_turn_goal=active_turn_goal,

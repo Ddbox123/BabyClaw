@@ -46,6 +46,16 @@ MODEL_PRESETS: Dict[str, ModelPreset] = {
     # ========================================================================
     # OpenAI 系列
     # ========================================================================
+    "gpt-5.5": ModelPreset(
+        name="GPT-5.5",
+        provider="openai",
+        model_name="gpt-5.5",
+        api_base="https://api.openai.com/v1",
+        api_key_env="OPENAI_API_KEY",
+        default_temperature=0.7,
+        max_tokens=128000,
+        description="OpenAI GPT-5.5，1,050,000 上下文窗口，适合高质量通用与代码任务",
+    ),
     "gpt-4o": ModelPreset(
         name="GPT-4o",
         provider="openai",
@@ -158,11 +168,31 @@ MODEL_PRESETS: Dict[str, ModelPreset] = {
     # ========================================================================
     # DeepSeek 系列
     # ========================================================================
+    "deepseek-v4-pro": ModelPreset(
+        name="DeepSeek V4 Pro",
+        provider="deepseek",
+        model_name="deepseek-v4-pro",
+        api_base="https://api.deepseek.com",
+        api_key_env="DEEPSEEK_API_KEY",
+        default_temperature=0.7,
+        max_tokens=384000,
+        description="DeepSeek V4 Pro，1M 上下文窗口，支持函数调用与 JSON 输出",
+    ),
+    "deepseek-v4-flash": ModelPreset(
+        name="DeepSeek V4 Flash",
+        provider="deepseek",
+        model_name="deepseek-v4-flash",
+        api_base="https://api.deepseek.com",
+        api_key_env="DEEPSEEK_API_KEY",
+        default_temperature=0.7,
+        max_tokens=384000,
+        description="DeepSeek V4 Flash，1M 上下文窗口，支持函数调用与 JSON 输出",
+    ),
     "deepseek": ModelPreset(
         name="DeepSeek V3",
         provider="deepseek",
         model_name="deepseek-chat",
-        api_base="https://api.deepseek.com/v1",
+        api_base="https://api.deepseek.com",
         api_key_env="DEEPSEEK_API_KEY",
         default_temperature=0.7,
         max_tokens=4096,
@@ -172,7 +202,7 @@ MODEL_PRESETS: Dict[str, ModelPreset] = {
         name="DeepSeek Coder",
         provider="deepseek",
         model_name="deepseek-coder",
-        api_base="https://api.deepseek.com/v1",
+        api_base="https://api.deepseek.com",
         api_key_env="DEEPSEEK_API_KEY",
         default_temperature=0.7,
         max_tokens=4096,
@@ -381,7 +411,7 @@ PROVIDER_METADATA: Dict[str, Dict[str, str]] = {
     "deepseek": {
         "name": "DeepSeek",
         "website": "https://deepseek.com",
-        "docs": "https://platform.deepseek.com/docs",
+        "docs": "https://api-docs.deepseek.com/",
     },
     "aliyun": {
         "name": "阿里云百炼",
@@ -527,6 +557,8 @@ def show_model_info(model_id: str) -> Optional[str]:
 
 MODEL_ALIASES: Dict[str, str] = {
     # OpenAI 别名
+    "gpt5.5": "gpt-5.5",
+    "gpt-5.5": "gpt-5.5",
     "gpt4": "gpt-4",
     "gpt-4o": "gpt-4o",
     "gpt3.5": "gpt-3.5-turbo",
@@ -545,6 +577,10 @@ MODEL_ALIASES: Dict[str, str] = {
     "gemini-pro": "gemini-pro",
 
     # DeepSeek 别名
+    "dsv4-pro": "deepseek-v4-pro",
+    "dsv4-flash": "deepseek-v4-flash",
+    "deepseek-v4-pro": "deepseek-v4-pro",
+    "deepseek-v4-flash": "deepseek-v4-flash",
     "deepseek-v3": "deepseek",
     "ds": "deepseek",
 

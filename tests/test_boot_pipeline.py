@@ -31,6 +31,7 @@ def make_args(**overrides):
         "model_name": None,
         "temperature": None,
         "awake_interval": None,
+        "mode": None,
         "name": None,
         "log_level": None,
     }
@@ -280,3 +281,42 @@ def test_main_restarted_process_bypasses_workbench_and_reenters_agent_loop(monke
     assert created["initial_prompt"] is None
     assert "shell_created" not in created
     ui.reset_workspace.assert_not_called()
+
+
+def test_main_passes_resolved_agent_mode_when_supported(monkeypatch):
+    ui = MagicMock()
+    created = {}
+    config = SimpleNamespace(
+        log=SimpleNamespace(level="INFO"),
+        llm=SimpleNamespace(
+            get_profile=lambda role="primary": SimpleNamespace(model="local-model")
+        ),
+        agent=SimpleNamespace(
+            awake_interval=30,
+            default_mode="self_evolution",
+            modes=SimpleNamespace(
+                default_headless_mode="self_evolution",
+                default_shell_mode="chat",
+            ),
+        ),
+        runtime=SimpleNamespace(preflight_doctor=False, require_venv=False),
+    )
+
+    class DummyAgent:
+        def __init__(self, config, mode=None):
+            created["mode"] = mode
+            self.key_tools = []
+
+        def run_loop(self, initial_prompt=None):
+            created["initial_prompt"] = initial_prompt
+
+    monkeypatch.setattr(agent_module, "get_ui", lambda: ui)
+    monkeypatch.setattr(agent_module, "create_config_from_args", lambda _args: config)
+    monkeypatch.setattr(agent_module, "setup_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(agent_module, "SelfEvolvingAgent", DummyAgent)
+    monkeypatch.setattr(agent_module, "should_launch_workbench", lambda *_args, **_kwargs: False)
+
+    agent_module.main(args=make_args(auto=True, mode="chat"))
+
+    assert created["mode"] == "chat"
+    assert created["initial_prompt"] is None

@@ -83,6 +83,36 @@ def _fake_promotion_gate(decision: str = "PROMOTE"):
     )
 
 
+def _write_active_advisory_registry(tmp_path: Path) -> None:
+    registry_path = tmp_path / "workspace" / "gym" / "active_promotions.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps(
+            {
+                "active": {
+                    'target:{"exercise_id":"local_transaction_closing_v1"}': {
+                        "proposal_id": "proposal-1",
+                        "episode_id": "episode-1",
+                        "candidate_improvement_id": "candidate-1",
+                        "target_key": 'target:{"exercise_id":"local_transaction_closing_v1"}',
+                        "status": "active",
+                        "activated_by": "tester",
+                        "activated_at": "2026-05-14T00:00:00Z",
+                        "runtime_effect": "not_applied",
+                        "agent_consumption": "advisory",
+                        "proposal_path": str(tmp_path / "workspace" / "gym" / "promotion_proposals" / "proposal-1.json"),
+                        "decision_path": str(tmp_path / "workspace" / "gym" / "decisions" / "episode-1.json"),
+                        "trace_index_path": str(tmp_path / "workspace" / "gym" / "traces" / "episode-1" / "index.json"),
+                    }
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_load_supervised_bundle_reads_default_fixture(project_root: Path):
     bundle = load_supervised_bundle(DEFAULT_BUNDLE_NAME, project_root=project_root)
 
@@ -165,6 +195,7 @@ def test_run_supervised_evolution_session_persists_decision_record(tmp_path: Pat
     audit_path = tmp_path / "workspace" / "evolution" / "audit.jsonl"
     assert audit_path.exists()
     rendered = format_decision_record_summary(decision)
+    assert "advisory context:" in rendered
     assert "gates:" in rendered
     assert "cases:" in rendered
     assert "runtime(avg):" in rendered
@@ -218,6 +249,8 @@ def test_run_supervised_evolution_session_emits_progress_events(tmp_path: Path):
         "role_finish",
         "session_finish",
     ]
+    session_start = events[0]
+    assert session_start["active_advisory_count"] == 0
     first_start = events[1]
     assert first_start["case_index"] == 1
     assert first_start["case_total"] == 1
@@ -235,6 +268,49 @@ def test_run_supervised_evolution_session_emits_progress_events(tmp_path: Path):
     assert candidate_finish["report_path"].endswith("probe_candidate.json")
     assert candidate_finish["worktree_path"].endswith("candidate")
     assert candidate_finish["observational"] is True
+
+
+def test_run_supervised_evolution_session_captures_active_advisory_context(tmp_path: Path):
+    bundle_dir = tmp_path / "workspace" / "evaluation" / "bundles"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    bundle_path = bundle_dir / f"{DEFAULT_BUNDLE_NAME}.json"
+    bundle_path.write_text(
+        """
+{
+  "benchmark": "dry",
+  "bundle_name": "supervised_evolution_dry_run_v1",
+  "cases": [
+    {
+      "case_id": "probe",
+      "scenario": "transaction",
+      "mode": "single_turn",
+      "baseline_prompt": "baseline",
+      "candidate_prompt": "candidate"
+    }
+  ]
+}
+        """.strip(),
+        encoding="utf-8",
+    )
+    _write_active_advisory_registry(tmp_path)
+
+    def fake_runner(**kwargs):
+        if kwargs["prompt"] == "baseline":
+            return _fake_result("success", "baseline ok", "baseline")
+        return _fake_result("success", "candidate ok", "candidate")
+
+    decision = run_supervised_evolution_session(
+        bundle_name=DEFAULT_BUNDLE_NAME,
+        project_root=tmp_path,
+        harness_runner=fake_runner,
+    )
+
+    assert decision.advisory_context["active_count"] == 1
+    assert decision.advisory_context["entries"][0]["target_label"] == "local_transaction_closing_v1"
+    persisted = json.loads(Path(decision.decision_path).read_text(encoding="utf-8"))
+    assert persisted["advisory_context"]["active_count"] == 1
+    rendered = format_decision_record_summary(decision)
+    assert "local_transaction_closing_v1" in rendered
 
 
 def test_run_supervised_evolution_session_emits_session_error(tmp_path: Path):

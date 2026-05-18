@@ -210,7 +210,8 @@ class LLMClient:
                 self.adapter.sanitize_tool_schema(_tool_to_schema(tool))
                 for tool in selected_tools
             ]
-            payload["tool_choice"] = "auto"
+            if self.adapter.supports_explicit_tool_choice():
+                payload["tool_choice"] = "auto"
         return payload
 
     def _usage_from_response(self, response: Any, latency_ms: int) -> UsageStats:

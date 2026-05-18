@@ -16,6 +16,7 @@ from typing import Any, Dict
 
 from config import AppConfig
 from config.settings import Settings
+from core.orchestration.agent_modes import AgentMode, normalize_agent_mode
 
 
 def parse_args():
@@ -36,6 +37,12 @@ def parse_args():
     parser.add_argument('--skip-doctor', action='store_true', help='跳过启动前 doctor 自检')
     parser.add_argument('--test', action='store_true', help='运行首次进化测试')
     parser.add_argument('--prompt', type=str, default=None, help='初始任务提示')
+    parser.add_argument(
+        '--mode',
+        choices=[item.value for item in AgentMode],
+        default=None,
+        help='运行模式',
+    )
     parser.add_argument('--auto', action='store_true', help='自动模式（无交互）')
     parser.add_argument('--single-turn', action='store_true', help='仅执行一轮 think_and_act 后退出')
     parser.add_argument('--subagent-json', action='store_true', help='子代理模式：单轮执行后输出结构化 JSON 标记')
@@ -81,6 +88,33 @@ def create_config_from_args(args) -> AppConfig:
         config_path=getattr(args, "config_path", None),
         **build_config_kwargs(args),
     ).config
+
+
+def resolve_agent_mode_from_args(args, config: AppConfig, *, interactive_shell: bool = False) -> str:
+    """解析运行时 agent mode。
+
+    CLI 显式 --mode 优先；否则交互工作台使用 default_shell_mode，
+    非交互运行使用 default_headless_mode；最后回退到 agent.default_mode。
+    """
+    explicit = getattr(args, "mode", None)
+    if explicit:
+        return normalize_agent_mode(explicit).value
+
+    agent_cfg = getattr(config, "agent", None)
+    if agent_cfg is None:
+        return normalize_agent_mode(None).value
+
+    modes_cfg = getattr(agent_cfg, "modes", None)
+    if interactive_shell:
+        shell_mode = getattr(modes_cfg, "default_shell_mode", None)
+        if shell_mode:
+            return normalize_agent_mode(shell_mode, default=getattr(agent_cfg, "default_mode", None)).value
+
+    headless_mode = getattr(modes_cfg, "default_headless_mode", None)
+    if headless_mode:
+        return normalize_agent_mode(headless_mode, default=getattr(agent_cfg, "default_mode", None)).value
+
+    return normalize_agent_mode(getattr(agent_cfg, "default_mode", None)).value
 
 
 def should_launch_workbench(args, initial_prompt: str | None) -> bool:

@@ -21,6 +21,7 @@ def test_default_dataset_registry_lists_builtin_and_swe(tmp_path: Path):
     by_name = {item["name"]: item for item in rows}
 
     assert by_name["supervised_dry_run"]["runnable"] is True
+    assert by_name["chat_reviewed_multiturn"]["runnable"] is True
     assert by_name["swe_bench_lite"]["runnable"] is False
     assert by_name["swe_bench_lite"]["adapter_status"] == "requires_swe_harness"
 

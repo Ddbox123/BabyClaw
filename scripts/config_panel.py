@@ -12,7 +12,6 @@ import json
 import os
 import sys
 import threading
-import tomllib
 import urllib.error
 import urllib.request
 import webbrowser
@@ -24,250 +23,40 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from config import AppConfig, denormalize_config_dict, normalize_public_config_dict  # noqa: E402
-from config.profiles import apply_runtime_profile  # noqa: E402
+from config.public_config import (  # noqa: E402
+    CONFIG_PATH,
+    HEADER_LINES,
+    MODEL_LIBRARY_DETAIL_FIELDS,
+    UNCONFIGURED_MODEL_REF,
+    add_llm_model,
+    add_llm_profile,
+    apply_llm_model_preset,
+    build_effective_config,
+    delete_llm_model,
+    inspect_public_config,
+    list_llm_model_options,
+    list_llm_model_preset_options,
+    load_public_config,
+    preserve_secret_blanks,
+    public_config_hash,
+    save_public_config,
+    update_llm_model,
+)  # noqa: E402
+from config.settings import PUBLIC_INLINE_PROVIDER_FIELDS  # noqa: E402
 from config.toml_writer import dumps_public_config  # noqa: E402
-from core.llm import assert_llm_compatibility  # noqa: E402
 
 
-CONFIG_PATH = PROJECT_ROOT / "config.toml"
 DEFAULT_LANG = "zh"
 PANEL_BUILD_ID = "config-panel-toast-v2"
-MODEL_LIBRARY_DETAIL_FIELDS = (
-    "api_key_env",
-    "transport",
-    "contract",
-    "reasoning_state_field",
-    "strict_compatibility",
-    "temperature",
-    "max_output_tokens",
-    "timeout",
-    "connect_timeout",
-    "streaming",
-    "tool_calling_mode",
-    "discovery_enabled",
-)
-LLM_MODEL_PRESETS = {
-    "openai_gpt_5_4": {
-        "label": "OpenAI GPT-5.4",
-        "provider_id": "openai_main",
-        "model_id": "openai_gpt_5_4",
-        "provider": {
-            "kind": "openai",
-            "api_key_env": "OPENAI_API_KEY",
-            "base_url": "https://api.openai.com/v1",
-            "compat_mode": "openai",
-            "requires_api_key": True,
-            "context_window": 1047576,
-        },
-        "model": {
-            "model": "gpt-5.4",
-            "label": "OpenAI GPT-5.4",
-            "transport": "chat_completions",
-            "contract": "tool_chat",
-            "temperature": 0.7,
-            "max_output_tokens": 128000,
-            "timeout": 120,
-            "connect_timeout": 20,
-            "streaming": True,
-            "tool_calling_mode": "auto",
-            "discovery_enabled": True,
-        },
-    },
-    "anthropic_claude_sonnet": {
-        "label": "Anthropic Claude Sonnet",
-        "provider_id": "anthropic_main",
-        "model_id": "anthropic_claude_sonnet",
-        "provider": {
-            "kind": "anthropic",
-            "api_key_env": "ANTHROPIC_API_KEY",
-            "base_url": "https://api.anthropic.com",
-            "compat_mode": "native",
-            "requires_api_key": True,
-            "context_window": 200000,
-        },
-        "model": {
-            "model": "claude-sonnet-4-6",
-            "label": "Anthropic Claude Sonnet",
-            "transport": "chat_completions",
-            "contract": "tool_chat",
-            "temperature": 0.7,
-            "max_output_tokens": 8192,
-            "timeout": 120,
-            "connect_timeout": 20,
-            "streaming": True,
-            "tool_calling_mode": "auto",
-            "discovery_enabled": True,
-        },
-    },
-    "deepseek_v4_pro": {
-        "label": "DeepSeek V4 Pro",
-        "provider_id": "deepseek_main",
-        "model_id": "deepseek_v4_pro",
-        "provider": {
-            "kind": "deepseek",
-            "api_key_env": "DEEPSEEK_API_KEY",
-            "base_url": "https://api.deepseek.com",
-            "compat_mode": "openai",
-            "requires_api_key": True,
-            "context_window": 131072,
-        },
-        "model": {
-            "model": "deepseek-v4-pro",
-            "label": "DeepSeek V4 Pro",
-            "transport": "chat_completions",
-            "contract": "tool_chat",
-            "temperature": 0.7,
-            "max_output_tokens": 8192,
-            "timeout": 120,
-            "connect_timeout": 20,
-            "streaming": True,
-            "tool_calling_mode": "auto",
-            "discovery_enabled": True,
-        },
-    },
-    "google_gemini_flash": {
-        "label": "Google Gemini Flash",
-        "provider_id": "google_main",
-        "model_id": "google_gemini_flash",
-        "provider": {
-            "kind": "google",
-            "api_key_env": "GOOGLE_API_KEY",
-            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-            "compat_mode": "openai",
-            "requires_api_key": True,
-            "context_window": 1048576,
-        },
-        "model": {
-            "model": "gemini-3-flash-preview",
-            "label": "Google Gemini Flash",
-            "transport": "chat_completions",
-            "contract": "tool_chat",
-            "temperature": 0.7,
-            "max_output_tokens": 8192,
-            "timeout": 120,
-            "connect_timeout": 20,
-            "streaming": True,
-            "tool_calling_mode": "auto",
-            "discovery_enabled": True,
-        },
-    },
-    "minimax_m2_7": {
-        "label": "MiniMax M2.7",
-        "provider_id": "minimax_main",
-        "model_id": "minimax_m2_7",
-        "provider": {
-            "kind": "minimax",
-            "api_key_env": "MINIMAX_API_KEY",
-            "base_url": "https://api.minimax.io/v1",
-            "compat_mode": "openai",
-            "requires_api_key": True,
-            "context_window": 204800,
-        },
-        "model": {
-            "model": "MiniMax-M2.7",
-            "label": "MiniMax M2.7",
-            "transport": "chat_completions",
-            "contract": "tool_chat",
-            "temperature": 1.0,
-            "max_output_tokens": 8192,
-            "timeout": 120,
-            "connect_timeout": 20,
-            "streaming": True,
-            "tool_calling_mode": "auto",
-            "discovery_enabled": True,
-        },
-    },
-    "dashscope_qwen3_6_plus": {
-        "label": "阿里云 DashScope Qwen3.6 Plus",
-        "provider_id": "dashscope_main",
-        "model_id": "dashscope_qwen3_6_plus",
-        "provider": {
-            "kind": "aliyun",
-            "api_key_env": "DASHSCOPE_API_KEY",
-            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "compat_mode": "openai",
-            "requires_api_key": True,
-            "context_window": 131072,
-        },
-        "model": {
-            "model": "qwen3.6-plus",
-            "label": "阿里云 DashScope Qwen3.6 Plus",
-            "transport": "chat_completions",
-            "contract": "tool_chat",
-            "temperature": 0.7,
-            "max_output_tokens": 8192,
-            "timeout": 120,
-            "connect_timeout": 20,
-            "streaming": True,
-            "tool_calling_mode": "auto",
-            "discovery_enabled": True,
-        },
-    },
-    "siliconflow_glm_4_7": {
-        "label": "硅基流动 GLM-4.7",
-        "provider_id": "siliconflow_main",
-        "model_id": "siliconflow_glm_4_7",
-        "provider": {
-            "kind": "siliconflow",
-            "api_key_env": "SILICONFLOW_API_KEY",
-            "base_url": "https://api.siliconflow.cn/v1",
-            "compat_mode": "openai",
-            "requires_api_key": True,
-            "context_window": 131072,
-        },
-        "model": {
-            "model": "Pro/zai-org/GLM-4.7",
-            "label": "硅基流动 GLM-4.7",
-            "transport": "chat_completions",
-            "contract": "tool_chat",
-            "temperature": 0.7,
-            "max_output_tokens": 8192,
-            "timeout": 120,
-            "connect_timeout": 20,
-            "streaming": True,
-            "tool_calling_mode": "auto",
-            "discovery_enabled": True,
-        },
-    },
-    "local_openai_compatible": {
-        "label": "本地 OpenAI-compatible",
-        "provider_id": "local_main",
-        "model_id": "local_openai_compatible",
-        "provider": {
-            "kind": "local",
-            "api_key_env": "",
-            "base_url": "http://localhost:11434/v1/",
-            "compat_mode": "openai",
-            "requires_api_key": False,
-            "context_window": 65536,
-        },
-        "model": {
-            "model": "llama3.2",
-            "label": "本地 OpenAI-compatible",
-            "transport": "chat_completions",
-            "contract": "basic_chat",
-            "temperature": 0.3,
-            "max_output_tokens": 2048,
-            "timeout": 45,
-            "connect_timeout": 5,
-            "streaming": False,
-            "tool_calling_mode": "disabled",
-            "discovery_enabled": False,
-        },
-    },
-}
-HEADER_LINES = [
-    "# ============================================================",
-    "# Self-Evolving Agent 主配置",
-    "# ============================================================",
-    "# 本文件是项目的完整主配置面。想知道项目当前如何运行，先看这里。",
-    "# 模型默认值仅作为最低优先级兜底。",
-    "# 配置优先级：命令行参数(kwargs) > 环境变量 > config.toml > 默认值",
-    "# ============================================================",
-]
+
+
+class ConfigConflictError(ValueError):
+    """Raised when applying a draft against a stale saved config snapshot."""
 
 RUNTIME_PROFILE_OPTIONS = ["safe_local", "safe_remote", "debug", "ci"]
+AGENT_MODE_OPTIONS = ["chat", "self_evolution", "supervised_evolution"]
+EVOLUTION_REQUEST_BEHAVIOR_OPTIONS = ["route_to_workbench", "reply_only"]
+SEGMENTATION_STRATEGY_OPTIONS = ["task_contiguous"]
 LLM_PROVIDER_OPTIONS = [
     "aliyun",
     "openai",
@@ -281,6 +70,8 @@ LLM_PROVIDER_OPTIONS = [
     "minimax",
     "local",
 ]
+LLM_PROVIDER_COMPAT_OPTIONS = ["openai", "native"]
+LLM_PROVIDER_EDIT_FIELDS = tuple(field for field in PUBLIC_INLINE_PROVIDER_FIELDS if field != "api_key")
 AVATAR_PRESET_OPTIONS = ["lobster", "shrimp", "crab", "cat", "chick", "bunny", "slime", "penguin", "moose"]
 
 I18N = {
@@ -289,7 +80,7 @@ I18N = {
         "title": "Vibelution 配置面板",
         "panel_title": "配置面板",
         "panel_subtitle": "Vibelution Workbench / Config",
-        "save": "保存到 config.toml",
+        "save": "应用配置",
         "reload": "重新加载",
         "diagnostics": "配置诊断",
         "blocking": "阻断问题",
@@ -297,62 +88,80 @@ I18N = {
         "actions": "建议动作",
         "raw_toml": "原始 TOML",
         "raw_toml_summary": "查看当前写盘内容",
-        "overview": "运行概览",
-        "effective_config": "实际生效配置",
-        "profile_id": "模型档案",
+        "profile_id": "配置标识",
         "provider_id": "服务标识",
         "api_base": "API 地址",
         "open_runtime": "运行时设置",
         "open_model_library": "模型库",
-        "provider": "服务提供方",
+        "provider": "服务配置",
+        "provider_config": "服务配置",
+        "provider_kind": "服务类型",
+        "provider_base_url": "服务地址",
+        "provider_api_key_env": "服务 API 密钥环境变量",
+        "provider_compat_mode": "兼容模式",
+        "provider_requires_api_key": "需要 API 密钥",
+        "provider_context_window": "上下文窗口",
+        "provider_extra_headers": "额外请求头(JSON)",
         "model": "模型",
-        "profile": "运行档案",
+        "profile": "智能体配置",
         "api_key_source": "密钥来源",
+        "selectable_models": "可选模型",
         "none": "无",
         "save_failed": "保存失败",
-        "save_success": "配置已保存并通过校验",
-        "save_success_title": "保存成功",
+        "save_success": "配置已应用并通过校验",
+        "save_success_title": "应用成功",
         "save_failed_title": "保存失败",
+        "confirm_success": "修改已确认，等待应用",
+        "confirm_success_title": "已确认",
+        "stale_config": "当前配置已被其他页面或进程改动，请重新加载后再应用这份已确认草稿",
         "language": "语言",
         "lang_zh": "中文",
         "lang_en": "English",
-        "add_llm": "复制档案",
+        "add_llm": "复制配置",
         "test_llm": "测试连接",
         "switch_provider": "切换",
         "test_provider": "测试",
         "switch_success": "主模型已切换",
         "test_success_title": "连接正常",
         "test_failed_title": "连接失败",
-        "prompt_profile_id": "模型档案标识",
+        "prompt_profile_id": "配置标识",
         "prompt_provider_id": "模型服务标识",
+        "prompt_source_profile_id": "来源配置",
+        "prompt_model_id": "选择模型",
         "prompt_model": "模型名称",
         "model_library": "通用模型库",
-        "model_library_hint": "统一管理可选择的模型；各模型档案只引用这里的模型，再在自己的卡片里微调参数。",
+        "model_library_hint": "统一管理可选择的模型；各智能体配置从这里挑选模型，复制后保留各自独立的服务配置与微调参数。",
         "preset_template": "预设模板",
-        "preset_template_hint": "选择主流厂商模板会自动填入 provider、model 和默认参数；保存后仍写入普通配置结构。",
+        "preset_template_hint": "选择主流厂商模板会自动填入服务配置、模型和默认参数；保存后写入统一配置结构。",
         "preset_custom": "手动配置",
+        "custom_model": "自定义模型",
         "add_model": "添加模型",
         "edit_model": "编辑",
-        "save_model": "保存",
+        "save_model": "确认",
         "cancel": "取消",
         "delete_model": "删除模型",
         "model_id": "模型标识",
         "model_label": "显示名称",
-        "apply_model": "应用模型",
+        "apply_model": "确认切换",
         "model_api_key": "模型 API 密钥",
         "api_key_configured": "已配置",
         "api_key_missing": "未配置",
+        "api_key_pending": "待应用",
+        "api_key_clear_pending": "待清除",
         "clear_api_key": "清除密钥",
         "api_key_hint": "保存后写入本机用户级环境变量；不会写入 config.toml。",
         "profile_group_unsupervised": "无监督进化",
         "profile_group_supervised": "监督进化",
+        "required_field": "必填",
+        "select_model_placeholder": "请选择模型",
+        "profile_model_missing": "以下智能体必须选择模型后才能应用：",
     },
     "en": {
         "html_lang": "en",
         "title": "Vibelution Config Panel",
         "panel_title": "Config Panel",
         "panel_subtitle": "Vibelution Workbench / Config",
-        "save": "Save to config.toml",
+        "save": "Apply Config",
         "reload": "Reload",
         "diagnostics": "Configuration Diagnostics",
         "blocking": "Blocking Issues",
@@ -360,26 +169,36 @@ I18N = {
         "actions": "Suggested Actions",
         "raw_toml": "Raw TOML",
         "raw_toml_summary": "View current persisted content",
-        "overview": "Overview",
-        "effective_config": "Effective Config",
-        "profile_id": "Profile",
+        "profile_id": "Profile ID",
         "provider_id": "Provider ID",
         "api_base": "API Base",
         "open_runtime": "Runtime",
         "open_model_library": "Model Library",
-        "provider": "provider",
-        "model": "model",
-        "profile": "profile",
-        "api_key_source": "api_key source",
+        "provider": "Provider Config",
+        "provider_config": "Provider Config",
+        "provider_kind": "Provider Type",
+        "provider_base_url": "Base URL",
+        "provider_api_key_env": "Provider API Key Env",
+        "provider_compat_mode": "Compatibility Mode",
+        "provider_requires_api_key": "Requires API Key",
+        "provider_context_window": "Context Window",
+        "provider_extra_headers": "Extra Headers (JSON)",
+        "model": "Model",
+        "profile": "Agent Config",
+        "api_key_source": "API Key Source",
+        "selectable_models": "Selectable Models",
         "none": "None",
         "save_failed": "Save failed",
-        "save_success": "Configuration saved and validated",
-        "save_success_title": "Saved",
+        "save_success": "Configuration applied and validated",
+        "save_success_title": "Applied",
         "save_failed_title": "Save Failed",
+        "confirm_success": "Changes confirmed and waiting to apply",
+        "confirm_success_title": "Confirmed",
+        "stale_config": "The saved config changed in another page or process. Reload before applying this confirmed draft.",
         "language": "Language",
         "lang_zh": "中文",
         "lang_en": "English",
-        "add_llm": "Clone Profile",
+        "add_llm": "Clone Config",
         "test_llm": "Test Connection",
         "switch_provider": "Switch",
         "test_provider": "Test",
@@ -388,27 +207,35 @@ I18N = {
         "test_failed_title": "Connection Failed",
         "prompt_profile_id": "profile_id",
         "prompt_provider_id": "provider_id",
+        "prompt_source_profile_id": "source_profile_id",
+        "prompt_model_id": "model_id",
         "prompt_model": "model",
         "model_library": "Model Library",
-        "model_library_hint": "Manage selectable models once; model plans reference these models and keep their own tuning.",
+        "model_library_hint": "Manage selectable models once; agent configs pick from here, then keep their own provider copy and tuning.",
         "preset_template": "Preset Template",
-        "preset_template_hint": "Choose a provider preset to fill provider, model, and defaults; saving still writes the normal config shape.",
+        "preset_template_hint": "Choose a vendor preset to fill provider config, model, and defaults; saving still writes the normal config shape.",
         "preset_custom": "Manual",
+        "custom_model": "Custom Model",
         "add_model": "Add Model",
         "edit_model": "Edit",
-        "save_model": "Save",
+        "save_model": "Confirm",
         "cancel": "Cancel",
         "delete_model": "Delete Model",
         "model_id": "Model ID",
         "model_label": "Display Label",
-        "apply_model": "Apply Model",
+        "apply_model": "Confirm Switch",
         "model_api_key": "Model API Key",
         "api_key_configured": "Configured",
         "api_key_missing": "Missing",
+        "api_key_pending": "Pending",
+        "api_key_clear_pending": "Pending Clear",
         "clear_api_key": "Clear Key",
         "api_key_hint": "Saved to the local user environment; never written to config.toml.",
         "profile_group_unsupervised": "Unsupervised Evolution",
         "profile_group_supervised": "Supervised Evolution",
+        "required_field": "Required",
+        "select_model_placeholder": "Select a model",
+        "profile_model_missing": "Choose models for these agents before apply:",
     },
 }
 
@@ -522,6 +349,28 @@ FIELD_LABELS = {
         "llm.profiles.primary.connect_timeout": "连接超时（秒）",
         "llm.profiles.primary.streaming": "启用流式响应",
         "llm.profiles.primary.tool_calling_mode": "工具调用模式",
+        "llm.model_library.api_key_env": "API 密钥环境变量",
+        "llm.model_library.transport": "传输协议",
+        "llm.model_library.contract": "交互协议",
+        "llm.model_library.reasoning_state_field": "推理状态字段",
+        "llm.model_library.temperature": "温度",
+        "llm.model_library.max_output_tokens": "最大输出令牌数",
+        "llm.model_library.timeout": "请求超时（秒）",
+        "llm.model_library.connect_timeout": "连接超时（秒）",
+        "llm.model_library.tool_calling_mode": "工具调用模式",
+        "llm.model_library.strict_compatibility": "严格兼容性",
+        "llm.model_library.streaming": "流式响应",
+        "llm.model_library.discovery_enabled": "启用模型发现",
+        "llm.model_library.transport.chat_completions": "聊天补全",
+        "llm.model_library.transport.responses": "响应接口",
+        "llm.model_library.contract.basic_chat": "基础对话",
+        "llm.model_library.contract.tool_chat": "工具对话",
+        "llm.model_library.contract.reasoning_chat": "推理对话",
+        "llm.model_library.contract.responses_agent": "Responses 智能体",
+        "llm.model_library.tool_calling_mode.auto": "自动",
+        "llm.model_library.tool_calling_mode.disabled": "禁用",
+        "llm.model_library.tool_calling_mode.required": "必需",
+        "llm.model_library.tool_calling_mode.parallel": "并行",
         "llm.discovery.enabled": "启用模型发现",
         "llm.discovery.timeout": "发现超时（秒）",
         "llm.discovery.fallback_max_tokens": "回退最大令牌数",
@@ -537,6 +386,13 @@ FIELD_LABELS = {
         "agent.backup_interval": "备份间隔（秒）",
         "agent.auto_restart_threshold": "自动重启阈值",
         "agent.exploration_mode": "探索模式",
+        "agent.default_mode": "默认运行模式",
+        "agent.modes.chat_enabled": "启用 chat 模式",
+        "agent.modes.self_evolution_enabled": "启用自进化模式",
+        "agent.modes.supervised_evolution_enabled": "启用监督进化模式",
+        "agent.modes.default_shell_mode": "工作台默认模式",
+        "agent.modes.default_headless_mode": "无交互默认模式",
+        "agent.modes.explicit_evolution_request_behavior": "显式进化请求处理方式",
         "context_compression.keep_recent_steps": "保留最近步骤数",
         "context_compression.max_compressions_per_session": "每会话最大压缩次数",
         "context_compression.effectiveness_threshold": "压缩有效性阈值",
@@ -559,6 +415,19 @@ FIELD_LABELS = {
         "ui.show_ascii_art": "显示 ASCII Art",
         "ui.show_welcome": "显示欢迎面板",
         "prompt.default_components": "默认提示词组件",
+        "evolution.chat_dataset.enabled": "启用 chat 数据采样",
+        "evolution.chat_dataset.source_modes": "采样来源模式",
+        "evolution.chat_dataset.auto_capture": "自动采样",
+        "evolution.chat_dataset.segmentation_strategy": "分段策略",
+        "evolution.chat_dataset.min_turns": "最少轮数",
+        "evolution.chat_dataset.max_turns": "最多轮数",
+        "evolution.chat_dataset.require_tool_call_or_analysis_or_conclusion": "要求工具/分析/结论信号",
+        "evolution.chat_dataset.exclude_pure_chitchat": "排除纯闲聊",
+        "evolution.chat_dataset.candidate_dir": "候选目录",
+        "evolution.chat_dataset.review_queue_path": "审核队列路径",
+        "evolution.chat_dataset.approved_raw_dir": "已批准原始目录",
+        "evolution.chat_dataset.approved_jsonl_path": "已批准数据集路径",
+        "evolution.chat_dataset.rejected_log_path": "拒绝审计路径",
     },
     "en": {
         "runtime.profile": "Runtime Profile",
@@ -582,6 +451,28 @@ FIELD_LABELS = {
         "llm.profiles.primary.connect_timeout": "Connect Timeout (s)",
         "llm.profiles.primary.streaming": "Streaming",
         "llm.profiles.primary.tool_calling_mode": "Tool Calling Mode",
+        "llm.model_library.api_key_env": "API Key Env",
+        "llm.model_library.transport": "Transport",
+        "llm.model_library.contract": "Contract",
+        "llm.model_library.reasoning_state_field": "Reasoning State Field",
+        "llm.model_library.temperature": "Temperature",
+        "llm.model_library.max_output_tokens": "Max Output Tokens",
+        "llm.model_library.timeout": "Request Timeout (s)",
+        "llm.model_library.connect_timeout": "Connect Timeout (s)",
+        "llm.model_library.tool_calling_mode": "Tool Calling Mode",
+        "llm.model_library.strict_compatibility": "Strict Compatibility",
+        "llm.model_library.streaming": "Streaming",
+        "llm.model_library.discovery_enabled": "Discovery Enabled",
+        "llm.model_library.transport.chat_completions": "Chat Completions",
+        "llm.model_library.transport.responses": "Responses API",
+        "llm.model_library.contract.basic_chat": "Basic Chat",
+        "llm.model_library.contract.tool_chat": "Tool Chat",
+        "llm.model_library.contract.reasoning_chat": "Reasoning Chat",
+        "llm.model_library.contract.responses_agent": "Responses Agent",
+        "llm.model_library.tool_calling_mode.auto": "Auto",
+        "llm.model_library.tool_calling_mode.disabled": "Disabled",
+        "llm.model_library.tool_calling_mode.required": "Required",
+        "llm.model_library.tool_calling_mode.parallel": "Parallel",
         "llm.discovery.enabled": "Enable Discovery",
         "llm.discovery.timeout": "Discovery Timeout (s)",
         "llm.discovery.fallback_max_tokens": "Fallback Max Tokens",
@@ -597,6 +488,13 @@ FIELD_LABELS = {
         "agent.backup_interval": "Backup Interval (s)",
         "agent.auto_restart_threshold": "Auto Restart Threshold",
         "agent.exploration_mode": "Exploration Mode",
+        "agent.default_mode": "Default Agent Mode",
+        "agent.modes.chat_enabled": "Enable Chat Mode",
+        "agent.modes.self_evolution_enabled": "Enable Self Evolution",
+        "agent.modes.supervised_evolution_enabled": "Enable Supervised Evolution",
+        "agent.modes.default_shell_mode": "Default Workbench Mode",
+        "agent.modes.default_headless_mode": "Default Headless Mode",
+        "agent.modes.explicit_evolution_request_behavior": "Explicit Evolution Request Behavior",
         "context_compression.keep_recent_steps": "Recent Steps to Keep",
         "context_compression.max_compressions_per_session": "Max Compressions Per Session",
         "context_compression.effectiveness_threshold": "Compression Effectiveness Threshold",
@@ -619,6 +517,19 @@ FIELD_LABELS = {
         "ui.show_ascii_art": "Show ASCII Art",
         "ui.show_welcome": "Show Welcome Panel",
         "prompt.default_components": "Default Prompt Components",
+        "evolution.chat_dataset.enabled": "Enable Chat Dataset Capture",
+        "evolution.chat_dataset.source_modes": "Capture Source Modes",
+        "evolution.chat_dataset.auto_capture": "Auto Capture",
+        "evolution.chat_dataset.segmentation_strategy": "Segmentation Strategy",
+        "evolution.chat_dataset.min_turns": "Minimum Turns",
+        "evolution.chat_dataset.max_turns": "Maximum Turns",
+        "evolution.chat_dataset.require_tool_call_or_analysis_or_conclusion": "Require Tool/Analysis/Conclusion Signal",
+        "evolution.chat_dataset.exclude_pure_chitchat": "Exclude Pure Chitchat",
+        "evolution.chat_dataset.candidate_dir": "Candidate Directory",
+        "evolution.chat_dataset.review_queue_path": "Review Queue Path",
+        "evolution.chat_dataset.approved_raw_dir": "Approved Raw Directory",
+        "evolution.chat_dataset.approved_jsonl_path": "Approved Dataset Path",
+        "evolution.chat_dataset.rejected_log_path": "Rejected Audit Path",
     },
 }
 
@@ -638,11 +549,17 @@ FIELD_HINTS = {
         "agent.awake_interval": "自主模式两次苏醒之间的间隔。",
         "agent.max_iterations": "单轮最多允许多少次工具动作。",
         "agent.max_runtime": "单轮可持续的最长运行时间。",
+        "agent.default_mode": "决定默认启动为 chat、自进化还是监督进化。",
+        "agent.modes.default_shell_mode": "工作台入口默认采用的 agent mode。",
+        "agent.modes.default_headless_mode": "命令行无交互运行时默认采用的 agent mode。",
+        "agent.modes.explicit_evolution_request_behavior": "chat 中遇到显式进化请求时，决定是转交进化入口还是只回复说明。",
         "agent.auto_restart_threshold": "达到阈值后触发热重启。",
         "context_compression.keep_recent_steps": "压缩后仍然保留的最近步骤数。",
         "context_compression.max_compressions_per_session": "单会话允许的最大压缩次数。",
         "tools.shell.allowed_shells": "允许使用的 shell 类型，直接影响跨平台行为。",
         "tools.shell.max_output_length": "终端输出截断上限，过小会影响诊断。",
+        "evolution.chat_dataset.source_modes": "哪些 agent mode 产生的对话可以被静默采样进入审核队列。",
+        "evolution.chat_dataset.segmentation_strategy": "chat 采样如何切分连续多轮上下文。",
         "ui.refresh_rate": "终端工作台刷新频率。",
         "ui.max_log_entries": "UI 内部保留的日志条目数。",
     },
@@ -661,11 +578,17 @@ FIELD_HINTS = {
         "agent.awake_interval": "Delay between autonomous wake cycles.",
         "agent.max_iterations": "Maximum tool actions allowed in one round.",
         "agent.max_runtime": "Maximum duration for a single round.",
+        "agent.default_mode": "Selects whether the agent defaults to chat, self-evolution, or supervised evolution.",
+        "agent.modes.default_shell_mode": "Agent mode used by default when entering the interactive workbench.",
+        "agent.modes.default_headless_mode": "Agent mode used by default for non-interactive CLI runs.",
+        "agent.modes.explicit_evolution_request_behavior": "Controls whether chat reroutes explicit evolution requests or only explains the routing.",
         "agent.auto_restart_threshold": "Threshold that triggers hot restart.",
         "context_compression.keep_recent_steps": "How many recent steps survive compression.",
         "context_compression.max_compressions_per_session": "Compression cap per session.",
         "tools.shell.allowed_shells": "Allowed shell types. This directly affects cross-platform behavior.",
         "tools.shell.max_output_length": "Terminal output cap. Too small will hide diagnostics.",
+        "evolution.chat_dataset.source_modes": "Which agent modes may silently contribute conversation samples to the review queue.",
+        "evolution.chat_dataset.segmentation_strategy": "How chat capture segments contiguous multi-turn context.",
         "ui.refresh_rate": "Refresh cadence for the terminal workbench.",
         "ui.max_log_entries": "How many UI log entries are retained.",
     },
@@ -977,6 +900,45 @@ def _display_provider_kind(provider_kind: str, lang: str) -> str:
     return _localize_identifier("provider_kind", provider_kind, lang)
 
 
+def _public_provider(provider: dict | None) -> dict:
+    if not isinstance(provider, dict):
+        return {}
+    payload = {}
+    for key in LLM_PROVIDER_EDIT_FIELDS:
+        if key in provider:
+            payload[key] = copy.deepcopy(provider[key])
+    return payload
+
+
+def _provider_signature(provider: dict | None) -> str:
+    return json.dumps(_public_provider(provider), ensure_ascii=False, sort_keys=True)
+
+
+def _provider_field_label(field_name: str, lang: str) -> str:
+    labels = {
+        "kind": I18N[lang]["provider_kind"],
+        "base_url": I18N[lang]["provider_base_url"],
+        "api_key_env": I18N[lang]["provider_api_key_env"],
+        "compat_mode": I18N[lang]["provider_compat_mode"],
+        "requires_api_key": I18N[lang]["provider_requires_api_key"],
+        "context_window": I18N[lang]["provider_context_window"],
+        "extra_headers": I18N[lang]["provider_extra_headers"],
+    }
+    return labels.get(field_name, localize_label(f"provider.{field_name}", field_name, lang))
+
+
+def _provider_summary(provider: dict | None, lang: str) -> str:
+    entry = _public_provider(provider)
+    parts = []
+    kind = str(entry.get("kind", "")).strip()
+    if kind:
+        parts.append(_display_provider_kind(kind, lang))
+    base_url = str(entry.get("base_url", "")).strip()
+    if base_url:
+        parts.append(base_url)
+    return " / ".join(parts)
+
+
 def localize_label(path: str, fallback: str, lang: str) -> str:
     exact = FIELD_LABELS.get(lang, {}).get(path)
     if exact:
@@ -1000,17 +962,140 @@ def localize_section_label(path: str, fallback: str, lang: str) -> str:
     return localize_label(path, fallback, lang)
 
 
-def load_public_config(config_path: Path = CONFIG_PATH) -> dict:
-    raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    return denormalize_config_dict(normalize_public_config_dict(raw))
+def _model_library_field_label(field_name: str, lang: str) -> str:
+    return localize_label(f"llm.model_library.{field_name}", field_name, lang)
 
 
-def build_effective_config(public_config: dict) -> AppConfig:
-    normalized = normalize_public_config_dict(public_config)
-    config = AppConfig.model_validate(normalized)
-    effective = apply_runtime_profile(config)
-    assert_llm_compatibility(effective)
-    return effective
+def _model_library_option_label(field_name: str, value: str, lang: str) -> str:
+    return localize_label(f"llm.model_library.{field_name}.{value}", value, lang)
+
+
+def _render_model_library_options(field_name: str, values: tuple[str, ...], selected: str, lang: str) -> str:
+    return "".join(
+        f'<option value="{html.escape(value)}"{" selected" if value == selected else ""}>'
+        f"{html.escape(_model_library_option_label(field_name, value, lang))}</option>"
+        for value in values
+    )
+
+
+def _model_library_detail_summary(transport: str, contract: str, details: dict, lang: str) -> str:
+    parts = []
+    if transport:
+        parts.append(_model_library_option_label("transport", transport, lang))
+    if contract:
+        parts.append(_model_library_option_label("contract", contract, lang))
+    if "temperature" in details:
+        parts.append(f'{_model_library_field_label("temperature", lang)} {details["temperature"]}')
+    if "max_output_tokens" in details:
+        parts.append(f'{details["max_output_tokens"]} {_humanize_token("tokens", lang)}')
+    if "timeout" in details:
+        parts.append(f'{details["timeout"]}{" 秒" if lang == "zh" else "s"}')
+    return " / ".join(parts)
+
+
+def _empty_draft_meta() -> dict[str, object]:
+    return {
+        "pending_api_keys": {},
+        "pending_cleared_api_keys": [],
+    }
+
+
+def _normalize_draft_meta(meta: dict | None) -> dict[str, object]:
+    payload = _empty_draft_meta()
+    if not isinstance(meta, dict):
+        return payload
+    pending = meta.get("pending_api_keys", {})
+    if isinstance(pending, dict):
+        payload["pending_api_keys"] = {
+            str(key).strip(): str(value)
+            for key, value in pending.items()
+            if str(key).strip() and str(value) != ""
+        }
+    cleared = meta.get("pending_cleared_api_keys", [])
+    if isinstance(cleared, list):
+        payload["pending_cleared_api_keys"] = [
+            str(item).strip()
+            for item in cleared
+            if str(item).strip()
+        ]
+    return payload
+
+
+def _move_pending_api_key_env(meta: dict[str, object], old_env: str, new_env: str) -> dict[str, object]:
+    payload = _normalize_draft_meta(meta)
+    old_env = str(old_env or "").strip()
+    new_env = str(new_env or "").strip()
+    if not old_env or old_env == new_env:
+        return payload
+    pending = payload["pending_api_keys"]
+    cleared = payload["pending_cleared_api_keys"]
+    if isinstance(pending, dict) and old_env in pending and new_env:
+        pending[new_env] = pending.pop(old_env)
+    elif isinstance(pending, dict):
+        pending.pop(old_env, None)
+    if isinstance(cleared, list):
+        payload["pending_cleared_api_keys"] = [
+            new_env if item == old_env and new_env else item
+            for item in cleared
+            if item != old_env or new_env
+        ]
+    return payload
+
+
+def _api_key_display_state(api_key_env: str, configured: bool, draft_meta: dict | None) -> tuple[bool, str]:
+    env_name = str(api_key_env or "").strip()
+    meta = _normalize_draft_meta(draft_meta)
+    pending = meta["pending_api_keys"]
+    cleared = meta["pending_cleared_api_keys"]
+    if env_name and isinstance(pending, dict) and env_name in pending:
+        return True, "pending"
+    if env_name and isinstance(cleared, list) and env_name in cleared:
+        return False, "clear_pending"
+    return configured, "configured" if configured else "missing"
+
+
+def _selected_model_option(public_config: dict, profile: dict) -> dict | None:
+    model_ref = str(profile.get("model_ref", "")).strip()
+    if model_ref:
+        if model_ref == UNCONFIGURED_MODEL_REF:
+            return None
+        for option in list_llm_model_options(public_config):
+            if str(option.get("model_id", "")).strip() == model_ref:
+                return option
+        return None
+
+    provider_signature = _provider_signature(profile.get("provider"))
+    model = str(profile.get("model", "")).strip()
+    if not provider_signature or not model:
+        return None
+    for option in list_llm_model_options(public_config):
+        option_provider = _public_provider(option.get("provider", {}))
+        if _provider_signature(option_provider) == provider_signature and str(option.get("model", "")).strip() == model:
+            return option
+    return None
+
+
+def _missing_required_llm_profiles(public_config: dict) -> list[str]:
+    llm = public_config.get("llm", {})
+    profiles = llm.get("profiles", {}) if isinstance(llm, dict) else {}
+    if not isinstance(profiles, dict):
+        return []
+    missing: list[str] = []
+    for profile_id, profile in profiles.items():
+        if not isinstance(profile, dict):
+            missing.append(str(profile_id))
+            continue
+        if _selected_model_option(public_config, profile) is None:
+            missing.append(str(profile_id))
+    return missing
+
+
+def _validate_required_llm_profiles(public_config: dict, lang: str) -> None:
+    missing = _missing_required_llm_profiles(public_config)
+    if not missing:
+        return
+    display_names = "、".join(_display_profile_id(profile_id, lang) for profile_id in missing)
+    raise ValueError(f'{I18N[lang]["profile_model_missing"]} {display_names}')
 
 
 def list_llm_profile_options(public_config: dict, lang: str = DEFAULT_LANG) -> list[dict[str, str]]:
@@ -1022,12 +1107,10 @@ def list_llm_profile_options(public_config: dict, lang: str = DEFAULT_LANG) -> l
     for profile_id, profile in profiles.items():
         if not isinstance(profile, dict):
             continue
-        provider_id = str(profile.get("provider_id", ""))
         model = str(profile.get("model", ""))
         options.append(
             {
                 "profile_id": str(profile_id),
-                "provider_id": provider_id,
                 "model": model,
                 "label": _display_profile_id(str(profile_id), lang),
             }
@@ -1035,18 +1118,9 @@ def list_llm_profile_options(public_config: dict, lang: str = DEFAULT_LANG) -> l
     return options
 
 
-def _model_library_id(provider_id: str, model: str) -> str:
-    raw = f"{provider_id}-{model}".strip("-").lower()
-    return "".join(char if char.isalnum() else "_" for char in raw).strip("_") or "model"
-
-
 def _default_model_api_key_env(model_id: str) -> str:
     token = "".join(char if char.isalnum() else "_" for char in str(model_id or "").upper()).strip("_")
     return f"VIBELUTION_LLM_{token}_API_KEY" if token else "VIBELUTION_LLM_MODEL_API_KEY"
-
-
-def _read_env_var(name: str) -> str:
-    return os.environ.get(name, "")
 
 
 def _broadcast_windows_environment_change(timeout_ms: int = 5000) -> None:
@@ -1054,17 +1128,17 @@ def _broadcast_windows_environment_change(timeout_ms: int = 5000) -> None:
         import ctypes
     except ImportError:
         return
-    HWND_BROADCAST = 0xFFFF
-    WM_SETTINGCHANGE = 0x001A
-    SMTO_ABORTIFHUNG = 0x0002
+    hwnd_broadcast = 0xFFFF
+    wm_settingchange = 0x001A
+    smto_abortifhung = 0x0002
     result = ctypes.c_size_t()
     try:
         ctypes.windll.user32.SendMessageTimeoutW(
-            HWND_BROADCAST,
-            WM_SETTINGCHANGE,
+            hwnd_broadcast,
+            wm_settingchange,
             0,
             "Environment",
-            SMTO_ABORTIFHUNG,
+            smto_abortifhung,
             timeout_ms,
             ctypes.byref(result),
         )
@@ -1107,239 +1181,6 @@ def _delete_user_env_var(name: str) -> None:
     _write_windows_user_env_var(name, None)
 
 
-def _coerce_model_library_detail(key: str, value):
-    if value in ("", None):
-        return None
-    if key == "api_key_env":
-        return str(value).strip()
-    if key in {"transport", "contract", "reasoning_state_field"}:
-        return str(value).strip()
-    if key == "temperature":
-        return float(value)
-    if key in {"max_output_tokens", "timeout", "connect_timeout"}:
-        return int(value)
-    if key in {"streaming", "discovery_enabled", "strict_compatibility"}:
-        if isinstance(value, bool):
-            return value
-        return str(value).strip().lower() in {"1", "true", "yes", "on"}
-    return str(value).strip()
-
-
-def _model_library_details(item: dict) -> dict:
-    details = {}
-    for key in MODEL_LIBRARY_DETAIL_FIELDS:
-        if key not in item:
-            continue
-        value = _coerce_model_library_detail(key, item.get(key))
-        if value is not None:
-            details[key] = value
-    return details
-
-
-def _model_library_entry(provider_id: str, model: str, label: str, details: dict | None = None) -> dict:
-    entry = {
-        "provider_id": provider_id,
-        "model": model,
-        "label": label or model,
-    }
-    if details:
-        entry.update(_model_library_details(details))
-    return entry
-
-
-def list_llm_model_preset_options() -> list[dict[str, object]]:
-    return [
-        {
-            "preset_id": preset_id,
-            "label": str(preset["label"]),
-            "provider_id": str(preset["provider_id"]),
-            "model_id": str(preset["model_id"]),
-            "provider": copy.deepcopy(preset["provider"]),
-            "model": copy.deepcopy(preset["model"]),
-        }
-        for preset_id, preset in LLM_MODEL_PRESETS.items()
-    ]
-
-
-def apply_llm_model_preset(
-    public_config: dict,
-    preset_id: str,
-    model_id: str = "",
-    provider_id: str = "",
-    model: str = "",
-    label: str = "",
-    details: dict | None = None,
-    api_key_env: str = "",
-) -> dict:
-    preset_id = (preset_id or "").strip()
-    if preset_id not in LLM_MODEL_PRESETS:
-        raise ValueError(f"unknown LLM model preset: {preset_id}")
-
-    preset = LLM_MODEL_PRESETS[preset_id]
-    resolved_model_id = (model_id or str(preset["model_id"])).strip()
-    resolved_provider_id = (provider_id or str(preset["provider_id"])).strip()
-    model_defaults = copy.deepcopy(preset["model"])
-    model_defaults.update(_model_library_details(details or {}))
-    resolved_model = (model or str(model_defaults.get("model", ""))).strip()
-    resolved_label = (label or str(model_defaults.get("label", "")) or resolved_model).strip()
-    if not resolved_model_id:
-        raise ValueError("model_id is required")
-    if not resolved_provider_id:
-        raise ValueError("provider_id is required")
-    if not resolved_model:
-        raise ValueError("model is required")
-
-    updated = copy.deepcopy(public_config)
-    llm = updated.setdefault("llm", {})
-    providers = llm.setdefault("providers", {})
-    if not isinstance(providers, dict):
-        raise ValueError("llm.providers must be an object")
-    provider_entry = providers.setdefault(resolved_provider_id, {})
-    if not isinstance(provider_entry, dict):
-        raise ValueError(f"llm.providers.{resolved_provider_id} must be an object")
-    provider_entry.update(copy.deepcopy(preset["provider"]))
-    provider_entry["provider_id"] = resolved_provider_id
-
-    model_library = llm.setdefault("model_library", {})
-    if not isinstance(model_library, dict):
-        raise ValueError("llm.model_library must be an object")
-    if resolved_model_id in model_library:
-        raise ValueError(f"LLM model already exists: {resolved_model_id}")
-
-    model_defaults["model"] = resolved_model
-    model_defaults["label"] = resolved_label
-    entry = _model_library_entry(resolved_provider_id, resolved_model, resolved_label, model_defaults)
-    entry["api_key_env"] = (api_key_env or _default_model_api_key_env(resolved_model_id)).strip()
-    model_library[resolved_model_id] = entry
-    build_effective_config(updated)
-    return updated
-
-
-def list_llm_model_options(public_config: dict) -> list[dict[str, object]]:
-    llm = public_config.get("llm", {})
-    providers = llm.get("providers", {}) if isinstance(llm, dict) else {}
-    profiles = llm.get("profiles", {}) if isinstance(llm, dict) else {}
-    model_library = llm.get("model_library", {}) if isinstance(llm, dict) else {}
-    options: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-
-    if isinstance(model_library, dict):
-        for model_id, item in model_library.items():
-            if not isinstance(item, dict):
-                continue
-            provider_id = str(item.get("provider_id", "")).strip()
-            model = str(item.get("model", "")).strip()
-            if not provider_id or not model:
-                continue
-            label = str(item.get("label", "")).strip() or model
-            options.append(
-                {
-                    "model_id": str(model_id),
-                    "provider_id": provider_id,
-                    "provider_kind": str(providers.get(provider_id, {}).get("kind", provider_id)) if isinstance(providers, dict) else provider_id,
-                    "model": model,
-                    "label": label,
-                    "details": _model_library_details(item),
-                    "api_key_env": str(item.get("api_key_env", "")).strip(),
-                    "api_key_configured": bool(_read_env_var(str(item.get("api_key_env", "")).strip())),
-                }
-            )
-            seen.add((provider_id, model))
-
-    if isinstance(profiles, dict):
-        for profile in profiles.values():
-            if not isinstance(profile, dict):
-                continue
-            provider_id = str(profile.get("provider_id", "")).strip()
-            model = str(profile.get("model", "")).strip()
-            if not provider_id or not model or (provider_id, model) in seen:
-                continue
-            provider_kind = str(providers.get(provider_id, {}).get("kind", provider_id)) if isinstance(providers, dict) else provider_id
-            options.append(
-                {
-                    "model_id": _model_library_id(provider_id, model),
-                    "provider_id": provider_id,
-                    "provider_kind": provider_kind,
-                    "model": model,
-                    "label": model,
-                    "details": _model_library_details(profile),
-                    "api_key_env": _default_model_api_key_env(_model_library_id(provider_id, model)),
-                    "api_key_configured": False,
-                }
-            )
-            seen.add((provider_id, model))
-    return options
-
-
-def add_llm_model(public_config: dict, model_id: str, provider_id: str, model: str, label: str = "", details: dict | None = None, api_key_env: str = "") -> dict:
-    model_id = (model_id or "").strip()
-    provider_id = (provider_id or "").strip()
-    model = (model or "").strip()
-    label = (label or "").strip()
-    if not model_id:
-        raise ValueError("model_id is required")
-    if not provider_id:
-        raise ValueError("provider_id is required")
-    if not model:
-        raise ValueError("model is required")
-
-    updated = copy.deepcopy(public_config)
-    llm = updated.setdefault("llm", {})
-    providers = llm.setdefault("providers", {})
-    if not isinstance(providers, dict) or provider_id not in providers:
-        raise ValueError(f"unknown LLM provider: {provider_id}")
-    model_library = llm.setdefault("model_library", {})
-    if not isinstance(model_library, dict):
-        raise ValueError("llm.model_library must be an object")
-    if model_id in model_library:
-        raise ValueError(f"LLM model already exists: {model_id}")
-    entry = _model_library_entry(provider_id, model, label or model, details)
-    entry["api_key_env"] = (api_key_env or entry.get("api_key_env") or _default_model_api_key_env(model_id)).strip()
-    model_library[model_id] = entry
-    build_effective_config(updated)
-    return updated
-
-
-def update_llm_model(public_config: dict, model_id: str, provider_id: str, model: str, label: str = "", details: dict | None = None, api_key_env: str = "") -> dict:
-    model_id = (model_id or "").strip()
-    provider_id = (provider_id or "").strip()
-    model = (model or "").strip()
-    label = (label or "").strip()
-    if not model_id:
-        raise ValueError("model_id is required")
-    if not provider_id:
-        raise ValueError("provider_id is required")
-    if not model:
-        raise ValueError("model is required")
-
-    updated = copy.deepcopy(public_config)
-    llm = updated.setdefault("llm", {})
-    providers = llm.setdefault("providers", {})
-    if not isinstance(providers, dict) or provider_id not in providers:
-        raise ValueError(f"unknown LLM provider: {provider_id}")
-    model_library = llm.setdefault("model_library", {})
-    if not isinstance(model_library, dict):
-        raise ValueError("llm.model_library must be an object")
-    existing = model_library.get(model_id, {}) if isinstance(model_library.get(model_id, {}), dict) else {}
-    entry = _model_library_entry(provider_id, model, label or model, details)
-    entry["api_key_env"] = (api_key_env or entry.get("api_key_env") or existing.get("api_key_env") or _default_model_api_key_env(model_id)).strip()
-    model_library[model_id] = entry
-    build_effective_config(updated)
-    return updated
-
-
-def delete_llm_model(public_config: dict, model_id: str) -> dict:
-    updated = copy.deepcopy(public_config)
-    llm = updated.setdefault("llm", {})
-    model_library = llm.get("model_library", {})
-    if isinstance(model_library, dict):
-        model_library.pop(model_id, None)
-    else:
-        llm["model_library"] = {}
-    build_effective_config(updated)
-    return updated
-
-
 def set_llm_model_api_key(public_config: dict, model_id: str, api_key: str) -> str:
     llm = public_config.get("llm", {})
     model_library = llm.get("model_library", {}) if isinstance(llm, dict) else {}
@@ -1373,38 +1214,6 @@ def _find_profile_id_for_provider(public_config: dict, provider_id: str) -> str:
         if isinstance(profile, dict) and profile.get("provider_id") == provider_id:
             return str(profile_id)
     raise ValueError(f"no LLM profile uses provider: {provider_id}")
-
-
-def add_llm_profile(public_config: dict, profile_id: str, provider_id: str, model: str) -> dict:
-    profile_id = (profile_id or "").strip()
-    provider_id = (provider_id or "").strip()
-    model = (model or "").strip()
-    if not profile_id:
-        raise ValueError("profile_id is required")
-    if not provider_id:
-        raise ValueError("provider_id is required")
-    if not model:
-        raise ValueError("model is required")
-
-    updated = copy.deepcopy(public_config)
-    llm = updated.setdefault("llm", {})
-    providers = llm.setdefault("providers", {})
-    profiles = llm.setdefault("profiles", {})
-    if not isinstance(providers, dict) or provider_id not in providers:
-        raise ValueError(f"unknown LLM provider: {provider_id}")
-    if not isinstance(profiles, dict):
-        raise ValueError("llm.profiles must be an object")
-    if profile_id in profiles:
-        raise ValueError(f"LLM profile already exists: {profile_id}")
-
-    source_id = "primary" if "primary" in profiles else next(iter(profiles), "")
-    source_profile = profiles.get(source_id, {}) if isinstance(profiles.get(source_id, {}), dict) else {}
-    new_profile = copy.deepcopy(source_profile)
-    new_profile["provider_id"] = provider_id
-    new_profile["model"] = model
-    profiles[profile_id] = new_profile
-    build_effective_config(updated)
-    return updated
 
 
 def _probe_llm_http(provider, profile, api_key: str | None = None) -> dict:
@@ -1443,11 +1252,34 @@ def _probe_llm_http(provider, profile, api_key: str | None = None) -> dict:
         return {"ok": False, "message": str(exc)}
 
 
-def test_llm_connection(public_config: dict, profile_id: str | None = None) -> dict:
+def test_llm_connection(public_config: dict, profile_id: str | None = None, draft_meta: dict | None = None) -> dict:
     effective = build_effective_config(public_config)
     profile = effective.llm.get_profile(profile_id=profile_id) if profile_id else effective.llm.get_profile(role="primary")
     provider = effective.llm.get_provider(profile.provider_id)
     api_key = effective.get_api_key_for_profile(profile_id=profile.profile_id)
+    api_key_source = effective.llm.get_api_key_source_label_for_profile(profile_id=profile.profile_id)
+    meta = _normalize_draft_meta(draft_meta)
+    pending = meta["pending_api_keys"]
+    cleared = meta["pending_cleared_api_keys"]
+    profile_public = (
+        public_config.get("llm", {}).get("profiles", {}).get(profile.profile_id, {})
+        if isinstance(public_config.get("llm", {}), dict)
+        else {}
+    )
+    profile_api_key_env = str(profile_public.get("api_key_env", "")).strip() if isinstance(profile_public, dict) else ""
+    provider_api_key_env = str(getattr(provider, "api_key_env", "") or "").strip()
+    if isinstance(cleared, list) and profile_api_key_env and profile_api_key_env in cleared:
+        api_key = None
+        api_key_source = f"pending-clear:{profile_api_key_env}"
+    elif isinstance(cleared, list) and provider_api_key_env and provider_api_key_env in cleared:
+        api_key = None
+        api_key_source = f"pending-clear:{provider_api_key_env}"
+    elif isinstance(pending, dict) and profile_api_key_env and profile_api_key_env in pending:
+        api_key = pending[profile_api_key_env]
+        api_key_source = f"pending-env:{profile_api_key_env}"
+    elif isinstance(pending, dict) and provider_api_key_env and provider_api_key_env in pending:
+        api_key = pending[provider_api_key_env]
+        api_key_source = f"pending-env:{provider_api_key_env}"
     try:
         result = _probe_llm_http(provider, profile, api_key)
     except TypeError:
@@ -1456,44 +1288,16 @@ def test_llm_connection(public_config: dict, profile_id: str | None = None) -> d
         **result,
         "profile_id": profile.profile_id,
         "provider_id": provider.provider_id,
+        "provider_kind": provider.kind,
+        "base_url": provider.base_url,
         "model": profile.model,
-        "api_key_source": effective.llm.get_api_key_source_label_for_profile(profile_id=profile.profile_id),
+        "api_key_source": api_key_source,
     }
 
 
 def test_llm_connection_by_provider(public_config: dict, provider_id: str) -> dict:
     profile_id = _find_profile_id_for_provider(public_config, provider_id)
     return test_llm_connection(public_config, profile_id)
-
-
-def preserve_secret_blanks(new_public: dict, old_public: dict) -> dict:
-    result = copy.deepcopy(new_public)
-
-    def walk(new_node, old_node):
-        if isinstance(new_node, dict) and isinstance(old_node, dict):
-            for key, value in new_node.items():
-                if key not in old_node:
-                    continue
-                if key == "api_key" and value == "" and isinstance(old_node[key], str) and old_node[key]:
-                    new_node[key] = old_node[key]
-                else:
-                    walk(value, old_node[key])
-        elif isinstance(new_node, list) and isinstance(old_node, list):
-            for idx, item in enumerate(new_node):
-                if idx < len(old_node):
-                    walk(item, old_node[idx])
-
-    walk(result, old_public)
-    return result
-
-
-def save_public_config(public_config: dict, config_path: Path = CONFIG_PATH) -> None:
-    cleaned_public_config = denormalize_config_dict(normalize_public_config_dict(public_config))
-    config_path.with_suffix(config_path.suffix + ".bak").write_text(
-        config_path.read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
-    config_path.write_text(dumps_public_config(cleaned_public_config, HEADER_LINES), encoding="utf-8")
 
 
 def _json_for_attr(value) -> str:
@@ -1607,6 +1411,12 @@ def _render_input(path: str, value, label: str, lang: str) -> str:
         return _render_select(path, str(value), RUNTIME_PROFILE_OPTIONS, label, lang)
     if path == "avatar.preset":
         return _render_select(path, str(value), AVATAR_PRESET_OPTIONS, label, lang)
+    if path in {"agent.default_mode", "agent.modes.default_shell_mode", "agent.modes.default_headless_mode"}:
+        return _render_select(path, str(value), AGENT_MODE_OPTIONS, label, lang)
+    if path == "agent.modes.explicit_evolution_request_behavior":
+        return _render_select(path, str(value), EVOLUTION_REQUEST_BEHAVIOR_OPTIONS, label, lang)
+    if path == "evolution.chat_dataset.segmentation_strategy":
+        return _render_select(path, str(value), SEGMENTATION_STRATEGY_OPTIONS, label, lang)
 
     hint = _field_hint(path, lang)
     if isinstance(value, bool):
@@ -1662,36 +1472,64 @@ def _llm_profile_select(public_config: dict, selected_profile_id: str, select_id
 
 def _llm_model_select(
     public_config: dict,
-    selected_provider_id: str,
+    selected_provider: dict | None,
     selected_model: str,
     select_id: str,
     profile_id: str,
     lang: str,
-    provider_filter: str | None = None,
 ) -> str:
+    selected_signature = _provider_signature(selected_provider)
     options = []
+    matched = False
     for option in list_llm_model_options(public_config):
-        option_provider_id = str(option["provider_id"])
+        option_provider = _public_provider(option.get("provider", {}))
+        option_signature = _provider_signature(option_provider)
         option_model = str(option["model"])
         option_model_id = str(option["model_id"])
         option_label = str(option["label"])
         option_provider_kind = str(option["provider_kind"])
-        if provider_filter and option_provider_id != provider_filter:
-            continue
-        selected = " selected" if option_provider_id == selected_provider_id and option_model == selected_model else ""
+        selected = " selected" if option_signature == selected_signature and option_model == selected_model else ""
+        if selected:
+            matched = True
         details_json = html.escape(json.dumps(option.get("details", {}), ensure_ascii=False), quote=True)
+        provider_json = html.escape(json.dumps(option_provider, ensure_ascii=False), quote=True)
         options.append(
             f'<option value="{html.escape(option_model_id)}"{selected} '
-            f'data-provider-id="{html.escape(option_provider_id)}" '
+            f'data-provider="{provider_json}" '
             f'data-model="{html.escape(option_model)}" '
+            f'data-label="{html.escape(option_label)}" '
+            f'data-api-key-env="{html.escape(str(option.get("api_key_env", "")))}" '
             f'data-details="{details_json}">'
             f'{html.escape(option_label)} / {html.escape(_display_provider_kind(option_provider_kind, lang))}</option>'
         )
     disabled = " disabled" if not options else ""
-    return (
-        f'<select id="{html.escape(select_id)}" class="card-profile-select" '
-        f'data-profile-id="{html.escape(profile_id)}"{disabled}>{"".join(options)}</select>'
+    placeholder_selected = " selected" if not matched else ""
+    placeholder = (
+        f'<option value=""{placeholder_selected}>'
+        f'{html.escape(I18N[lang]["select_model_placeholder"])}</option>'
     )
+    required_class = " is-required" if not matched else ""
+    return (
+        f'<select id="{html.escape(select_id)}" class="card-profile-select{required_class}" '
+        f'data-profile-id="{html.escape(profile_id)}"{disabled}>{placeholder}{"".join(options)}</select>'
+    )
+
+
+def _llm_model_id_select(public_config: dict, selected_model_id: str, select_id: str, lang: str) -> str:
+    options = []
+    for option in list_llm_model_options(public_config):
+        option_model_id = str(option["model_id"])
+        option_label = str(option["label"])
+        option_provider_kind = str(option["provider_kind"])
+        option_model = str(option["model"])
+        selected = " selected" if option_model_id == selected_model_id else ""
+        options.append(
+            f'<option value="{html.escape(option_model_id)}"{selected}>'
+            f'{html.escape(option_label)} / {html.escape(_display_provider_kind(option_provider_kind, lang))} / '
+            f'{html.escape(option_model)}</option>'
+        )
+    disabled = " disabled" if not options else ""
+    return f'<select id="{html.escape(select_id)}" class="card-profile-select"{disabled}>{"".join(options)}</select>'
 
 
 def _primary_profile_id(public_config: dict) -> str:
@@ -1740,6 +1578,77 @@ def _render_group_block(title: str, count: int, content_html: str, *, group_kind
     )
 
 
+def _render_config_object_card(
+    public_config: dict,
+    path: str,
+    value: dict,
+    lang: str,
+    *,
+    title_override: str | None = None,
+) -> str:
+    if not isinstance(value, dict):
+        raise ValueError(f"config path is not an object card: {path}")
+    key = path.split(".")[-1] if path else ""
+    title = title_override or localize_section_label(path, key, lang)
+    if path == "llm.profiles":
+        content_html = _render_llm_profile_groups(value, path, lang, public_config)
+    else:
+        parent_path = path.rsplit(".", 1)[0] if "." in path else ""
+        if parent_path == "llm.providers":
+            title = _display_provider_id(key, lang)
+        elif parent_path == "llm.profiles":
+            title = _display_profile_id(key, lang)
+        content_html = _render_group_fields(value, path, lang, public_config)
+    return _render_collapsible_card(
+        path,
+        title,
+        content_html,
+        count=len(value),
+        actions_html=_card_actions(path, lang, public_config),
+        lang=lang,
+    )
+
+
+def _render_llm_profile_card(public_config: dict, profile_id: str, lang: str) -> str:
+    llm = public_config.get("llm", {})
+    profiles = llm.get("profiles", {}) if isinstance(llm, dict) else {}
+    if not isinstance(profiles, dict):
+        raise ValueError("llm.profiles must be an object")
+    value = profiles.get(profile_id, {})
+    if not isinstance(value, dict):
+        raise ValueError(f"unknown LLM profile: {profile_id}")
+    path = f"llm.profiles.{profile_id}"
+    return _render_config_object_card(public_config, path, value, lang)
+
+
+def _lookup_config_path_value(public_config: dict, path: str):
+    current = public_config
+    for part in [token for token in str(path or "").split(".") if token]:
+        if isinstance(current, dict):
+            if part not in current:
+                raise ValueError(f"unknown config path: {path}")
+            current = current[part]
+            continue
+        if isinstance(current, list) and part.isdigit():
+            index = int(part)
+            if index < 0 or index >= len(current):
+                raise ValueError(f"unknown config path: {path}")
+            current = current[index]
+            continue
+        raise ValueError(f"unknown config path: {path}")
+    return current
+
+
+def _render_config_card_preview(public_config: dict, card_path: str, lang: str) -> str:
+    resolved_path = str(card_path or "").strip()
+    if not resolved_path:
+        raise ValueError("card_path is required")
+    value = _lookup_config_path_value(public_config, resolved_path)
+    if not isinstance(value, dict):
+        raise ValueError(f"config path is not an object card: {resolved_path}")
+    return _render_config_object_card(public_config, resolved_path, value, lang)
+
+
 def _render_llm_profile_groups(data: dict, prefix: str, lang: str, public_config: dict) -> str:
     cards: list[str] = [_render_inline_llm_profile_card(public_config, lang)]
     grouped = _group_profile_ids(data)
@@ -1752,17 +1661,7 @@ def _render_llm_profile_groups(data: dict, prefix: str, lang: str, public_config
             value = data.get(profile_id, {})
             if not isinstance(value, dict):
                 continue
-            path = f"{prefix}.{profile_id}"
-            group_cards.append(
-                _render_collapsible_card(
-                    path,
-                    _display_profile_id(profile_id, lang),
-                    _render_group_fields(value, path, lang, public_config),
-                    count=len(value),
-                    actions_html=_card_actions(path, lang, public_config),
-                    lang=lang,
-                )
-            )
+            group_cards.append(_render_llm_profile_card(public_config, profile_id, lang))
         group_cards.append("</div>")
         cards.append(
             _render_group_block(
@@ -1777,18 +1676,16 @@ def _render_llm_profile_groups(data: dict, prefix: str, lang: str, public_config
 
 def _render_inline_llm_profile_card(public_config: dict, lang: str) -> str:
     t = I18N[lang]
-    llm = public_config.get("llm", {})
-    providers = llm.get("providers", {}) if isinstance(llm, dict) else {}
-    add_profile_provider_options = "".join(
-        f'<option value="{html.escape(str(provider_id))}">{html.escape(_display_provider_id(str(provider_id), lang))}</option>'
-        for provider_id in providers
+    source_profile_options = "".join(
+        f'<option value="{html.escape(str(option["profile_id"]))}">{html.escape(str(option["label"]))}</option>'
+        for option in list_llm_profile_options(public_config, lang)
     )
     return (
         f'<div id="add-llm-profile-card" class="inline-add-card" hidden>'
         f'<div class="model-library-edit">'
         f'<label><span>{html.escape(t["prompt_profile_id"])}</span><input type="text" data-add-profile-field="profile_id"></label>'
-        f'<label><span>{html.escape(t["prompt_provider_id"])}</span><select data-add-profile-field="provider_id">{add_profile_provider_options}</select></label>'
-        f'<label><span>{html.escape(t["prompt_model"])}</span><input type="text" data-add-profile-field="model"></label>'
+        f'<label><span>{html.escape(t["prompt_source_profile_id"])}</span><select data-add-profile-field="source_profile_id">{source_profile_options}</select></label>'
+        f'<label><span>{html.escape(t["prompt_model_id"])}</span>{_llm_model_id_select(public_config, "", "add-llm-profile-model", lang)}</label>'
         f'<div class="model-library-actions">'
         f'<button type="button" class="card-action subtle" onclick="saveInlineLlmProfile()">{html.escape(t["save_model"])}</button>'
         f'<button type="button" class="card-action" onclick="cancelInlineLlmProfile()">{html.escape(t["cancel"])}</button>'
@@ -1807,12 +1704,24 @@ def _profile_card_actions(path: str, lang: str, public_config: dict) -> str:
     select_id = f"llm-model-switch-{_dom_id_from_path(path)}"
     llm = public_config.get("llm", {})
     profile = llm.get("profiles", {}).get(profile_id, {}) if isinstance(llm, dict) and isinstance(llm.get("profiles", {}), dict) else {}
-    selected_provider_id = str(profile.get("provider_id", "")) if isinstance(profile, dict) else ""
-    selected_model = str(profile.get("model", "")) if isinstance(profile, dict) else ""
+    selected_option = _selected_model_option(public_config, profile if isinstance(profile, dict) else {})
+    if selected_option:
+        selected_provider = _public_provider(selected_option.get("provider", {}))
+        selected_model = str(selected_option.get("model", ""))
+    else:
+        selected_provider = _public_provider(profile.get("provider")) if isinstance(profile, dict) else {}
+        selected_model = str(profile.get("model", "")) if isinstance(profile, dict) else ""
+    missing_required = selected_option is None
     t = I18N[lang]
+    required_badge = (
+        f'<span class="required-indicator" data-profile-required="{safe_profile}">* {html.escape(t["required_field"])}</span>'
+        if missing_required
+        else ""
+    )
     return (
         f'<div class="card-actions" data-profile-actions="{safe_profile}">'
-        f'{_llm_model_select(public_config, selected_provider_id, selected_model, select_id, profile_id, lang)}'
+        f'{_llm_model_select(public_config, selected_provider, selected_model, select_id, profile_id, lang)}'
+        f"{required_badge}"
         f'<button type="button" class="card-action subtle" onclick="cloneLlmProfile(\'{safe_profile}\', \'{html.escape(select_id)}\')">{html.escape(t["add_llm"])}</button>'
         f'<button type="button" class="card-action subtle" onclick="applySelectedProfileModel(\'{html.escape(select_id)}\')">{html.escape(t["apply_model"])}</button>'
         f'<button type="button" class="card-action" onclick="testSelectedProfileModel(\'{html.escape(select_id)}\')">{html.escape(t["test_provider"])}</button>'
@@ -1830,6 +1739,7 @@ def _card_actions(path: str, lang: str, public_config: dict) -> str:
 
 def _render_collapsible_card(path: str, title: str, content_html: str, *, count: int | None = None, actions_html: str = "", lang: str = DEFAULT_LANG) -> str:
     safe_id = html.escape(_dom_id_from_path(path))
+    safe_path = html.escape(path)
     safe_title = html.escape(title)
     count_html = f'<span class="section-count">{count}</span>' if count is not None else ""
     t = I18N[lang]
@@ -1841,7 +1751,8 @@ def _render_collapsible_card(path: str, title: str, content_html: str, *, count:
         f"</div>"
     )
     return (
-        f'<div class="collapsible-card is-collapsed" data-collapsible-card="true">'
+        f'<div id="config-card-{safe_id}" class="collapsible-card is-collapsed" '
+        f'data-collapsible-card="true" data-card-path="{safe_path}">'
         f'<div class="card-header-shell">'
         f'<button class="card-header" type="button" aria-expanded="false" '
         f'aria-controls="card-content-{safe_id}" onclick="toggleSection(this)">'
@@ -1864,45 +1775,18 @@ def _render_group_fields(data: dict, prefix: str, lang: str, public_config: dict
     for key, value in data.items():
         path = f"{prefix}.{key}" if prefix else key
         if isinstance(value, dict):
-            if path == "llm.profiles":
-                body.append(
-                    _render_collapsible_card(
-                        path,
-                        localize_section_label(path, key, lang),
-                        _render_llm_profile_groups(value, path, lang, public_config),
-                        count=len(value),
-                        actions_html=_card_actions(path, lang, public_config),
-                        lang=lang,
-                    )
-                )
-                continue
-            nested_content = _render_group_fields(value, path, lang, public_config)
-            section_title = localize_section_label(path, key, lang)
-            if prefix == "llm.providers":
-                section_title = _display_provider_id(key, lang)
-            elif prefix == "llm.profiles":
-                section_title = _display_profile_id(key, lang)
-            body.append(
-                _render_collapsible_card(
-                    path,
-                    section_title,
-                    nested_content,
-                    count=len(value),
-                    actions_html=_card_actions(path, lang, public_config),
-                    lang=lang,
-                )
-            )
+            body.append(_render_config_object_card(public_config, path, value, lang))
         elif isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
             cards = [f'<div class="list-of-objects" data-path="{path}">']
             for idx, item in enumerate(value):
                 item_path = f"{path}.{idx}"
                 cards.append(
-                    _render_collapsible_card(
+                    _render_config_object_card(
+                        public_config,
                         item_path,
-                        f"{localize_section_label(path, key, lang)}[{idx}]",
-                        _render_group_fields(item, item_path, lang, public_config),
-                        count=len(item),
-                        lang=lang,
+                        item,
+                        lang,
+                        title_override=f"{localize_section_label(path, key, lang)}[{idx}]",
                     )
                 )
             cards.append("</div>")
@@ -1931,18 +1815,55 @@ def _render_object(title: str, data: dict, prefix: str, lang: str, public_config
     )
 
 
-def _render_model_library_section(public_config: dict, lang: str) -> str:
+def _provider_extra_headers_text(provider: dict | None) -> str:
+    headers = _public_provider(provider).get("extra_headers")
+    if headers in ("", None):
+        return ""
+    if isinstance(headers, str):
+        return headers
+    return json.dumps(headers, ensure_ascii=False)
+
+
+def _render_provider_editor_fields(provider: dict | None, field_attr: str, lang: str) -> str:
+    entry = _public_provider(provider)
+    kind = str(entry.get("kind", "") or "openai").strip()
+    base_url = str(entry.get("base_url", "")).strip()
+    api_key_env = str(entry.get("api_key_env", "")).strip()
+    compat_mode = str(entry.get("compat_mode", "") or "openai").strip()
+    requires_api_key = bool(entry.get("requires_api_key", True))
+    context_window = "" if entry.get("context_window") in ("", None) else str(entry.get("context_window"))
+    extra_headers = _provider_extra_headers_text(entry)
+    requires_checked = " checked" if requires_api_key else ""
+    kind_options = "".join(
+        f'<option value="{html.escape(option)}"{" selected" if option == kind else ""}>{html.escape(_display_provider_kind(option, lang) or option)}</option>'
+        for option in LLM_PROVIDER_OPTIONS
+    )
+    compat_options = "".join(
+        f'<option value="{html.escape(option)}"{" selected" if option == compat_mode else ""}>{html.escape(option)}</option>'
+        for option in LLM_PROVIDER_COMPAT_OPTIONS
+    )
+    return (
+        f'<label><span>{html.escape(_provider_field_label("kind", lang))}</span>'
+        f'<select {field_attr}="provider_kind">{kind_options}</select></label>'
+        f'<label><span>{html.escape(_provider_field_label("base_url", lang))}</span>'
+        f'<input type="text" {field_attr}="provider_base_url" value="{html.escape(base_url)}"></label>'
+        f'<label><span>{html.escape(_provider_field_label("api_key_env", lang))}</span>'
+        f'<input type="text" {field_attr}="provider_api_key_env" value="{html.escape(api_key_env)}"></label>'
+        f'<label><span>{html.escape(_provider_field_label("compat_mode", lang))}</span>'
+        f'<select {field_attr}="provider_compat_mode">{compat_options}</select></label>'
+        f'<label class="model-library-check"><input type="checkbox" {field_attr}="provider_requires_api_key"{requires_checked}> '
+        f'<span>{html.escape(_provider_field_label("requires_api_key", lang))}</span></label>'
+        f'<label><span>{html.escape(_provider_field_label("context_window", lang))}</span>'
+        f'<input type="number" step="1" min="1" {field_attr}="provider_context_window" value="{html.escape(context_window)}"></label>'
+        f'<label class="model-library-full"><span>{html.escape(_provider_field_label("extra_headers", lang))}</span>'
+        f'<textarea {field_attr}="provider_extra_headers">{html.escape(extra_headers)}</textarea></label>'
+    )
+
+
+def _render_model_library_section(public_config: dict, lang: str, draft_meta: dict | None = None) -> str:
     t = I18N[lang]
     options = list_llm_model_options(public_config)
     presets = list_llm_model_preset_options()
-    llm = public_config.get("llm", {})
-    providers = llm.get("providers", {}) if isinstance(llm, dict) else {}
-    provider_options = []
-    if isinstance(providers, dict):
-        for provider_id in providers.keys():
-            safe_provider_id = html.escape(str(provider_id))
-            provider_options.append(f'<option value="{safe_provider_id}">{html.escape(_display_provider_id(str(provider_id), lang))}</option>')
-    provider_options_html = "".join(provider_options)
     preset_options_html = (
         f'<option value="">{html.escape(t["preset_custom"])}</option>'
         + "".join(
@@ -1952,60 +1873,64 @@ def _render_model_library_section(public_config: dict, lang: str) -> str:
     )
     cards = []
     for option in options:
-        provider_id = str(option["provider_id"])
+        provider = _public_provider(option.get("provider", {}))
         model = str(option["model"])
         label = str(option["label"])
         provider_kind = str(option["provider_kind"])
         model_id = str(option["model_id"])
+        source = str(option.get("source", "model_library"))
         details = option.get("details", {}) if isinstance(option.get("details", {}), dict) else {}
         api_key_env = str(option.get("api_key_env", "") or details.get("api_key_env", "")).strip()
         api_key_configured = bool(option.get("api_key_configured"))
-        api_key_status = t["api_key_configured"] if api_key_configured else t["api_key_missing"]
-        selected_provider_options = provider_options_html.replace(
-            f'value="{html.escape(provider_id)}"',
-            f'value="{html.escape(provider_id)}" selected',
-            1,
-        )
+        api_key_configured, api_key_state = _api_key_display_state(api_key_env, api_key_configured, draft_meta)
+        if api_key_state == "pending":
+            api_key_status = t["api_key_pending"]
+        elif api_key_state == "clear_pending":
+            api_key_status = t["api_key_clear_pending"]
+        else:
+            api_key_status = t["api_key_configured"] if api_key_configured else t["api_key_missing"]
         tool_mode = str(details.get("tool_calling_mode", "auto"))
-        tool_mode_options = "".join(
-            f'<option value="{html.escape(value)}"{" selected" if value == tool_mode else ""}>{html.escape(value)}</option>'
-            for value in ("auto", "disabled", "required")
+        tool_mode_options = _render_model_library_options(
+            "tool_calling_mode",
+            ("auto", "disabled", "required"),
+            tool_mode,
+            lang,
         )
         transport = str(details.get("transport", "chat_completions"))
-        transport_options = "".join(
-            f'<option value="{html.escape(value)}"{" selected" if value == transport else ""}>{html.escape(value)}</option>'
-            for value in ("chat_completions", "responses")
+        transport_options = _render_model_library_options(
+            "transport",
+            ("chat_completions", "responses"),
+            transport,
+            lang,
         )
         contract = str(details.get("contract", "tool_chat"))
-        contract_options = "".join(
-            f'<option value="{html.escape(value)}"{" selected" if value == contract else ""}>{html.escape(value)}</option>'
-            for value in ("basic_chat", "tool_chat", "reasoning_chat", "responses_agent")
+        contract_options = _render_model_library_options(
+            "contract",
+            ("basic_chat", "tool_chat", "reasoning_chat", "responses_agent"),
+            contract,
+            lang,
         )
         strict_checked = " checked" if bool(details.get("strict_compatibility", True)) else ""
         streaming_checked = " checked" if bool(details.get("streaming", True)) else ""
         discovery_checked = " checked" if bool(details.get("discovery_enabled", True)) else ""
-        detail_summary = " / ".join(
-            item
-            for item in (
-                f"{transport}" if transport else "",
-                f"{contract}" if contract else "",
-                f'temp {details["temperature"]}' if "temperature" in details else "",
-                f'{details["max_output_tokens"]} tokens' if "max_output_tokens" in details else "",
-                f'{details["timeout"]}s' if "timeout" in details else "",
-            )
-            if item
-        )
+        detail_summary = _model_library_detail_summary(transport, contract, details, lang)
+        provider_summary = _provider_summary(provider, lang)
+        source_label = "通用模型" if lang == "zh" else "Library"
+        if source != "model_library":
+            source_label = "来自配置" if lang == "zh" else "Derived"
         cards.append(
             f'<div class="model-library-card" data-model-library-id="{html.escape(model_id)}" '
-            f'data-provider-id="{html.escape(provider_id)}" '
+            f'data-provider="{_json_for_attr(provider)}" '
             f'data-model="{html.escape(model)}" '
             f'data-label="{html.escape(label)}" '
+            f'data-details="{_json_for_attr(details)}" '
             f'data-api-key-env="{html.escape(api_key_env)}">'
             f'<div class="model-library-view">'
             f'<div><strong>{html.escape(label)}</strong>'
-            f'<span>{html.escape(_display_provider_kind(provider_kind, lang))} / {html.escape(_display_provider_id(provider_id, lang))}</span>'
+            f'<span>{html.escape(provider_summary or _display_provider_kind(provider_kind, lang))}</span>'
             f'<span>{html.escape(t["model_api_key"])}: {html.escape(api_key_status)}'
             f'{f" ({html.escape(api_key_env)})" if api_key_env else ""}</span>'
+            f'<span>{html.escape(source_label)}</span>'
             f'{f"<span>{html.escape(detail_summary)}</span>" if detail_summary else ""}</div>'
             f'<code>{html.escape(model)}</code>'
             f'<div class="model-library-actions">'
@@ -2014,37 +1939,36 @@ def _render_model_library_section(public_config: dict, lang: str) -> str:
             f"</div>"
             f"</div>"
             f'<div class="model-library-edit" hidden>'
-            f'<label><span>{html.escape(t["prompt_provider_id"])}</span>'
-            f'<select data-edit-field="provider_id">{selected_provider_options}</select></label>'
+            f"{_render_provider_editor_fields(provider, 'data-edit-field', lang)}"
             f'<label><span>{html.escape(t["prompt_model"])}</span>'
             f'<input type="text" data-edit-field="model" value="{html.escape(model)}"></label>'
             f'<label><span>{html.escape(t["model_label"])}</span>'
             f'<input type="text" data-edit-field="label" value="{html.escape(label)}"></label>'
-            f'<label><span>api_key_env</span>'
+            f'<label><span>{html.escape(_model_library_field_label("api_key_env", lang))}</span>'
             f'<input type="text" data-edit-field="api_key_env" value="{html.escape(api_key_env)}"></label>'
-            f'<label><span>transport</span>'
+            f'<label><span>{html.escape(_model_library_field_label("transport", lang))}</span>'
             f'<select data-edit-field="transport">{transport_options}</select></label>'
-            f'<label><span>contract</span>'
+            f'<label><span>{html.escape(_model_library_field_label("contract", lang))}</span>'
             f'<select data-edit-field="contract">{contract_options}</select></label>'
-            f'<label><span>reasoning_state_field</span>'
+            f'<label><span>{html.escape(_model_library_field_label("reasoning_state_field", lang))}</span>'
             f'<input type="text" data-edit-field="reasoning_state_field" value="{html.escape(str(details.get("reasoning_state_field", "")))}"></label>'
             f'<label><span>{html.escape(t["model_api_key"])}</span>'
             f'<input type="password" data-edit-api-key autocomplete="off" placeholder="{html.escape(api_key_status)}"></label>'
             f'<label class="model-library-check"><input type="checkbox" data-clear-api-key> <span>{html.escape(t["clear_api_key"])}</span></label>'
             f'<span class="field-hint">{html.escape(t["api_key_hint"])}</span>'
-            f'<label><span>temperature</span>'
+            f'<label><span>{html.escape(_model_library_field_label("temperature", lang))}</span>'
             f'<input type="number" step="any" min="0" max="2" data-edit-field="temperature" value="{html.escape(str(details.get("temperature", "")))}"></label>'
-            f'<label><span>max_output_tokens</span>'
+            f'<label><span>{html.escape(_model_library_field_label("max_output_tokens", lang))}</span>'
             f'<input type="number" step="1" min="1" data-edit-field="max_output_tokens" value="{html.escape(str(details.get("max_output_tokens", "")))}"></label>'
-            f'<label><span>timeout</span>'
+            f'<label><span>{html.escape(_model_library_field_label("timeout", lang))}</span>'
             f'<input type="number" step="1" min="1" data-edit-field="timeout" value="{html.escape(str(details.get("timeout", "")))}"></label>'
-            f'<label><span>connect_timeout</span>'
+            f'<label><span>{html.escape(_model_library_field_label("connect_timeout", lang))}</span>'
             f'<input type="number" step="1" min="1" data-edit-field="connect_timeout" value="{html.escape(str(details.get("connect_timeout", "")))}"></label>'
-            f'<label><span>tool_calling_mode</span>'
+            f'<label><span>{html.escape(_model_library_field_label("tool_calling_mode", lang))}</span>'
             f'<select data-edit-field="tool_calling_mode">{tool_mode_options}</select></label>'
-            f'<label class="model-library-check"><input type="checkbox" data-edit-field="strict_compatibility"{strict_checked}> <span>strict_compatibility</span></label>'
-            f'<label class="model-library-check"><input type="checkbox" data-edit-field="streaming"{streaming_checked}> <span>streaming</span></label>'
-            f'<label class="model-library-check"><input type="checkbox" data-edit-field="discovery_enabled"{discovery_checked}> <span>discovery_enabled</span></label>'
+            f'<label class="model-library-check"><input type="checkbox" data-edit-field="strict_compatibility"{strict_checked}> <span>{html.escape(_model_library_field_label("strict_compatibility", lang))}</span></label>'
+            f'<label class="model-library-check"><input type="checkbox" data-edit-field="streaming"{streaming_checked}> <span>{html.escape(_model_library_field_label("streaming", lang))}</span></label>'
+            f'<label class="model-library-check"><input type="checkbox" data-edit-field="discovery_enabled"{discovery_checked}> <span>{html.escape(_model_library_field_label("discovery_enabled", lang))}</span></label>'
             f'<div class="model-library-actions">'
             f'<button type="button" class="card-action subtle" onclick="saveLlmModelEdit(this)">{html.escape(t["save_model"])}</button>'
             f'<button type="button" class="card-action" onclick="cancelLlmModelEdit(this)">{html.escape(t["cancel"])}</button>'
@@ -2059,15 +1983,15 @@ def _render_model_library_section(public_config: dict, lang: str) -> str:
         f'<label><span>{html.escape(t["preset_template"])}</span>'
         f'<select data-add-model-preset onchange="applyLlmModelPreset(this.value)">{preset_options_html}</select></label>'
         f'<label><span>{html.escape(t["model_id"])}</span><input type="text" data-add-model-field="model_id"></label>'
-        f'<label><span>{html.escape(t["prompt_provider_id"])}</span><select data-add-model-field="provider_id">{provider_options_html}</select></label>'
+        f"{_render_provider_editor_fields({'kind': 'openai', 'compat_mode': 'openai', 'requires_api_key': True}, 'data-add-model-field', lang)}"
         f'<label><span>{html.escape(t["prompt_model"])}</span><input type="text" data-add-model-field="model"></label>'
         f'<label><span>{html.escape(t["model_label"])}</span><input type="text" data-add-model-field="label"></label>'
-        f'<label><span>api_key_env</span><input type="text" data-add-model-field="api_key_env"></label>'
-        f'<label><span>transport</span><select data-add-model-field="transport"><option value="chat_completions">chat_completions</option><option value="responses">responses</option></select></label>'
-        f'<label><span>contract</span><select data-add-model-field="contract"><option value="basic_chat">basic_chat</option><option value="tool_chat" selected>tool_chat</option><option value="reasoning_chat">reasoning_chat</option><option value="responses_agent">responses_agent</option></select></label>'
-        f'<label><span>reasoning_state_field</span><input type="text" data-add-model-field="reasoning_state_field"></label>'
+        f'<label><span>{html.escape(_model_library_field_label("api_key_env", lang))}</span><input type="text" data-add-model-field="api_key_env"></label>'
+        f'<label><span>{html.escape(_model_library_field_label("transport", lang))}</span><select data-add-model-field="transport">{_render_model_library_options("transport", ("chat_completions", "responses"), "chat_completions", lang)}</select></label>'
+        f'<label><span>{html.escape(_model_library_field_label("contract", lang))}</span><select data-add-model-field="contract">{_render_model_library_options("contract", ("basic_chat", "tool_chat", "reasoning_chat", "responses_agent"), "tool_chat", lang)}</select></label>'
+        f'<label><span>{html.escape(_model_library_field_label("reasoning_state_field", lang))}</span><input type="text" data-add-model-field="reasoning_state_field"></label>'
         f'<label><span>{html.escape(t["model_api_key"])}</span><input type="password" data-add-model-field="api_key" autocomplete="off"></label>'
-        f'<label class="model-library-check"><input type="checkbox" data-add-model-field="strict_compatibility" checked> <span>strict_compatibility</span></label>'
+        f'<label class="model-library-check"><input type="checkbox" data-add-model-field="strict_compatibility" checked> <span>{html.escape(_model_library_field_label("strict_compatibility", lang))}</span></label>'
         f'<span class="field-hint">{html.escape(t["preset_template_hint"])}</span>'
         f'<span class="field-hint">{html.escape(t["api_key_hint"])}</span>'
         f'<div class="model-library-actions">'
@@ -2076,89 +2000,162 @@ def _render_model_library_section(public_config: dict, lang: str) -> str:
         f"</div></div></div>"
     )
     return (
-        f'<section class="panel-section config-page" id="section-llm-model-library" data-config-page="llm-model-library">'
+        f'<section class="panel-section config-page is-active" id="section-llm-model-library" data-config-page="llm-model-library">'
         f'<div class="model-library-head">'
         f'<div><span class="section-title">{html.escape(t["model_library"])}</span>'
         f'<span class="section-hint">{html.escape(t["model_library_hint"])}</span></div>'
+        f'<div class="model-library-actions">'
         f'<button type="button" class="card-action subtle" onclick="addLlmModel()">{html.escape(t["add_model"])}</button>'
+        f'<button type="button" class="card-action" onclick="addCustomLlmModel()">{html.escape(t["custom_model"])}</button>'
+        f"</div>"
         f"</div>"
         f'<div class="model-library-grid">{add_card}{body}</div>'
         f"</section>"
     )
 
 
-def _render_overview_section(diagnosis: dict, lang: str) -> str:
-    t = I18N[lang]
-    identity = diagnosis["identity"]
-    sources = diagnosis["sources"]
-    status = diagnosis["status"]
-    runtime_profile_label = localize_label("runtime.profile", identity["runtime_profile"], lang)
-    rows = [
-        (t["profile"], runtime_profile_label),
-        (t["profile_id"], _display_profile_id(identity.get("profile_id", ""), lang)),
-        (t["provider_id"], _display_provider_id(identity.get("provider_id", ""), lang)),
-        (t["provider"], _display_provider_kind(identity["provider"], lang)),
-        (t["model"], identity["model_name"]),
-        (t["api_base"], identity["api_base"]),
-        (t["api_key_source"], sources["api_key"]),
-        ("prompt sections", str(status["prompt_sections_count"])),
-    ]
-    rows_html = "".join(
-        f'<div class="overview-item"><span>{html.escape(label)}</span><strong>{html.escape(str(value))}</strong></div>'
-        for label, value in rows
-    )
-    return (
-        f'<section class="panel-section config-page is-active" id="section-overview" data-config-page="overview">'
-        f'<div class="section-header">'
-        f'<span class="section-title-wrap"><span><span class="section-title">{html.escape(t["effective_config"])}</span>'
-        f'<span class="section-hint">{html.escape(t["panel_subtitle"])}</span></span></span>'
-        f'<span class="section-count">{html.escape(runtime_profile_label)}</span>'
-        f'</div>'
-        f'<div class="section-content">'
-        f'<div class="overview-grid">{rows_html}</div>'
-        f'<div class="overview-actions">'
-        f'<button type="button" class="card-action" onclick="selectConfigPage(\'llm-model-library\')">{html.escape(t["open_model_library"])}</button>'
-        f'<button type="button" class="card-action" onclick="selectConfigPage(\'runtime\')">{html.escape(t["open_runtime"])}</button>'
-        f'</div>'
-        f'</div>'
-        f'</section>'
-    )
+def _inspect_panel_state(public_config: dict, lang: str) -> dict[str, object]:
+    snapshot = inspect_public_config(public_config)
+    diagnosis = copy.deepcopy(snapshot["diagnosis"])
+    summary = copy.deepcopy(snapshot["summary"])
+    missing_profiles = _missing_required_llm_profiles(public_config)
+    if missing_profiles:
+        display_names = "、".join(_display_profile_id(profile_id, lang) for profile_id in missing_profiles)
+        blocking_message = f'{I18N[lang]["profile_model_missing"]} {display_names}'
+        if blocking_message not in diagnosis["blocking_issues"]:
+            diagnosis["blocking_issues"].append(blocking_message)
+        summary["blocking_count"] = len(diagnosis["blocking_issues"])
+    return {
+        "effective": snapshot["effective"],
+        "diagnosis": diagnosis,
+        "summary": summary,
+    }
 
 
-def render_panel_html(public_config: dict, message: str = "", lang: str | None = None) -> str:
-    lang = resolve_lang(lang or get_config_language(public_config))
+def _with_config_language(public_config: dict, lang: str) -> dict:
     display_config = copy.deepcopy(public_config)
     display_config.setdefault("ui", {})
     if isinstance(display_config["ui"], dict):
         display_config["ui"]["language"] = lang
+    return display_config
+
+
+def _generic_public_config(display_config: dict) -> dict:
     generic_config = copy.deepcopy(display_config)
     if isinstance(generic_config.get("llm"), dict):
         generic_config["llm"].pop("model_library", None)
-    display_json = json.dumps(display_config, ensure_ascii=False)
-    preset_json = json.dumps({item["preset_id"]: item for item in list_llm_model_preset_options()}, ensure_ascii=False)
+    return generic_config
+
+
+def _render_sections_nav(display_config: dict, lang: str) -> str:
     t = I18N[lang]
-    effective = build_effective_config(public_config)
-    diagnosis = effective.diagnose_config()
-    raw_toml = dumps_public_config(public_config, HEADER_LINES)
-    blocking_count = len(diagnosis["blocking_issues"])
-    warning_count = len(diagnosis["warnings"])
-    action_count = len(diagnosis["suggested_actions"])
-    sections_nav = (
-        f'<a href="#section-overview" class="is-active" data-config-nav="overview" '
-        f'onclick="selectConfigPage(\'overview\', event)">{html.escape(t["overview"])}</a>'
-        f'<a href="#section-llm-model-library" data-config-nav="llm-model-library" '
+    generic_config = _generic_public_config(display_config)
+    return (
+        f'<a href="#section-llm-model-library" class="is-active" data-config-nav="llm-model-library" '
         f'onclick="selectConfigPage(\'llm-model-library\', event)">{html.escape(t["model_library"])}</a>'
     ) + "".join(
         f'<a href="#section-{html.escape(name)}" data-config-nav="{html.escape(name)}" '
         f'onclick="selectConfigPage(\'{html.escape(name)}\', event)">{html.escape(localize_section_label(name, name, lang))}</a>'
         for name in generic_config.keys()
     )
-    content = _render_overview_section(diagnosis, lang) + _render_model_library_section(display_config, lang) + "".join(
+
+
+def _render_config_content(display_config: dict, lang: str, draft_meta: dict[str, object]) -> str:
+    generic_config = _generic_public_config(display_config)
+    return _render_model_library_section(display_config, lang, draft_meta) + "".join(
         _render_object(name, value, name, lang, display_config) for name, value in generic_config.items()
     )
+
+
+def _render_config_form_contents(
+    public_config: dict,
+    message: str,
+    lang: str,
+    draft_meta: dict[str, object],
+    base_hash: str,
+) -> str:
+    display_config = _with_config_language(public_config, lang)
+    resolved_base_hash = str(base_hash or public_config_hash(public_config)).strip()
+    content = _render_config_content(display_config, lang, draft_meta)
+    t = I18N[lang]
+    return (
+        f'<div class="toolbar">'
+        f'<button type="button" onclick="saveConfig()">{html.escape(t["save"])}</button>'
+        f'<button type="button" class="ghost" onclick="window.location.reload()">{html.escape(t["reload"])}</button>'
+        f'<label>'
+        f'<span style="font-size:13px;color:var(--muted);margin-right:6px;">{html.escape(t["language"])}</span>'
+        f'<select id="lang-switch" onchange="switchLang(this.value)">'
+        f'<option value="zh" {"selected" if lang == "zh" else ""}>{html.escape(t["lang_zh"])}</option>'
+        f'<option value="en" {"selected" if lang == "en" else ""}>{html.escape(t["lang_en"])}</option>'
+        f"</select>"
+        f"</label>"
+        f'<span class="message">{html.escape(message)}</span>'
+        f"</div>"
+        f'<input type="hidden" name="payload" id="payload">'
+        f'<input type="hidden" name="base_hash" id="base-hash" value="{html.escape(resolved_base_hash)}">'
+        f"{content}"
+    )
+
+
+def _render_diagnostics_aside(public_config: dict, lang: str) -> str:
+    t = I18N[lang]
+    snapshot = _inspect_panel_state(public_config, lang)
+    diagnosis = snapshot["diagnosis"]
+    raw_toml = dumps_public_config(public_config, HEADER_LINES)
     warnings_html = "".join(f"<li>{html.escape(item)}</li>" for item in diagnosis["warnings"]) or f"<li>{html.escape(t['none'])}</li>"
     blocking_html = "".join(f"<li>{html.escape(item)}</li>" for item in diagnosis["blocking_issues"]) or f"<li>{html.escape(t['none'])}</li>"
     actions_html = "".join(f"<li>{html.escape(item)}</li>" for item in diagnosis["suggested_actions"]) or f"<li>{html.escape(t['none'])}</li>"
+    return (
+        f'<div class="diag-block">'
+        f'<h2>{html.escape(t["diagnostics"])}</h2>'
+        f'<div class="diag-kv">'
+        f'<div class="kv-item">{html.escape(t["provider"])}: <strong>{html.escape(diagnosis["identity"]["provider"])}</strong></div>'
+        f'<div class="kv-item">{html.escape(t["model"])}: <strong>{html.escape(diagnosis["identity"]["model_name"])}</strong></div>'
+        f'<div class="kv-item">{html.escape(t["profile"])}: <strong>{html.escape(diagnosis["identity"]["runtime_profile"])}</strong></div>'
+        f'<div class="kv-item">{html.escape(t["api_key_source"])}: <strong>{html.escape(diagnosis["sources"]["api_key"])}</strong></div>'
+        f"</div>"
+        f"</div>"
+        f'<div class="diag-block">'
+        f'<h2 class="danger">{html.escape(t["blocking"])}</h2>'
+        f"<ul>{blocking_html}</ul>"
+        f"</div>"
+        f'<div class="diag-block">'
+        f'<h2 class="warn">{html.escape(t["warnings"])}</h2>'
+        f"<ul>{warnings_html}</ul>"
+        f"</div>"
+        f'<div class="diag-block">'
+        f'<h2>{html.escape(t["actions"])}</h2>'
+        f"<ul>{actions_html}</ul>"
+        f"</div>"
+        f'<div class="diag-block">'
+        f'<h2>{html.escape(t["raw_toml"])}</h2>'
+        f"<details>"
+        f'<summary>{html.escape(t["raw_toml_summary"])}</summary>'
+        f"<pre>{html.escape(raw_toml)}</pre>"
+        f"</details>"
+        f"</div>"
+    )
+
+
+def render_panel_html(
+    public_config: dict,
+    message: str = "",
+    lang: str | None = None,
+    draft_meta: dict | None = None,
+    base_hash: str | None = None,
+) -> str:
+    lang = resolve_lang(lang or get_config_language(public_config))
+    draft_meta = _normalize_draft_meta(draft_meta)
+    resolved_base_hash = str(base_hash or public_config_hash(public_config)).strip()
+    display_config = _with_config_language(public_config, lang)
+    display_json = json.dumps(display_config, ensure_ascii=False)
+    draft_meta_json = json.dumps(draft_meta, ensure_ascii=False)
+    base_hash_json = json.dumps(resolved_base_hash, ensure_ascii=False)
+    preset_json = json.dumps({item["preset_id"]: item for item in list_llm_model_preset_options()}, ensure_ascii=False)
+    t = I18N[lang]
+    sections_nav = _render_sections_nav(display_config, lang)
+    form_contents = _render_config_form_contents(public_config, message, lang, draft_meta, resolved_base_hash)
+    aside_contents = _render_diagnostics_aside(public_config, lang)
 
     return f"""<!doctype html>
 <html lang="{html.escape(t['html_lang'])}">
@@ -2209,19 +2206,6 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
     .toast.error {{ border-color: #fecaca; background: #fef2f2; }}
     .toast strong {{ display: block; margin-bottom: 4px; font-size: 14px; }}
     .toast span {{ display: block; color: var(--muted); font-size: 13px; line-height: 1.4; }}
-    .summary-strip {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }}
-    .summary-card {{ background: var(--panel-soft); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-height: 86px; display: flex; flex-direction: column; justify-content: space-between; }}
-    .summary-card .label {{ font-size: 12px; color: var(--muted); text-transform: uppercase; }}
-    .summary-card .value {{ font-size: 18px; font-weight: 700; }}
-    .summary-card .meta {{ font-size: 12px; color: var(--muted); }}
-    .summary-card.alert .value {{ color: var(--danger); }}
-    .summary-card.warn .value {{ color: var(--warn); }}
-    .summary-card.ok .value {{ color: var(--success); }}
-    .overview-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding-top: 14px; }}
-    .overview-item {{ display: grid; gap: 5px; min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: #fbfdff; }}
-    .overview-item span {{ color: var(--muted); font-size: 12px; }}
-    .overview-item strong {{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }}
-    .overview-actions {{ display: flex; flex-wrap: wrap; gap: 8px; padding-top: 12px; }}
     .config-page {{ display: none; }}
     .config-page.is-active {{ display: block; }}
     .panel-section {{ margin-bottom: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); overflow: hidden; }}
@@ -2273,6 +2257,8 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
     .collapsible-card.is-editing > .card-header-shell .card-save-button,
     .collapsible-card.is-editing > .card-header-shell .card-cancel-button {{ display: inline-flex; }}
     .card-profile-select {{ min-width: 230px; max-width: 36vw; height: 34px; border: 1px solid #c9d4e2; border-radius: 6px; background: #fff; color: var(--text); padding: 0 8px; font: inherit; font-size: 12px; }}
+    .card-profile-select.is-required {{ border-color: #dc2626; box-shadow: inset 0 0 0 1px rgba(220, 38, 38, 0.08); }}
+    .required-indicator {{ color: var(--danger); font-size: 12px; font-weight: 700; white-space: nowrap; }}
     .card-action {{ border: 1px solid #c9d4e2; background: #fff; color: var(--accent); border-radius: 6px; padding: 7px 10px; font: inherit; font-size: 12px; cursor: pointer; }}
     .card-action.subtle {{ background: var(--accent); border-color: var(--accent); color: #fff; }}
     .card-action:hover {{ filter: brightness(0.98); }}
@@ -2312,8 +2298,8 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
     .warn {{ color: var(--warn); }}
     .danger {{ color: var(--danger); }}
     details pre {{ white-space: pre-wrap; word-break: break-word; font-size: 12px; background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 6px; }}
-    @media (max-width: 1400px) {{ .section-grid, .field-group > .section-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} .summary-strip {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} }}
-    @media (max-width: 1200px) {{ .layout {{ grid-template-columns: 1fr; }} .sidebar, .aside {{ position: static; height: auto; }} .section-grid, .field-group > .section-grid, .summary-strip, .diag-kv, .overview-grid, .model-library-grid, .model-library-view, .model-library-edit {{ grid-template-columns: 1fr; }} }}
+    @media (max-width: 1400px) {{ .section-grid, .field-group > .section-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} }}
+    @media (max-width: 1200px) {{ .layout {{ grid-template-columns: 1fr; }} .sidebar, .aside {{ position: static; height: auto; }} .section-grid, .field-group > .section-grid, .diag-kv, .model-library-grid, .model-library-view, .model-library-edit {{ grid-template-columns: 1fr; }} }}
   </style>
 </head>
 <body data-build="{PANEL_BUILD_ID}">
@@ -2329,78 +2315,31 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       <nav>{sections_nav}</nav>
     </aside>
     <main class="main">
-      <form id="config-form" method="post" action="/save">
-        <div class="toolbar">
-          <button type="button" onclick="saveConfig()">{html.escape(t['save'])}</button>
-          <button type="button" class="ghost" onclick="window.location.reload()">{html.escape(t['reload'])}</button>
-          <label>
-            <span style="font-size:13px;color:var(--muted);margin-right:6px;">{html.escape(t['language'])}</span>
-            <select id="lang-switch" onchange="switchLang(this.value)">
-              <option value="zh" {"selected" if lang == "zh" else ""}>{html.escape(t['lang_zh'])}</option>
-              <option value="en" {"selected" if lang == "en" else ""}>{html.escape(t['lang_en'])}</option>
-            </select>
-          </label>
-          <span class="message">{html.escape(message)}</span>
-        </div>
-        <div class="summary-strip">
-          <div class="summary-card">
-            <span class="label">{html.escape(t['provider'])}</span>
-            <span class="value">{html.escape(diagnosis["identity"]["provider"])}</span>
-            <span class="meta">{html.escape(diagnosis["identity"]["model_name"])}</span>
-          </div>
-          <div class="summary-card">
-            <span class="label">{html.escape(t['profile'])}</span>
-            <span class="value">{html.escape(diagnosis["identity"]["runtime_profile"])}</span>
-            <span class="meta">{html.escape(t['api_key_source'])}: {html.escape(diagnosis["sources"]["api_key"])}</span>
-          </div>
-          <div class="summary-card alert">
-            <span class="label">{html.escape(t['blocking'])}</span>
-            <span class="value">{blocking_count}</span>
-            <span class="meta">{html.escape(t['actions'])}: {action_count}</span>
-          </div>
-          <div class="summary-card warn">
-            <span class="label">{html.escape(t['warnings'])}</span>
-            <span class="value">{warning_count}</span>
-            <span class="meta">{html.escape(t['raw_toml'])} / config.toml</span>
-          </div>
-        </div>
-        <input type="hidden" name="payload" id="payload">
-        {content}
-      </form>
+      <form id="config-form" method="post" action="/save">{form_contents}</form>
     </main>
-    <aside class="aside">
-      <div class="diag-block">
-        <h2>{html.escape(t['diagnostics'])}</h2>
-        <div class="diag-kv">
-          <div class="kv-item">{html.escape(t['provider'])}: <strong>{html.escape(diagnosis["identity"]["provider"])}</strong></div>
-          <div class="kv-item">{html.escape(t['model'])}: <strong>{html.escape(diagnosis["identity"]["model_name"])}</strong></div>
-          <div class="kv-item">{html.escape(t['profile'])}: <strong>{html.escape(diagnosis["identity"]["runtime_profile"])}</strong></div>
-          <div class="kv-item">{html.escape(t['api_key_source'])}: <strong>{html.escape(diagnosis["sources"]["api_key"])}</strong></div>
-        </div>
-      </div>
-      <div class="diag-block">
-        <h2 class="danger">{html.escape(t['blocking'])}</h2>
-        <ul>{blocking_html}</ul>
-      </div>
-      <div class="diag-block">
-        <h2 class="warn">{html.escape(t['warnings'])}</h2>
-        <ul>{warnings_html}</ul>
-      </div>
-      <div class="diag-block">
-        <h2>{html.escape(t['actions'])}</h2>
-        <ul>{actions_html}</ul>
-      </div>
-      <div class="diag-block">
-        <h2>{html.escape(t['raw_toml'])}</h2>
-        <details>
-          <summary>{html.escape(t['raw_toml_summary'])}</summary>
-          <pre>{html.escape(raw_toml)}</pre>
-        </details>
-      </div>
-    </aside>
+    <aside class="aside">{aside_contents}</aside>
   </div>
   <script>
     const LLM_MODEL_PRESETS = {preset_json};
+    const INITIAL_PUBLIC_CONFIG = {display_json};
+    const INITIAL_DRAFT_META = {draft_meta_json};
+    const INITIAL_BASE_HASH = {base_hash_json};
+    let draftPublicConfig = JSON.parse(JSON.stringify(INITIAL_PUBLIC_CONFIG));
+    let draftMeta = JSON.parse(JSON.stringify(INITIAL_DRAFT_META));
+    let draftBaseHash = INITIAL_BASE_HASH;
+
+    function deepClone(value) {{
+      return JSON.parse(JSON.stringify(value));
+    }}
+
+    function collectBaseHash() {{
+      const field = document.getElementById("base-hash");
+      if (field && field.value) {{
+        draftBaseHash = field.value;
+      }}
+      return draftBaseHash || "";
+    }}
+
     function assignPath(target, path, value) {{
       const parts = path.split(".");
       let current = target;
@@ -2436,23 +2375,34 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       }}
     }}
 
+    function getControlValue(el) {{
+      if (el.type === "checkbox") {{
+        return el.checked;
+      }}
+      if (el.dataset.kind === "string-list") {{
+        return el.value.split(/\\r?\\n/).map((item) => item.trim()).filter(Boolean);
+      }}
+      if (el.type === "number") {{
+        return el.step === "any" ? parseFloat(el.value || "0") : parseInt(el.value || "0", 10);
+      }}
+      return el.value;
+    }}
+
     function collectPayload() {{
-      const root = {display_json};
-      document.querySelectorAll("[data-path]").forEach((el) => {{
-        const path = el.dataset.path;
-        let value;
-        if (el.type === "checkbox") {{
-          value = el.checked;
-        }} else if (el.dataset.kind === "string-list") {{
-          value = el.value.split(/\\r?\\n/).map((item) => item.trim()).filter(Boolean);
-        }} else if (el.type === "number") {{
-          value = el.step === "any" ? parseFloat(el.value || "0") : parseInt(el.value || "0", 10);
-        }} else {{
-          value = el.value;
-        }}
-        assignPath(root, path, value);
+      return deepClone(draftPublicConfig);
+    }}
+
+    function collectDraftMeta() {{
+      return deepClone(draftMeta);
+    }}
+
+    function applyCardValuesToDraft(card) {{
+      if (!card) {{
+        return;
+      }}
+      card.querySelectorAll("[data-path]").forEach((el) => {{
+        assignPath(draftPublicConfig, el.dataset.path, getControlValue(el));
       }});
-      return root;
     }}
 
     function setControlValue(control, value) {{
@@ -2481,19 +2431,26 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       }});
     }}
 
-    function setCardEditing(card, editing) {{
+    function setCardExpanded(card, expanded) {{
       if (!card) {{
         return;
       }}
       const content = card.querySelector(":scope > .card-content");
       const header = card.querySelector(":scope > .card-header-shell .card-header");
       if (content) {{
-        content.hidden = false;
+        content.hidden = !expanded;
       }}
       if (header) {{
-        header.setAttribute("aria-expanded", "true");
+        header.setAttribute("aria-expanded", expanded ? "true" : "false");
       }}
-      card.classList.remove("is-collapsed");
+      card.classList.toggle("is-collapsed", !expanded);
+    }}
+
+    function setCardEditing(card, editing) {{
+      if (!card) {{
+        return;
+      }}
+      setCardExpanded(card, true);
       card.classList.toggle("is-editing", editing);
       const saveButton = card.querySelector(":scope > .card-header-shell .card-save-button");
       const cancelButton = card.querySelector(":scope > .card-header-shell .card-cancel-button");
@@ -2503,6 +2460,105 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       if (cancelButton) {{
         cancelButton.hidden = !editing;
       }}
+    }}
+
+    function rememberCardState(card) {{
+      return {{
+        expanded: card ? !card.classList.contains("is-collapsed") : false,
+        editing: card ? card.classList.contains("is-editing") : false
+      }};
+    }}
+
+    function restoreCardState(card, state) {{
+      if (!card) {{
+        return;
+      }}
+      const nextState = state || {{ expanded: false, editing: false }};
+      if (nextState.editing) {{
+        setCardEditing(card, true);
+        return;
+      }}
+      setCardEditing(card, false);
+      setCardExpanded(card, !!nextState.expanded);
+    }}
+
+    function replaceCardHtml(card, htmlText) {{
+      const template = document.createElement("template");
+      template.innerHTML = (htmlText || "").trim();
+      const nextCard = template.content.firstElementChild;
+      if (!nextCard) {{
+        throw new Error("Card HTML is empty");
+      }}
+      card.replaceWith(nextCard);
+      return nextCard;
+    }}
+
+    function replaceConfigFormHtml(htmlText) {{
+      const form = document.getElementById("config-form");
+      if (!form) {{
+        throw new Error("Config form not found");
+      }}
+      form.innerHTML = (htmlText || "").trim();
+      return form;
+    }}
+
+    function replaceDiagnosticsHtml(htmlText) {{
+      const aside = document.querySelector(".aside");
+      if (!aside) {{
+        throw new Error("Diagnostics aside not found");
+      }}
+      aside.innerHTML = (htmlText || "").trim();
+      return aside;
+    }}
+
+    function applyPreviewState(result, pageId = "") {{
+      if (result && typeof result.main_html === "string") {{
+        replaceConfigFormHtml(result.main_html);
+      }}
+      if (result && typeof result.aside_html === "string") {{
+        replaceDiagnosticsHtml(result.aside_html);
+      }}
+      if (result && result.public_config) {{
+        draftPublicConfig = deepClone(result.public_config);
+      }}
+      if (result && result.draft_meta) {{
+        draftMeta = deepClone(result.draft_meta);
+      }}
+      if (result && Object.prototype.hasOwnProperty.call(result, "base_hash")) {{
+        draftBaseHash = String(result.base_hash || "");
+      }}
+      const baseHashField = document.getElementById("base-hash");
+      if (baseHashField) {{
+        baseHashField.value = draftBaseHash || "";
+      }}
+      if (result && result.lang) {{
+        syncLanguageControls(result.lang, "toolbar");
+      }}
+      selectConfigPage(pageId || activeConfigPageId());
+      return result;
+    }}
+
+    async function fetchPreviewState(path, fields) {{
+      const response = await fetch(path, {{
+        method: "POST",
+        headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
+        body: new URLSearchParams({{
+          ...fields,
+          base_hash: collectBaseHash(),
+          response_mode: "fragments"
+        }})
+      }});
+      const result = await response.json();
+      if (!response.ok || !result.ok) {{
+        throw new Error((result && result.message) || "Preview request failed");
+      }}
+      return result;
+    }}
+
+    async function postPreviewState(path, fields, pageId = "") {{
+      const result = await fetchPreviewState(path, fields);
+      applyPreviewState(result, pageId);
+      return result;
     }}
 
     function editConfigCard(button) {{
@@ -2520,26 +2576,38 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
 
     async function saveConfigCard(button) {{
       const card = button.closest(".collapsible-card");
-      const lang = document.getElementById("lang-switch").value;
-      const payload = collectPayload();
-      if (!payload.ui) {{
-        payload.ui = {{}};
+      if (!card) {{
+        setToolbarMessage("Config card not found", true);
+        return;
       }}
-      payload.ui.language = lang;
-      const response = await postConfig(payload, lang);
+      const lang = document.getElementById("lang-switch").value;
+      const cardPath = card.dataset.cardPath || "";
+      applyCardValuesToDraft(card);
+      if (!draftPublicConfig.ui) {{
+        draftPublicConfig.ui = {{}};
+      }}
+      draftPublicConfig.ui.language = lang;
+      const response = await fetch("/preview-config-card", {{
+        method: "POST",
+        headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
+        body: new URLSearchParams({{
+          payload: JSON.stringify(collectPayload()),
+          base_hash: collectBaseHash(),
+          draft_meta: JSON.stringify(collectDraftMeta()),
+          card_path: cardPath,
+          lang
+        }})
+      }});
       const result = await response.json();
-      if (!result.ok) {{
+      if (!response.ok || !result.ok) {{
         setToolbarMessage("{html.escape(t['save_failed'])}: " + result.message, true);
         showToast("error", "{html.escape(t['save_failed_title'])}", result.message);
         return;
       }}
-      setToolbarMessage(result.message, false);
-      showToast("success", "{html.escape(t['save_success_title'])}", result.message);
-      let pageId = "";
-      if (card && card.querySelector("[data-path]")) {{
-        pageId = card.querySelector("[data-path]").dataset.path.split(".")[0];
-      }}
-      reloadConfigPage(lang, result.message, 500, pageId);
+      const newCard = replaceCardHtml(card, result.html || "");
+      restoreCardState(newCard, {{ expanded: true, editing: false }});
+      setToolbarMessage(result.message || "{html.escape(t['confirm_success'])}", false);
+      showToast("success", "{html.escape(t['confirm_success_title'])}", result.message || "{html.escape(t['confirm_success'])}");
     }}
 
     async function postConfig(payload, lang) {{
@@ -2547,7 +2615,22 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       return fetch(form.action, {{
         method: "POST",
         headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
-        body: new URLSearchParams({{ payload: JSON.stringify(payload), lang }})
+        body: new URLSearchParams({{
+          payload: JSON.stringify(payload),
+          base_hash: collectBaseHash(),
+          draft_meta: JSON.stringify(collectDraftMeta()),
+          lang
+        }})
+      }});
+    }}
+
+    async function previewDraft(payload, lang, message = "") {{
+      postHtmlNavigation("/preview", {{
+        payload: JSON.stringify(payload),
+        base_hash: collectBaseHash(),
+        draft_meta: JSON.stringify(collectDraftMeta()),
+        lang,
+        message
       }});
     }}
 
@@ -2574,7 +2657,7 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       }}, 2600);
     }}
 
-    function activeConfigPageId(fallbackPageId = "overview") {{
+    function activeConfigPageId(fallbackPageId = "llm-model-library") {{
       const activePage = document.querySelector("[data-config-page].is-active");
       if (activePage && activePage.dataset.configPage) {{
         return activePage.dataset.configPage;
@@ -2610,6 +2693,23 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       navigate();
     }}
 
+    function postHtmlNavigation(path, fields) {{
+      const resolvedFields = Object.assign({{ base_hash: collectBaseHash() }}, fields || {{}});
+      const form = document.createElement("form");
+      form.method = "POST";
+      form.action = path + (window.location.hash || "");
+      form.style.display = "none";
+      Object.entries(resolvedFields).forEach(([key, value]) => {{
+        const input = document.createElement("input");
+        input.type = "hidden";
+        input.name = key;
+        input.value = value == null ? "" : String(value);
+        form.appendChild(input);
+      }});
+      document.body.appendChild(form);
+      form.submit();
+    }}
+
     function syncLanguageControls(lang, source) {{
       const toolbar = document.getElementById("lang-switch");
       const bodyField = document.querySelector('[data-path="ui.language"]');
@@ -2619,6 +2719,136 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       if (bodyField && source !== "body") {{
         bodyField.value = lang;
       }}
+    }}
+
+    const MODEL_LIBRARY_DETAIL_FIELDS = {json.dumps(list(MODEL_LIBRARY_DETAIL_FIELDS), ensure_ascii=False)};
+
+    function fieldByAttr(root, attrName, key) {{
+      return root ? root.querySelector('[' + attrName + '="' + key + '"]') : null;
+    }}
+
+    function setFieldByAttr(root, attrName, key, value) {{
+      const field = fieldByAttr(root, attrName, key);
+      if (!field) {{
+        return;
+      }}
+      if (field.type === "checkbox") {{
+        field.checked = !!value;
+        return;
+      }}
+      if (field.tagName === "SELECT") {{
+        let option = Array.from(field.options).find((item) => item.value === String(value ?? ""));
+        if (!option && value) {{
+          option = new Option(String(value), String(value));
+          field.add(option);
+        }}
+        field.value = value ?? "";
+        return;
+      }}
+      field.value = value ?? "";
+    }}
+
+    function applyProviderFields(root, attrName, provider) {{
+      const entry = provider || {{}};
+      setFieldByAttr(root, attrName, "provider_kind", entry.kind || "openai");
+      setFieldByAttr(root, attrName, "provider_base_url", entry.base_url || "");
+      setFieldByAttr(root, attrName, "provider_api_key_env", entry.api_key_env || "");
+      setFieldByAttr(root, attrName, "provider_compat_mode", entry.compat_mode || "openai");
+      setFieldByAttr(root, attrName, "provider_requires_api_key", entry.requires_api_key !== false);
+      setFieldByAttr(root, attrName, "provider_context_window", entry.context_window || "");
+      const extraHeaders = entry.extra_headers
+        ? (typeof entry.extra_headers === "string" ? entry.extra_headers : JSON.stringify(entry.extra_headers))
+        : "";
+      setFieldByAttr(root, attrName, "provider_extra_headers", extraHeaders);
+    }}
+
+    function collectProviderFields(root, attrName) {{
+      const kind = (fieldByAttr(root, attrName, "provider_kind")?.value || "").trim();
+      const baseUrl = (fieldByAttr(root, attrName, "provider_base_url")?.value || "").trim();
+      const apiKeyEnv = (fieldByAttr(root, attrName, "provider_api_key_env")?.value || "").trim();
+      const compatMode = (fieldByAttr(root, attrName, "provider_compat_mode")?.value || "").trim();
+      const requiresApiKey = !!fieldByAttr(root, attrName, "provider_requires_api_key")?.checked;
+      const contextWindowRaw = (fieldByAttr(root, attrName, "provider_context_window")?.value || "").trim();
+      const extraHeadersRaw = (fieldByAttr(root, attrName, "provider_extra_headers")?.value || "").trim();
+      const provider = {{}};
+      if (kind) {{
+        provider.kind = kind;
+      }}
+      if (baseUrl) {{
+        provider.base_url = baseUrl;
+      }}
+      if (apiKeyEnv) {{
+        provider.api_key_env = apiKeyEnv;
+      }}
+      if (compatMode) {{
+        provider.compat_mode = compatMode;
+      }}
+      provider.requires_api_key = requiresApiKey;
+      if (contextWindowRaw) {{
+        provider.context_window = parseInt(contextWindowRaw, 10);
+      }}
+      if (extraHeadersRaw) {{
+        try {{
+          provider.extra_headers = JSON.parse(extraHeadersRaw);
+        }} catch (error) {{
+          throw new Error("provider_extra_headers must be valid JSON");
+        }}
+      }}
+      return provider;
+    }}
+
+    function applyModelDetails(root, attrName, details) {{
+      MODEL_LIBRARY_DETAIL_FIELDS.forEach((key) => {{
+        const value = Object.prototype.hasOwnProperty.call(details || {{}}, key) ? details[key] : "";
+        setFieldByAttr(root, attrName, key, value);
+      }});
+    }}
+
+    function collectModelDetails(root, attrName) {{
+      const details = {{}};
+      root.querySelectorAll("[" + attrName + "]").forEach((field) => {{
+        const key = field.getAttribute(attrName);
+        if (!key || key.startsWith("provider_") || ["model_id", "model", "label", "api_key", "api_key_env"].includes(key)) {{
+          return;
+        }}
+        if (field.type === "checkbox") {{
+          details[key] = field.checked;
+          return;
+        }}
+        const raw = (field.value || "").trim();
+        if (!raw) {{
+          return;
+        }}
+        if (["temperature"].includes(key)) {{
+          details[key] = parseFloat(raw);
+        }} else if (["max_output_tokens", "timeout", "connect_timeout"].includes(key)) {{
+          details[key] = parseInt(raw, 10);
+        }} else {{
+          details[key] = raw;
+        }}
+      }});
+      return details;
+    }}
+
+    function resetProfileModelDetails(profile) {{
+      MODEL_LIBRARY_DETAIL_FIELDS.forEach((key) => {{
+        delete profile[key];
+      }});
+    }}
+
+    function applySelectedModelToProfile(profile, selected) {{
+      resetProfileModelDetails(profile);
+      delete profile.provider_id;
+      profile.provider = selected.provider || {{}};
+      profile.model = selected.model || "";
+      if (selected.apiKeyEnv) {{
+        profile.api_key_env = selected.apiKeyEnv;
+      }} else {{
+        delete profile.api_key_env;
+      }}
+      Object.entries(selected.details || {{}}).forEach(([key, value]) => {{
+        profile[key] = value;
+      }});
     }}
 
     function getSelectedModelOption(selectId) {{
@@ -2635,48 +2865,59 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       return {{
         select,
         profileId: select.dataset.profileId,
-        providerId: option.dataset.providerId,
+        modelId: option.value,
+        provider: option.dataset.provider ? JSON.parse(option.dataset.provider) : {{}},
         model: option.dataset.model,
+        label: option.dataset.label || option.dataset.model || option.value,
+        apiKeyEnv: option.dataset.apiKeyEnv || "",
         details: option.dataset.details ? JSON.parse(option.dataset.details) : {{}}
       }};
     }}
 
     async function applySelectedProfileModel(selectId) {{
       const selected = getSelectedModelOption(selectId);
-      if (!selected || !selected.profileId || !selected.providerId || !selected.model) {{
+      if (!selected || !selected.profileId || !selected.model) {{
         return;
       }}
       const lang = document.getElementById("lang-switch").value;
-      const payload = collectPayload();
-      if (!payload.llm) {{
-        payload.llm = {{}};
+      const card = selected.select.closest(".collapsible-card");
+      if (!draftPublicConfig.llm) {{
+        draftPublicConfig.llm = {{}};
       }}
-      if (!payload.llm.profiles) {{
-        payload.llm.profiles = {{}};
+      if (!draftPublicConfig.llm.profiles) {{
+        draftPublicConfig.llm.profiles = {{}};
       }}
-      if (!payload.llm.profiles[selected.profileId]) {{
-        payload.llm.profiles[selected.profileId] = {{}};
+      if (!draftPublicConfig.llm.profiles[selected.profileId]) {{
+        draftPublicConfig.llm.profiles[selected.profileId] = {{}};
       }}
-      payload.llm.profiles[selected.profileId].provider_id = selected.providerId;
-      payload.llm.profiles[selected.profileId].model = selected.model;
-      Object.entries(selected.details || {{}}).forEach(([key, value]) => {{
-        payload.llm.profiles[selected.profileId][key] = value;
+      applySelectedModelToProfile(draftPublicConfig.llm.profiles[selected.profileId], selected);
+      const state = rememberCardState(card);
+      const response = await fetch("/preview-llm-profile-card", {{
+        method: "POST",
+        headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
+        body: new URLSearchParams({{
+          payload: JSON.stringify(collectPayload()),
+          base_hash: collectBaseHash(),
+          draft_meta: JSON.stringify(collectDraftMeta()),
+          profile_id: selected.profileId,
+          lang
+        }})
       }});
-      const response = await postConfig(payload, lang);
       const result = await response.json();
       if (!result.ok) {{
-        setToolbarMessage(result.message, true);
+        setToolbarMessage("{html.escape(t['save_failed'])}: " + result.message, true);
         showToast("error", "{html.escape(t['save_failed_title'])}", result.message);
         return;
       }}
-      setToolbarMessage(result.message, false);
-      showToast("success", "{html.escape(t['save_success_title'])}", result.message);
-      reloadConfigPage(lang, result.message, 500);
+      const newCard = replaceCardHtml(card, result.html || "");
+      restoreCardState(newCard, state);
+      setToolbarMessage(result.message || "{html.escape(t['confirm_success'])}", false);
+      showToast("success", "{html.escape(t['confirm_success_title'])}", result.message || "{html.escape(t['confirm_success'])}");
     }}
 
     async function testSelectedProfileModel(selectId) {{
       const selected = getSelectedModelOption(selectId);
-      if (!selected || !selected.profileId || !selected.providerId || !selected.model) {{
+      if (!selected || !selected.profileId || !selected.model) {{
         return;
       }}
       const lang = document.getElementById("lang-switch").value;
@@ -2690,19 +2931,22 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       if (!payload.llm.profiles[selected.profileId]) {{
         payload.llm.profiles[selected.profileId] = {{}};
       }}
-      payload.llm.profiles[selected.profileId].provider_id = selected.providerId;
-      payload.llm.profiles[selected.profileId].model = selected.model;
-      Object.entries(selected.details || {{}}).forEach(([key, value]) => {{
-        payload.llm.profiles[selected.profileId][key] = value;
-      }});
+      applySelectedModelToProfile(payload.llm.profiles[selected.profileId], selected);
       const response = await fetch("/test-llm", {{
         method: "POST",
         headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
-        body: new URLSearchParams({{ payload: JSON.stringify(payload), profile_id: selected.profileId, lang }})
+        body: new URLSearchParams({{
+          payload: JSON.stringify(payload),
+          base_hash: collectBaseHash(),
+          draft_meta: JSON.stringify(collectDraftMeta()),
+          profile_id: selected.profileId,
+          lang
+        }})
       }});
       const result = await response.json();
       const title = result.ok ? "{html.escape(t['test_success_title'])}" : "{html.escape(t['test_failed_title'])}";
-      const detail = selected.profileId + " / " + (result.model || selected.model) + ": " + result.message;
+      const routeDetail = [result.provider_kind || selected.provider.kind || "", result.base_url || "", result.api_key_source || ""].filter(Boolean).join(" · ");
+      const detail = selected.profileId + " / " + (result.model || selected.model) + (routeDetail ? " [" + routeDetail + "]" : "") + ": " + result.message;
       setToolbarMessage(detail, !result.ok);
       showToast(result.ok ? "success" : "error", title, detail);
     }}
@@ -2735,7 +2979,7 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
 
     function activateInitialConfigPage() {{
       const fromHash = window.location.hash.replace(/^#section-/, "");
-      selectConfigPage(fromHash || "overview");
+      selectConfigPage(fromHash || "llm-model-library");
     }}
 
     function toggleSection(button) {{
@@ -2770,22 +3014,21 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       const card = document.getElementById("add-llm-profile-card");
       const payload = collectPayload();
       const profiles = payload.llm && payload.llm.profiles ? payload.llm.profiles : {{}};
-      const sourceProfile = profiles[sourceProfileId] || {{}};
       const selected = selectId ? getSelectedModelOption(selectId) : null;
       if (!card) {{
         return;
       }}
       const profileIdField = card.querySelector('[data-add-profile-field="profile_id"]');
-      const providerField = card.querySelector('[data-add-profile-field="provider_id"]');
-      const modelField = card.querySelector('[data-add-profile-field="model"]');
+      const sourceField = card.querySelector('[data-add-profile-field="source_profile_id"]');
+      const modelField = document.getElementById("add-llm-profile-model");
       if (profileIdField) {{
         profileIdField.value = nextClonedProfileId(sourceProfileId, profiles);
       }}
-      if (providerField) {{
-        providerField.value = (selected && selected.providerId) || sourceProfile.provider_id || "";
+      if (sourceField) {{
+        sourceField.value = sourceProfileId;
       }}
       if (modelField) {{
-        modelField.value = (selected && selected.model) || sourceProfile.model || "";
+        modelField.value = (selected && selected.modelId) || "";
       }}
       card.hidden = false;
       card.scrollIntoView({{ behavior: "smooth", block: "nearest" }});
@@ -2803,6 +3046,10 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
           field.value = "";
         }}
       }});
+      const modelField = document.getElementById("add-llm-profile-model");
+      if (modelField) {{
+        modelField.selectedIndex = 0;
+      }}
       card.hidden = true;
     }}
 
@@ -2810,32 +3057,75 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       const card = document.getElementById("add-llm-profile-card");
       const lang = document.getElementById("lang-switch").value;
       const profileId = (card.querySelector('[data-add-profile-field="profile_id"]')?.value || "").trim();
-      const providerId = (card.querySelector('[data-add-profile-field="provider_id"]')?.value || "").trim();
-      const model = (card.querySelector('[data-add-profile-field="model"]')?.value || "").trim();
-      if (!profileId || !providerId || !model) {{
-        setToolbarMessage("{html.escape(t['save_failed'])}: profile_id, provider_id and model are required", true);
+      const sourceProfileId = (card.querySelector('[data-add-profile-field="source_profile_id"]')?.value || "").trim();
+      const modelId = (document.getElementById("add-llm-profile-model")?.value || "").trim();
+      if (!profileId || !modelId) {{
+        setToolbarMessage("{html.escape(t['save_failed'])}: profile_id and model_id are required", true);
         return;
       }}
-      const response = await fetch("/add-llm-profile", {{
-        method: "POST",
-        headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
-        body: new URLSearchParams({{ profile_id: profileId, provider_id: providerId, model, lang }})
-      }});
-      const result = await response.json();
-      if (!result.ok) {{
-        setToolbarMessage(result.message, true);
-        showToast("error", "{html.escape(t['save_failed_title'])}", result.message);
-        return;
+      try {{
+        const result = await postPreviewState(
+          "/draft-add-llm-profile",
+          {{
+            payload: JSON.stringify(collectPayload()),
+            draft_meta: JSON.stringify(collectDraftMeta()),
+            profile_id: profileId,
+            source_profile_id: sourceProfileId,
+            model_id: modelId,
+            lang
+          }},
+          activeConfigPageId("llm"),
+        );
+        setToolbarMessage(result.message || "{html.escape(t['confirm_success'])}", false);
+        showToast("success", "{html.escape(t['confirm_success_title'])}", result.message || "{html.escape(t['confirm_success'])}");
+      }} catch (error) {{
+        setToolbarMessage("{html.escape(t['save_failed'])}: " + error.message, true);
+        showToast("error", "{html.escape(t['save_failed_title'])}", error.message);
       }}
-      setToolbarMessage(result.message, false);
-      showToast("success", "{html.escape(t['save_success_title'])}", result.message);
-      reloadConfigPage(lang, result.message, 500);
+    }}
+
+    function resetInlineLlmModelFields() {{
+      const card = document.getElementById("add-llm-model-card");
+      if (card) {{
+        const preset = card.querySelector("[data-add-model-preset]");
+        if (preset) {{
+          preset.value = "";
+        }}
+        card.querySelectorAll("[data-add-model-field]").forEach((field) => {{
+          if (field.type === "checkbox") {{
+            field.checked = field.hasAttribute("checked");
+            return;
+          }}
+          if (field.tagName === "SELECT") {{
+            field.selectedIndex = 0;
+          }} else {{
+            field.value = "";
+          }}
+        }});
+        applyProviderFields(card, "data-add-model-field", {{ kind: "openai", compat_mode: "openai", requires_api_key: true }});
+        setAddModelField("strict_compatibility", true);
+        setAddModelField("streaming", true);
+        setAddModelField("discovery_enabled", true);
+      }}
     }}
 
     function addLlmModel() {{
       const card = document.getElementById("add-llm-model-card");
       if (card) {{
         card.hidden = false;
+      }}
+    }}
+
+    function addCustomLlmModel() {{
+      const card = document.getElementById("add-llm-model-card");
+      if (!card) {{
+        return;
+      }}
+      card.hidden = false;
+      resetInlineLlmModelFields();
+      const modelIdField = card.querySelector('[data-add-model-field="model_id"]');
+      if (modelIdField) {{
+        modelIdField.focus();
       }}
     }}
 
@@ -2863,11 +3153,13 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
     function applyLlmModelPreset(presetId) {{
       const preset = LLM_MODEL_PRESETS[presetId];
       if (!preset) {{
+        resetInlineLlmModelFields();
         return;
       }}
       const modelDefaults = preset.model || {{}};
+      const providerDefaults = preset.provider || {{}};
       setAddModelField("model_id", preset.model_id || "");
-      setAddModelField("provider_id", preset.provider_id || "");
+      applyProviderFields(document.getElementById("add-llm-model-card"), "data-add-model-field", providerDefaults);
       setAddModelField("model", modelDefaults.model || "");
       setAddModelField("label", modelDefaults.label || preset.label || modelDefaults.model || "");
       setAddModelField("api_key_env", "");
@@ -2875,6 +3167,13 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       setAddModelField("contract", modelDefaults.contract || "tool_chat");
       setAddModelField("reasoning_state_field", modelDefaults.reasoning_state_field || "");
       setAddModelField("strict_compatibility", modelDefaults.strict_compatibility !== false);
+      setAddModelField("streaming", modelDefaults.streaming !== false);
+      setAddModelField("discovery_enabled", modelDefaults.discovery_enabled !== false);
+      setAddModelField("tool_calling_mode", modelDefaults.tool_calling_mode || "auto");
+      setAddModelField("temperature", modelDefaults.temperature ?? "");
+      setAddModelField("max_output_tokens", modelDefaults.max_output_tokens ?? "");
+      setAddModelField("timeout", modelDefaults.timeout ?? "");
+      setAddModelField("connect_timeout", modelDefaults.connect_timeout ?? "");
       setAddModelField("api_key", "");
     }}
 
@@ -2883,21 +3182,7 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       if (!card) {{
         return;
       }}
-      const preset = card.querySelector("[data-add-model-preset]");
-      if (preset) {{
-        preset.value = "";
-      }}
-      card.querySelectorAll("[data-add-model-field]").forEach((field) => {{
-        if (field.type === "checkbox") {{
-          field.checked = field.hasAttribute("checked");
-          return;
-        }}
-        if (field.tagName === "SELECT") {{
-          field.selectedIndex = 0;
-        }} else {{
-          field.value = "";
-        }}
-      }});
+      resetInlineLlmModelFields();
       card.hidden = true;
     }}
 
@@ -2906,52 +3191,46 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       const lang = document.getElementById("lang-switch").value;
       const presetId = (card.querySelector("[data-add-model-preset]")?.value || "").trim();
       const modelId = (card.querySelector('[data-add-model-field="model_id"]')?.value || "").trim();
-      const providerId = (card.querySelector('[data-add-model-field="provider_id"]')?.value || "").trim();
       const model = (card.querySelector('[data-add-model-field="model"]')?.value || "").trim();
       const label = (card.querySelector('[data-add-model-field="label"]')?.value || model).trim() || model;
-      const details = {{}};
-      card.querySelectorAll("[data-add-model-field]").forEach((field) => {{
-        const key = field.dataset.addModelField;
-        if (["model_id", "provider_id", "model", "label", "api_key"].includes(key)) {{
-          return;
-        }}
-        if (field.type === "checkbox") {{
-          details[key] = field.checked;
-          return;
-        }}
-        const raw = (field.value || "").trim();
-        if (!raw) {{
-          return;
-        }}
-        if (["temperature"].includes(key)) {{
-          details[key] = parseFloat(raw);
-        }} else if (["max_output_tokens", "timeout", "connect_timeout"].includes(key)) {{
-          details[key] = parseInt(raw, 10);
-        }} else {{
-          details[key] = raw;
-        }}
-      }});
-      const apiKeyEnv = String(details.api_key_env || "").trim();
-      delete details.api_key_env;
+      let provider;
+      try {{
+        provider = collectProviderFields(card, "data-add-model-field");
+      }} catch (error) {{
+        setToolbarMessage(error.message, true);
+        return;
+      }}
+      const details = collectModelDetails(card, "data-add-model-field");
+      const apiKeyEnv = String(fieldByAttr(card, "data-add-model-field", "api_key_env")?.value || "").trim();
       const apiKey = (card.querySelector('[data-add-model-field="api_key"]')?.value || "").trim();
-      if (!modelId || !providerId || !model) {{
-        setToolbarMessage("{html.escape(t['save_failed'])}: model_id, provider_id and model are required", true);
+      if (!modelId || !provider.kind || !model) {{
+        setToolbarMessage("{html.escape(t['save_failed'])}: model_id, provider.kind and model are required", true);
         return;
       }}
-      const response = await fetch("/add-llm-model", {{
-        method: "POST",
-        headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
-        body: new URLSearchParams({{ preset_id: presetId, model_id: modelId, provider_id: providerId, model, label, details: JSON.stringify(details), api_key_env: apiKeyEnv, api_key: apiKey, lang }})
-      }});
-      const result = await response.json();
-      if (!result.ok) {{
-        setToolbarMessage(result.message, true);
-        showToast("error", "{html.escape(t['save_failed_title'])}", result.message);
-        return;
+      try {{
+        const result = await postPreviewState(
+          "/draft-add-llm-model",
+          {{
+            payload: JSON.stringify(collectPayload()),
+            draft_meta: JSON.stringify(collectDraftMeta()),
+            preset_id: presetId,
+            model_id: modelId,
+            provider: JSON.stringify(provider),
+            model,
+            label,
+            details: JSON.stringify(details),
+            api_key_env: apiKeyEnv,
+            api_key: apiKey,
+            lang
+          }},
+          activeConfigPageId("llm-model-library"),
+        );
+        setToolbarMessage(result.message || "{html.escape(t['confirm_success'])}", false);
+        showToast("success", "{html.escape(t['confirm_success_title'])}", result.message || "{html.escape(t['confirm_success'])}");
+      }} catch (error) {{
+        setToolbarMessage("{html.escape(t['save_failed'])}: " + error.message, true);
+        showToast("error", "{html.escape(t['save_failed_title'])}", error.message);
       }}
-      setToolbarMessage(result.message, false);
-      showToast("success", "{html.escape(t['save_success_title'])}", result.message);
-      reloadConfigPage(lang, result.message, 500);
     }}
 
     function editLlmModel(button) {{
@@ -2960,18 +3239,19 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
         setToolbarMessage("Model card not found", true);
         return;
       }}
-      const providerField = card.querySelector('[data-edit-field="provider_id"]');
       const modelField = card.querySelector('[data-edit-field="model"]');
       const labelField = card.querySelector('[data-edit-field="label"]');
-      if (providerField) {{
-        providerField.value = card.dataset.providerId || providerField.value;
-      }}
+      const provider = card.dataset.provider ? JSON.parse(card.dataset.provider) : {{}};
+      const details = card.dataset.details ? JSON.parse(card.dataset.details) : {{}};
+      applyProviderFields(card, "data-edit-field", provider);
+      applyModelDetails(card, "data-edit-field", details);
       if (modelField) {{
         modelField.value = card.dataset.model || "";
       }}
       if (labelField) {{
         labelField.value = card.dataset.label || card.dataset.model || "";
       }}
+      setFieldByAttr(card, "data-edit-field", "api_key_env", card.dataset.apiKeyEnv || "");
       const editor = card.querySelector(".model-library-edit");
       if (editor) {{
         editor.hidden = false;
@@ -3003,51 +3283,47 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       }}
       const modelId = card.dataset.modelLibraryId;
       const lang = document.getElementById("lang-switch").value;
-      const providerId = (card.querySelector('[data-edit-field="provider_id"]')?.value || "").trim();
       const model = (card.querySelector('[data-edit-field="model"]')?.value || "").trim();
       const label = (card.querySelector('[data-edit-field="label"]')?.value || model).trim() || model;
       const apiKey = (card.querySelector("[data-edit-api-key]")?.value || "").trim();
       const clearApiKey = card.querySelector("[data-clear-api-key]")?.checked ? "1" : "";
-      const details = {{}};
-      card.querySelectorAll("[data-edit-field]").forEach((field) => {{
-        const key = field.dataset.editField;
-        if (["provider_id", "model", "label"].includes(key)) {{
-          return;
-        }}
-        if (field.type === "checkbox") {{
-          details[key] = field.checked;
-          return;
-        }}
-        const raw = (field.value || "").trim();
-        if (!raw) {{
-          return;
-        }}
-        if (["temperature"].includes(key)) {{
-          details[key] = parseFloat(raw);
-        }} else if (["max_output_tokens", "timeout", "connect_timeout"].includes(key)) {{
-          details[key] = parseInt(raw, 10);
-        }} else {{
-          details[key] = raw;
-        }}
-      }});
-      if (!providerId || !model) {{
-        setToolbarMessage("{html.escape(t['save_failed'])}: provider_id and model are required", true);
+      let provider;
+      try {{
+        provider = collectProviderFields(card, "data-edit-field");
+      }} catch (error) {{
+        setToolbarMessage(error.message, true);
         return;
       }}
-      const response = await fetch("/update-llm-model", {{
-        method: "POST",
-        headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
-        body: new URLSearchParams({{ model_id: modelId, provider_id: providerId, model, label, details: JSON.stringify(details), api_key: apiKey, clear_api_key: clearApiKey, lang }})
-      }});
-      const result = await response.json();
-      if (!result.ok) {{
-        setToolbarMessage(result.message, true);
-        showToast("error", "{html.escape(t['save_failed_title'])}", result.message);
+      const details = collectModelDetails(card, "data-edit-field");
+      const apiKeyEnv = String(fieldByAttr(card, "data-edit-field", "api_key_env")?.value || "").trim();
+      if (!provider.kind || !model) {{
+        setToolbarMessage("{html.escape(t['save_failed'])}: provider.kind and model are required", true);
         return;
       }}
-      setToolbarMessage(result.message, false);
-      showToast("success", "{html.escape(t['save_success_title'])}", result.message);
-      reloadConfigPage(lang, result.message, 500, "llm-model-library");
+      try {{
+        const result = await postPreviewState(
+          "/draft-update-llm-model",
+          {{
+            payload: JSON.stringify(collectPayload()),
+            draft_meta: JSON.stringify(collectDraftMeta()),
+            model_id: modelId,
+            provider: JSON.stringify(provider),
+            model,
+            label,
+            details: JSON.stringify(details),
+            api_key_env: apiKeyEnv,
+            api_key: apiKey,
+            clear_api_key: clearApiKey,
+            lang
+          }},
+          activeConfigPageId("llm-model-library"),
+        );
+        setToolbarMessage(result.message || "{html.escape(t['confirm_success'])}", false);
+        showToast("success", "{html.escape(t['confirm_success_title'])}", result.message || "{html.escape(t['confirm_success'])}");
+      }} catch (error) {{
+        setToolbarMessage("{html.escape(t['save_failed'])}: " + error.message, true);
+        showToast("error", "{html.escape(t['save_failed_title'])}", error.message);
+      }}
     }}
 
     function deleteLlmModel(modelId) {{
@@ -3077,20 +3353,23 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       if (!modelId) {{
         return;
       }}
-      const response = await fetch("/delete-llm-model", {{
-        method: "POST",
-        headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
-        body: new URLSearchParams({{ model_id: modelId, lang }})
-      }});
-      const result = await response.json();
-      if (!result.ok) {{
-        setToolbarMessage(result.message, true);
-        showToast("error", "{html.escape(t['save_failed_title'])}", result.message);
-        return;
+      try {{
+        const result = await postPreviewState(
+          "/draft-delete-llm-model",
+          {{
+            payload: JSON.stringify(collectPayload()),
+            draft_meta: JSON.stringify(collectDraftMeta()),
+            model_id: modelId,
+            lang
+          }},
+          activeConfigPageId("llm-model-library"),
+        );
+        setToolbarMessage(result.message || "{html.escape(t['confirm_success'])}", false);
+        showToast("success", "{html.escape(t['confirm_success_title'])}", result.message || "{html.escape(t['confirm_success'])}");
+      }} catch (error) {{
+        setToolbarMessage("{html.escape(t['save_failed'])}: " + error.message, true);
+        showToast("error", "{html.escape(t['save_failed_title'])}", error.message);
       }}
-      setToolbarMessage(result.message, false);
-      showToast("success", "{html.escape(t['save_success_title'])}", result.message);
-      reloadConfigPage(lang, result.message, 500);
     }}
 
     async function testProfileLlm(profileId) {{
@@ -3099,7 +3378,13 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       const response = await fetch("/test-llm", {{
         method: "POST",
         headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
-        body: new URLSearchParams({{ payload: JSON.stringify(payload), profile_id: profileId, lang }})
+        body: new URLSearchParams({{
+          payload: JSON.stringify(payload),
+          base_hash: collectBaseHash(),
+          draft_meta: JSON.stringify(collectDraftMeta()),
+          profile_id: profileId,
+          lang
+        }})
       }});
       const result = await response.json();
       const title = result.ok ? "{html.escape(t['test_success_title'])}" : "{html.escape(t['test_failed_title'])}";
@@ -3119,7 +3404,13 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
       const response = await fetch("/test-llm", {{
         method: "POST",
         headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
-        body: new URLSearchParams({{ payload: JSON.stringify(payload), profile_id: select.value, lang }})
+        body: new URLSearchParams({{
+          payload: JSON.stringify(payload),
+          base_hash: collectBaseHash(),
+          draft_meta: JSON.stringify(collectDraftMeta()),
+          profile_id: select.value,
+          lang
+        }})
       }});
       const result = await response.json();
       const title = result.ok ? "{html.escape(t['test_success_title'])}" : "{html.escape(t['test_failed_title'])}";
@@ -3129,7 +3420,11 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
     }}
 
     function switchLang(lang) {{
-      reloadConfigPage(lang);
+      if (!draftPublicConfig.ui) {{
+        draftPublicConfig.ui = {{}};
+      }}
+      draftPublicConfig.ui.language = lang;
+      previewDraft(draftPublicConfig, lang);
     }}
 
     async function saveConfig() {{
@@ -3155,6 +3450,126 @@ def render_panel_html(public_config: dict, message: str = "", lang: str | None =
   </script>
 </body>
 </html>"""
+
+
+def _submitted_public_config(form: dict, old_public: dict) -> dict:
+    payload = form.get("payload", [""])[0]
+    submitted = json.loads(payload) if payload else copy.deepcopy(old_public)
+    return preserve_secret_blanks(submitted, old_public)
+
+
+def _submitted_base_hash(form: dict) -> str:
+    return str(form.get("base_hash", [""])[0] or "").strip()
+
+
+def _resolve_base_hash(form: dict, old_public: dict) -> str:
+    submitted = _submitted_base_hash(form)
+    return submitted or public_config_hash(old_public)
+
+
+def _submitted_response_mode(form: dict) -> str:
+    return str(form.get("response_mode", [""])[0] or "").strip().lower()
+
+
+def _wants_fragment_preview(form: dict) -> bool:
+    return _submitted_response_mode(form) == "fragments"
+
+
+def _assert_base_hash_matches(base_hash: str, old_public: dict, lang: str) -> str:
+    current_hash = public_config_hash(old_public)
+    expected_hash = str(base_hash or "").strip()
+    if expected_hash and expected_hash != current_hash:
+        raise ConfigConflictError(I18N[lang]["stale_config"])
+    return current_hash
+
+
+def _submitted_draft_meta(form: dict) -> dict[str, object]:
+    raw = form.get("draft_meta", ["{}"])[0] or "{}"
+    return _normalize_draft_meta(json.loads(raw))
+
+
+def _with_pending_api_key(meta: dict[str, object], api_key_env: str, api_key: str) -> dict[str, object]:
+    payload = _normalize_draft_meta(meta)
+    env_name = str(api_key_env or "").strip()
+    if not env_name:
+        return payload
+    pending = payload["pending_api_keys"]
+    cleared = payload["pending_cleared_api_keys"]
+    if isinstance(pending, dict):
+        pending[env_name] = api_key
+    if isinstance(cleared, list):
+        payload["pending_cleared_api_keys"] = [item for item in cleared if item != env_name]
+    return payload
+
+
+def _with_cleared_api_key(meta: dict[str, object], api_key_env: str) -> dict[str, object]:
+    payload = _normalize_draft_meta(meta)
+    env_name = str(api_key_env or "").strip()
+    if not env_name:
+        return payload
+    pending = payload["pending_api_keys"]
+    cleared = payload["pending_cleared_api_keys"]
+    if isinstance(pending, dict):
+        pending.pop(env_name, None)
+    if isinstance(cleared, list) and env_name not in cleared:
+        cleared.append(env_name)
+    return payload
+
+
+def _drop_api_key_state(meta: dict[str, object], api_key_env: str) -> dict[str, object]:
+    payload = _normalize_draft_meta(meta)
+    env_name = str(api_key_env or "").strip()
+    if not env_name:
+        return payload
+    pending = payload["pending_api_keys"]
+    cleared = payload["pending_cleared_api_keys"]
+    if isinstance(pending, dict):
+        pending.pop(env_name, None)
+    if isinstance(cleared, list):
+        payload["pending_cleared_api_keys"] = [item for item in cleared if item != env_name]
+    return payload
+
+
+def _render_preview_html(
+    public_config: dict,
+    lang: str,
+    draft_meta: dict[str, object],
+    message: str,
+    base_hash: str,
+) -> str:
+    return render_panel_html(public_config, message, lang, draft_meta, base_hash=base_hash)
+
+
+def _render_preview_state_payload(
+    public_config: dict,
+    lang: str,
+    draft_meta: dict[str, object],
+    message: str,
+    base_hash: str,
+) -> dict[str, object]:
+    normalized_draft_meta = _normalize_draft_meta(draft_meta)
+    updated_public_config = _with_config_language(public_config, lang)
+    resolved_base_hash = str(base_hash or public_config_hash(public_config)).strip()
+    return {
+        "ok": True,
+        "message": message,
+        "lang": lang,
+        "base_hash": resolved_base_hash,
+        "public_config": updated_public_config,
+        "draft_meta": normalized_draft_meta,
+        "main_html": _render_config_form_contents(
+            updated_public_config,
+            message,
+            lang,
+            normalized_draft_meta,
+            resolved_base_hash,
+        ),
+        "aside_html": _render_diagnostics_aside(updated_public_config, lang),
+    }
+
+
+def _render_profile_card_preview(public_config: dict, profile_id: str, lang: str) -> str:
+    return _render_llm_profile_card(public_config, profile_id, lang)
 
 
 class ConfigPanelHandler(BaseHTTPRequestHandler):
@@ -3187,15 +3602,29 @@ class ConfigPanelHandler(BaseHTTPRequestHandler):
         lang = resolve_lang(params.get("lang", [DEFAULT_LANG])[0])
         public_config = load_public_config()
         effective_lang = lang if "lang" in params else get_config_language(public_config)
-        self._send_html(render_panel_html(public_config, message, effective_lang))
+        self._send_html(
+            render_panel_html(
+                public_config,
+                message,
+                effective_lang,
+                base_hash=public_config_hash(public_config),
+            )
+        )
 
     def do_POST(self) -> None:
         if self.path not in {
+            "/preview",
+            "/preview-config-card",
+            "/preview-llm-profile-card",
             "/save",
             "/add-llm-profile",
             "/add-llm-model",
             "/update-llm-model",
             "/delete-llm-model",
+            "/draft-add-llm-profile",
+            "/draft-add-llm-model",
+            "/draft-update-llm-model",
+            "/draft-delete-llm-model",
             "/test-llm",
         }:
             self._send_json({"ok": False, "message": "Not found"}, status=404)
@@ -3204,29 +3633,104 @@ class ConfigPanelHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length).decode("utf-8")
         form = parse_qs(raw)
         lang = resolve_lang(form.get("lang", [DEFAULT_LANG])[0])
+        fragment_preview = _wants_fragment_preview(form)
+        old_public: dict = {}
+        current_base_hash = ""
+        submitted_base_hash = _submitted_base_hash(form)
         try:
-            if self.path == "/add-llm-profile":
-                old_public = load_public_config()
-                updated = add_llm_profile(
-                    old_public,
-                    form.get("profile_id", [""])[0],
-                    form.get("provider_id", [""])[0],
-                    form.get("model", [""])[0],
+            old_public = load_public_config()
+            current_base_hash = public_config_hash(old_public)
+            if self.path == "/preview":
+                submitted = _submitted_public_config(form, old_public)
+                submitted.setdefault("ui", {})
+                if isinstance(submitted["ui"], dict):
+                    submitted["ui"]["language"] = lang
+                draft_meta = _submitted_draft_meta(form)
+                message = form.get("message", [""])[0]
+                self._send_html(
+                    _render_preview_html(
+                        submitted,
+                        lang,
+                        draft_meta,
+                        message,
+                        _resolve_base_hash(form, old_public),
+                    )
                 )
+                return
+
+            if self.path == "/preview-config-card":
+                submitted = _submitted_public_config(form, old_public)
+                card_path = form.get("card_path", [""])[0]
+                self._send_json(
+                    {
+                        "ok": True,
+                        "html": _render_config_card_preview(submitted, card_path, lang),
+                        "message": I18N[lang]["confirm_success"],
+                    }
+                )
+                return
+
+            if self.path == "/preview-llm-profile-card":
+                submitted = _submitted_public_config(form, old_public)
+                profile_id = form.get("profile_id", [""])[0]
+                self._send_json(
+                    {
+                        "ok": True,
+                        "html": _render_profile_card_preview(submitted, profile_id, lang),
+                        "message": I18N[lang]["confirm_success"],
+                    }
+                )
+                return
+
+            if self.path in {"/add-llm-profile", "/draft-add-llm-profile"}:
+                current = _submitted_public_config(form, old_public) if self.path.startswith("/draft-") else old_public
+                updated = add_llm_profile(
+                    current,
+                    form.get("profile_id", [""])[0],
+                    source_profile_id=form.get("source_profile_id", [""])[0],
+                    model_id=form.get("model_id", [""])[0],
+                )
+                if self.path.startswith("/draft-"):
+                    draft_meta = _submitted_draft_meta(form)
+                    if fragment_preview:
+                        self._send_json(
+                            _render_preview_state_payload(
+                                updated,
+                                lang,
+                                draft_meta,
+                                I18N[lang]["confirm_success"],
+                                _resolve_base_hash(form, old_public),
+                            )
+                        )
+                    else:
+                        self._send_html(
+                            _render_preview_html(
+                                updated,
+                                lang,
+                                draft_meta,
+                                I18N[lang]["confirm_success"],
+                                _resolve_base_hash(form, old_public),
+                            )
+                        )
+                    return
+                _assert_base_hash_matches(submitted_base_hash, old_public, lang)
                 save_public_config(updated)
                 self._send_json({"ok": True, "message": I18N[lang]["save_success"]})
                 return
 
-            if self.path == "/add-llm-model":
-                old_public = load_public_config()
+            if self.path in {"/add-llm-model", "/draft-add-llm-model"}:
+                current = _submitted_public_config(form, old_public) if self.path.startswith("/draft-") else old_public
+                draft_meta = _submitted_draft_meta(form) if self.path.startswith("/draft-") else _empty_draft_meta()
                 preset_id = form.get("preset_id", [""])[0]
                 details = json.loads(form.get("details", ["{}"])[0] or "{}")
+                provider = json.loads(form.get("provider", ["{}"])[0] or "{}")
+                before_keys = set(current.get("llm", {}).get("model_library", {}).keys()) if isinstance(current.get("llm", {}), dict) else set()
                 if preset_id:
                     updated = apply_llm_model_preset(
-                        old_public,
+                        current,
                         preset_id,
                         form.get("model_id", [""])[0],
-                        form.get("provider_id", [""])[0],
+                        provider,
                         form.get("model", [""])[0],
                         form.get("label", [""])[0],
                         details,
@@ -3234,66 +3738,209 @@ class ConfigPanelHandler(BaseHTTPRequestHandler):
                     )
                 else:
                     updated = add_llm_model(
-                        old_public,
+                        current,
                         form.get("model_id", [""])[0],
-                        form.get("provider_id", [""])[0],
+                        provider,
                         form.get("model", [""])[0],
                         form.get("label", [""])[0],
                         details,
                         api_key_env=form.get("api_key_env", [""])[0],
                     )
-                if form.get("api_key", [""])[0]:
-                    set_llm_model_api_key(updated, form.get("model_id", [""])[0], form.get("api_key", [""])[0])
+                after_library = updated.get("llm", {}).get("model_library", {}) if isinstance(updated.get("llm", {}), dict) else {}
+                resolved_model_id = form.get("model_id", [""])[0].strip()
+                if not resolved_model_id and isinstance(after_library, dict):
+                    created = [key for key in after_library.keys() if key not in before_keys]
+                    if created:
+                        resolved_model_id = str(created[0])
+                api_key_env = (
+                    str(after_library.get(resolved_model_id, {}).get("api_key_env", "")).strip()
+                    if isinstance(after_library, dict)
+                    else ""
+                )
+                api_key = form.get("api_key", [""])[0]
+                if self.path.startswith("/draft-"):
+                    if api_key and api_key_env:
+                        draft_meta = _with_pending_api_key(draft_meta, api_key_env, api_key)
+                    if fragment_preview:
+                        self._send_json(
+                            _render_preview_state_payload(
+                                updated,
+                                lang,
+                                draft_meta,
+                                I18N[lang]["confirm_success"],
+                                _resolve_base_hash(form, old_public),
+                            )
+                        )
+                    else:
+                        self._send_html(
+                            _render_preview_html(
+                                updated,
+                                lang,
+                                draft_meta,
+                                I18N[lang]["confirm_success"],
+                                _resolve_base_hash(form, old_public),
+                            )
+                        )
+                    return
+                _assert_base_hash_matches(submitted_base_hash, old_public, lang)
+                if api_key and resolved_model_id:
+                    set_llm_model_api_key(updated, resolved_model_id, api_key)
                 save_public_config(updated)
                 self._send_json({"ok": True, "message": I18N[lang]["save_success"]})
                 return
 
-            if self.path == "/update-llm-model":
-                old_public = load_public_config()
+            if self.path in {"/update-llm-model", "/draft-update-llm-model"}:
+                current = _submitted_public_config(form, old_public) if self.path.startswith("/draft-") else old_public
+                draft_meta = _submitted_draft_meta(form) if self.path.startswith("/draft-") else _empty_draft_meta()
+                model_id = form.get("model_id", [""])[0]
+                current_library = current.get("llm", {}).get("model_library", {}) if isinstance(current.get("llm", {}), dict) else {}
+                old_item = current_library.get(model_id, {}) if isinstance(current_library, dict) else {}
+                old_env = str(old_item.get("api_key_env", "")).strip() if isinstance(old_item, dict) else ""
                 details = json.loads(form.get("details", ["{}"])[0] or "{}")
+                provider = json.loads(form.get("provider", ["{}"])[0] or "{}")
                 updated = update_llm_model(
-                    old_public,
-                    form.get("model_id", [""])[0],
-                    form.get("provider_id", [""])[0],
+                    current,
+                    model_id,
+                    provider,
                     form.get("model", [""])[0],
                     form.get("label", [""])[0],
                     details,
+                    form.get("api_key_env", [""])[0],
                 )
+                updated_library = updated.get("llm", {}).get("model_library", {}) if isinstance(updated.get("llm", {}), dict) else {}
+                new_item = updated_library.get(model_id, {}) if isinstance(updated_library, dict) else {}
+                new_env = str(new_item.get("api_key_env", "")).strip() if isinstance(new_item, dict) else ""
+                if self.path.startswith("/draft-"):
+                    draft_meta = _move_pending_api_key_env(draft_meta, old_env, new_env)
+                    if form.get("clear_api_key", [""])[0] in {"1", "true", "yes", "on"}:
+                        draft_meta = _with_cleared_api_key(draft_meta, new_env)
+                    elif form.get("api_key", [""])[0]:
+                        draft_meta = _with_pending_api_key(draft_meta, new_env, form.get("api_key", [""])[0])
+                    if fragment_preview:
+                        self._send_json(
+                            _render_preview_state_payload(
+                                updated,
+                                lang,
+                                draft_meta,
+                                I18N[lang]["confirm_success"],
+                                _resolve_base_hash(form, old_public),
+                            )
+                        )
+                    else:
+                        self._send_html(
+                            _render_preview_html(
+                                updated,
+                                lang,
+                                draft_meta,
+                                I18N[lang]["confirm_success"],
+                                _resolve_base_hash(form, old_public),
+                            )
+                        )
+                    return
+                _assert_base_hash_matches(submitted_base_hash, old_public, lang)
                 if form.get("clear_api_key", [""])[0] in {"1", "true", "yes", "on"}:
-                    clear_llm_model_api_key(updated, form.get("model_id", [""])[0])
+                    clear_llm_model_api_key(updated, model_id)
                 elif form.get("api_key", [""])[0]:
-                    set_llm_model_api_key(updated, form.get("model_id", [""])[0], form.get("api_key", [""])[0])
+                    set_llm_model_api_key(updated, model_id, form.get("api_key", [""])[0])
                 save_public_config(updated)
                 self._send_json({"ok": True, "message": I18N[lang]["save_success"]})
                 return
 
-            if self.path == "/delete-llm-model":
-                old_public = load_public_config()
-                updated = delete_llm_model(old_public, form.get("model_id", [""])[0])
+            if self.path in {"/delete-llm-model", "/draft-delete-llm-model"}:
+                current = _submitted_public_config(form, old_public) if self.path.startswith("/draft-") else old_public
+                draft_meta = _submitted_draft_meta(form) if self.path.startswith("/draft-") else _empty_draft_meta()
+                model_id = form.get("model_id", [""])[0]
+                current_library = current.get("llm", {}).get("model_library", {}) if isinstance(current.get("llm", {}), dict) else {}
+                old_item = current_library.get(model_id, {}) if isinstance(current_library, dict) else {}
+                old_env = str(old_item.get("api_key_env", "")).strip() if isinstance(old_item, dict) else ""
+                updated = delete_llm_model(current, model_id)
+                if self.path.startswith("/draft-"):
+                    draft_meta = _drop_api_key_state(draft_meta, old_env)
+                    if fragment_preview:
+                        self._send_json(
+                            _render_preview_state_payload(
+                                updated,
+                                lang,
+                                draft_meta,
+                                I18N[lang]["confirm_success"],
+                                _resolve_base_hash(form, old_public),
+                            )
+                        )
+                    else:
+                        self._send_html(
+                            _render_preview_html(
+                                updated,
+                                lang,
+                                draft_meta,
+                                I18N[lang]["confirm_success"],
+                                _resolve_base_hash(form, old_public),
+                            )
+                        )
+                    return
+                _assert_base_hash_matches(submitted_base_hash, old_public, lang)
                 save_public_config(updated)
                 self._send_json({"ok": True, "message": I18N[lang]["save_success"]})
                 return
 
             if self.path == "/test-llm":
-                payload = form.get("payload", [""])[0]
                 profile_id = form.get("profile_id", [""])[0] or None
-                submitted = json.loads(payload) if payload else load_public_config()
-                result = test_llm_connection(submitted, profile_id)
+                submitted = _submitted_public_config(form, old_public)
+                draft_meta = _submitted_draft_meta(form)
+                result = test_llm_connection(submitted, profile_id, draft_meta)
                 self._send_json(result, status=200 if result.get("ok") else 400)
                 return
 
-            payload = form.get("payload", [""])[0]
-            old_public = load_public_config()
-            submitted = json.loads(payload)
+            submitted = _submitted_public_config(form, old_public)
             submitted.setdefault("ui", {})
             if isinstance(submitted["ui"], dict):
                 submitted["ui"]["language"] = lang
-            merged = preserve_secret_blanks(submitted, old_public)
-            build_effective_config(merged)
-            save_public_config(merged)
+            draft_meta = _submitted_draft_meta(form)
+            _assert_base_hash_matches(submitted_base_hash, old_public, lang)
+            _validate_required_llm_profiles(submitted, lang)
+            build_effective_config(submitted)
+            save_public_config(submitted)
+            for env_name in draft_meta.get("pending_cleared_api_keys", []):
+                _delete_user_env_var(str(env_name))
+            for env_name, api_key in draft_meta.get("pending_api_keys", {}).items():
+                _set_user_env_var(str(env_name), str(api_key))
             self._send_json({"ok": True, "message": I18N[lang]["save_success"]})
         except Exception as exc:
-            self._send_json({"ok": False, "message": str(exc)}, status=400)
+            html_preview_paths = {
+                "/preview",
+                "/draft-add-llm-profile",
+                "/draft-add-llm-model",
+                "/draft-update-llm-model",
+                "/draft-delete-llm-model",
+            }
+            if self.path in {"/preview-config-card", "/preview-llm-profile-card"}:
+                self._send_json({"ok": False, "message": str(exc)}, status=400)
+                return
+            if fragment_preview and self.path in html_preview_paths:
+                self._send_json({"ok": False, "message": str(exc)}, status=400)
+                return
+            if self.path in html_preview_paths:
+                try:
+                    submitted = _submitted_public_config(form, old_public)
+                except Exception:
+                    submitted = copy.deepcopy(old_public)
+                submitted.setdefault("ui", {})
+                if isinstance(submitted["ui"], dict):
+                    submitted["ui"]["language"] = lang
+                draft_meta = _submitted_draft_meta(form)
+                message = f'{I18N[lang]["save_failed"]}: {exc}'
+                self._send_html(
+                    _render_preview_html(
+                        submitted,
+                        lang,
+                        draft_meta,
+                        message,
+                        submitted_base_hash or current_base_hash,
+                    ),
+                    status=400,
+                )
+                return
+            status = 409 if isinstance(exc, ConfigConflictError) else 400
+            self._send_json({"ok": False, "message": str(exc)}, status=status)
 
     def log_message(self, format: str, *args) -> None:  # noqa: A003
         return

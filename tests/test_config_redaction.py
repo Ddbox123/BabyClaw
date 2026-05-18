@@ -27,6 +27,8 @@ def _clear_provider_env(monkeypatch):
         "AGENT_LLM_PROVIDER",
         "AGENT_LLM__PROVIDERS__DEFAULT__KIND",
         "VIBELUTION_ENABLE_USER_ENV_FALLBACK",
+        "VIBELUTION_LLM_REMOTE_MAIN_MINIMAX_M2_7_API_KEY",
+        "VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY",
     ]:
         monkeypatch.delenv(name, raising=False)
 
@@ -47,13 +49,13 @@ model = "{model}"
 
 def test_tracked_config_has_no_real_api_key():
     content = (PROJECT_ROOT / "config.toml").read_text(encoding="utf-8")
-    assert 'api_key = ""' in content
+    assert 'api_key = "' not in content
     assert "sk-cp-" not in content
 
 
 def test_example_config_uses_placeholders_only():
     content = (PROJECT_ROOT / "config.example.toml").read_text(encoding="utf-8")
-    assert 'api_key = ""' in content
+    assert 'api_key = "' not in content
     assert "your-api-key" not in content
     assert "sk-cp-" not in content
 
@@ -120,26 +122,24 @@ def test_provider_specific_env_key_does_not_leak_across_providers(tmp_path, monk
     assert config.get_api_key() is None
 
 
-def test_config_interfaces_resolve_minimax_key_consistently(monkeypatch):
+def test_config_interfaces_resolve_minimax_key_consistently(tmp_path, monkeypatch):
     _clear_provider_env(monkeypatch)
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        _minimal_remote_llm_toml(
+            provider_kind="minimax",
+            base_url="https://api.minimaxi.com/v1",
+            model="MiniMax-M2.7",
+            api_key_env="MINIMAX_API_KEY",
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setenv("MINIMAX_API_KEY", "minimax-test-key")
 
-    config = Settings(
-        None,
-        **{
-            "llm.providers.default.kind": "minimax",
-            "llm.providers.default.api_key": "",
-        },
-    )
-    settings = Settings(
-        None,
-        **{
-            "llm.providers.default.kind": "minimax",
-            "llm.providers.default.api_key": "",
-        },
-    )
+    config = ConfigLoader(str(config_file)).load()
+    settings = Settings(config_path=str(config_file))
 
-    assert config.config.get_api_key() == "minimax-test-key"
+    assert config.get_api_key() == "minimax-test-key"
     assert settings.get_api_key() == "minimax-test-key"
 
 

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .supervised_workbench import load_gym_promotion_lifecycle
+
 
 @dataclass(frozen=True)
 class SupervisedDashboardRecord:
@@ -28,6 +30,19 @@ class SupervisedDashboardRecord:
     lineage_index_path: str | None = None
     gym_proposal_path: str | None = None
     gym_decision_path: str | None = None
+    gym_proposal_status: str = "missing"
+    gym_target_key: str | None = None
+    gym_runtime_effect: str = "not_applied"
+    gym_agent_consumption: str = "advisory"
+    gym_available_actions: tuple[str, ...] = ()
+    gym_active_registry_match: bool = False
+    gym_registry_path: str | None = None
+    gym_activation_history_path: str | None = None
+    gym_apply_ledger_path: str | None = None
+    gym_rollback_ledger_path: str | None = None
+    gym_note: str = ""
+    advisory_active_count: int = 0
+    advisory_entries: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -155,7 +170,7 @@ def build_supervised_dashboard(
       background: #fbfcff;
     }}
     .metric span {{ display: block; color: var(--muted); font-size: 13px; }}
-    .metric strong {{ display: block; font-size: 22px; margin-top: 4px; }}
+    .metric strong {{ display: block; font-size: 22px; margin-top: 4px; overflow-wrap: anywhere; }}
     .risk-high {{ border-left: 5px solid var(--bad); }}
     .risk-medium {{ border-left: 5px solid var(--warn); }}
     .risk-low {{ border-left: 5px solid var(--good); }}
@@ -224,6 +239,8 @@ def _record_from_payload(payload: dict[str, Any], path: Path) -> SupervisedDashb
         metrics = gate.get("metrics") if isinstance(gate, dict) and isinstance(gate.get("metrics"), dict) else {}
         gym_proposal_path = gym_proposal_path or metrics.get("promotion_proposal_path")
         gym_decision_path = gym_decision_path or metrics.get("decision_path")
+    lifecycle = load_gym_promotion_lifecycle(payload, project_root=path.parents[3])
+    advisory_context = payload.get("advisory_context") if isinstance(payload.get("advisory_context"), dict) else {}
     return SupervisedDashboardRecord(
         session_id=str(payload.get("session_id") or path.stem),
         bundle_name=str(payload.get("bundle_name") or "-"),
@@ -241,6 +258,21 @@ def _record_from_payload(payload: dict[str, Any], path: Path) -> SupervisedDashb
         lineage_index_path=policy_action.get("lineage_index_path"),
         gym_proposal_path=str(gym_proposal_path) if gym_proposal_path else None,
         gym_decision_path=str(gym_decision_path) if gym_decision_path else None,
+        gym_proposal_status=lifecycle.status,
+        gym_target_key=lifecycle.target_key,
+        gym_runtime_effect=lifecycle.runtime_effect,
+        gym_agent_consumption=lifecycle.agent_consumption,
+        gym_available_actions=lifecycle.available_actions,
+        gym_active_registry_match=lifecycle.active_registry_match,
+        gym_registry_path=lifecycle.registry_path,
+        gym_activation_history_path=lifecycle.history_path,
+        gym_apply_ledger_path=lifecycle.apply_ledger_path,
+        gym_rollback_ledger_path=lifecycle.rollback_ledger_path,
+        gym_note=lifecycle.note or lifecycle.error,
+        advisory_active_count=int(advisory_context.get("active_count") or 0),
+        advisory_entries=(
+            advisory_context.get("entries") if isinstance(advisory_context.get("entries"), list) else []
+        ),
     )
 
 
@@ -321,12 +353,27 @@ def _render_record(record: SupervisedDashboardRecord) -> str:
         ("Lineage Index", record.lineage_index_path),
         ("Gym Proposal", record.gym_proposal_path),
         ("Gym Decision", record.gym_decision_path),
+        ("Gym Registry", record.gym_registry_path),
+        ("Gym Activation History", record.gym_activation_history_path),
+        ("Gym Apply Ledger", record.gym_apply_ledger_path),
+        ("Gym Rollback Ledger", record.gym_rollback_ledger_path),
     ]
     evidence_rows = "".join(
         f"<div><strong>{_escape(label)}:</strong> <span class=\"path\">{_escape(value)}</span></div>"
         for label, value in evidence
         if value
     )
+    advisory_rows = "".join(
+        f"<li>{_escape(item.get('target_label') or item.get('target_key') or '-')} · "
+        f"proposal={_escape(item.get('proposal_id') or '-')} · "
+        f"runtime_effect={_escape(item.get('runtime_effect') or 'not_applied')} · "
+        f"agent_consumption={_escape(item.get('agent_consumption') or 'advisory')}</li>"
+        for item in (record.advisory_entries or [])[:3]
+        if isinstance(item, dict)
+    )
+    if not advisory_rows:
+        advisory_rows = "<li>当轮未记住 active advisory baseline</li>"
+    gym_note = f"<p>{_escape(record.gym_note)}</p>" if record.gym_note else ""
     return f"""
     <article class="session risk-{_escape(record.risk_level)}">
       <h2>{_escape(record.session_id)} <span class="tag">{_escape(record.decision)}</span></h2>
@@ -336,10 +383,23 @@ def _render_record(record: SupervisedDashboardRecord) -> str:
         <div class="metric"><span>candidate success</span><strong>{record.candidate_success_rate:.3f}</strong></div>
         <div class="metric"><span>delta</span><strong>{record.score_delta:.3f}</strong></div>
         <div class="metric"><span>风险</span><strong>{_risk_label(record.risk_level)}</strong></div>
+        <div class="metric"><span>Gym proposal</span><strong>{_escape(record.gym_proposal_status)}</strong></div>
+        <div class="metric"><span>next action</span><strong>{_escape(_gym_action_label(record))}</strong></div>
       </div>
       <p>{_escape(record.reason)}</p>
       <h3>跑偏信号</h3>
       <ul>{risk_items}</ul>
+      <h3>当轮 advisory context</h3>
+      <p>active advisory baseline: {_escape(record.advisory_active_count)}</p>
+      <ul>{advisory_rows}</ul>
+      <h3>Gym proposal 生命周期</h3>
+      <div class="summary-grid">
+        <div class="metric"><span>target</span><strong>{_escape(record.gym_target_key or "-")}</strong></div>
+        <div class="metric"><span>runtime_effect</span><strong>{_escape(record.gym_runtime_effect)}</strong></div>
+        <div class="metric"><span>agent_consumption</span><strong>{_escape(record.gym_agent_consumption)}</strong></div>
+        <div class="metric"><span>registry_match</span><strong>{'yes' if record.gym_active_registry_match else 'no'}</strong></div>
+      </div>
+      {gym_note}
       <h3>Gate</h3>
       <table>
         <thead><tr><th>名称</th><th>状态</th><th>原因</th></tr></thead>
@@ -383,9 +443,25 @@ def _next_action(record: SupervisedDashboardRecord) -> str:
         return "先检查失败 gate 和 Decision Record，不要继续 apply 或 activate。"
     if record.risk_level == "medium":
         return "继续观察成本、验证失败和 hold 原因，必要时扩大 case 覆盖。"
+    if record.gym_proposal_status == "proposed":
+        return "监督结论已给出 proposal，下一步可在 workbench 中手动 apply。"
+    if record.gym_proposal_status == "applied":
+        return "proposal 已 apply，下一步可 activate 成 advisory baseline，或直接 rollback。"
+    if record.gym_proposal_status == "active":
+        return "proposal 已成为 active advisory baseline；runtime_effect 仍为 not_applied，可继续观察或 rollback。"
+    if record.gym_proposal_status == "rolled_back":
+        return "proposal 已回滚，当前只保留审计证据。"
+    if record.gym_proposal_status == "superseded":
+        return "proposal 已被更新的 active proposal 替代，当前只需审计。"
     if record.decision == "PROMOTE":
-        return "可以进入 Gym/apply/activate 安全流程，但仍需人工确认。"
+        return "监督结论是 PROMOTE，但当前 proposal 证据不完整，先检查 Decision Record 和 Gym proposal。"
     return "保持观察，必要时用相同配置复跑。"
+
+
+def _gym_action_label(record: SupervisedDashboardRecord) -> str:
+    if not record.gym_available_actions:
+        return "audit only"
+    return ", ".join(record.gym_available_actions)
 
 
 def _risk_label(level: str) -> str:

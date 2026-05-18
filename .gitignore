@@ -29,6 +29,8 @@ env/
 # IDE
 .idea/
 .vscode/
+node_modules/
+.vite/
 *.swp
 *.swo
 *~
@@ -58,4 +60,3 @@ Thumbs.db
 
 # Windows: accidental file created when redirecting to reserved device name
 /nul
-

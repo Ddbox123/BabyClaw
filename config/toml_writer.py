@@ -6,7 +6,11 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Iterable, List
+
+
+_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _format_scalar(value: Any) -> str:
@@ -36,8 +40,19 @@ def _is_string_list(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
-def _write_table(lines: List[str], table_name: str, data: Dict[str, Any], indent: int = 0) -> None:
-    lines.append(f"[{table_name}]")
+def _format_key(key: Any) -> str:
+    text = str(key)
+    if _BARE_KEY_RE.fullmatch(text):
+        return text
+    return _format_scalar(text)
+
+
+def _format_table_name(parts: List[str]) -> str:
+    return ".".join(_format_key(part) for part in parts)
+
+
+def _write_table(lines: List[str], table_path: List[str], data: Dict[str, Any], indent: int = 0) -> None:
+    lines.append(f"[{_format_table_name(table_path)}]")
 
     scalar_items = []
     nested_tables = []
@@ -57,18 +72,18 @@ def _write_table(lines: List[str], table_name: str, data: Dict[str, Any], indent
 
     for key, value in scalar_items:
         if _is_string_list(value):
-            lines.append(f"{key} = {_format_string_list(value, indent=indent)}")
+            lines.append(f"{_format_key(key)} = {_format_string_list(value, indent=indent)}")
         else:
-            lines.append(f"{key} = {_format_scalar(value)}")
+            lines.append(f"{_format_key(key)} = {_format_scalar(value)}")
 
     for key, value in nested_tables:
         lines.append("")
-        _write_table(lines, f"{table_name}.{key}", value, indent=indent)
+        _write_table(lines, [*table_path, str(key)], value, indent=indent)
 
     for key, items in array_tables:
         for item in items:
             lines.append("")
-            lines.append(f"[[{table_name}.{key}]]")
+            lines.append(f"[[{_format_table_name([*table_path, str(key)])}]]")
             item_scalars = []
             item_nested = []
             for item_key, item_value in item.items():
@@ -81,13 +96,13 @@ def _write_table(lines: List[str], table_name: str, data: Dict[str, Any], indent
 
             for item_key, item_value in item_scalars:
                 if _is_string_list(item_value):
-                    lines.append(f"{item_key} = {_format_string_list(item_value, indent=indent)}")
+                    lines.append(f"{_format_key(item_key)} = {_format_string_list(item_value, indent=indent)}")
                 else:
-                    lines.append(f"{item_key} = {_format_scalar(item_value)}")
+                    lines.append(f"{_format_key(item_key)} = {_format_scalar(item_value)}")
 
             for item_key, item_value in item_nested:
                 lines.append("")
-                _write_table(lines, f"{table_name}.{key}.{item_key}", item_value, indent=indent)
+                _write_table(lines, [*table_path, str(key), str(item_key)], item_value, indent=indent)
 
 
 def dumps_public_config(data: Dict[str, Any], header_lines: Iterable[str] | None = None) -> str:
@@ -102,8 +117,8 @@ def dumps_public_config(data: Dict[str, Any], header_lines: Iterable[str] | None
         if index > 0:
             lines.append("")
         if isinstance(section_value, dict):
-            _write_table(lines, section_name, section_value)
+            _write_table(lines, [str(section_name)], section_value)
         else:
-            lines.append(f"{section_name} = {_format_scalar(section_value)}")
+            lines.append(f"{_format_key(section_name)} = {_format_scalar(section_value)}")
 
     return "\n".join(lines).rstrip() + "\n"

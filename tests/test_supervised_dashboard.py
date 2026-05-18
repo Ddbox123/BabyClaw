@@ -4,7 +4,10 @@
 import json
 from pathlib import Path
 
+from core.gym import run_gym_collection_episode
+from core.gym.promotion import activate_gym_promotion_proposal, apply_gym_promotion_proposal
 from core.evaluation.supervised_dashboard import build_supervised_dashboard, generate_supervised_dashboard
+from tests.test_gym_runner import RunnerFakeAdapter
 
 
 def test_generate_supervised_dashboard_renders_empty_state(tmp_path: Path):
@@ -89,6 +92,58 @@ def test_build_supervised_dashboard_marks_agent_contract():
     assert "仅供监督观察，不代表自动授权" in html
     assert "agent_consumption: advisory" in html
     assert "runtime_authorization: none" in html
+
+
+def test_generate_supervised_dashboard_renders_gym_lifecycle_details(tmp_path: Path):
+    result = run_gym_collection_episode(
+        collection_id="foundation_local_stability",
+        project_root=tmp_path,
+        adapter=RunnerFakeAdapter(),
+        episode_id="dashboard_active_episode",
+    )
+    apply_gym_promotion_proposal(result.promotion_proposal_path, project_root=tmp_path)
+    activation = activate_gym_promotion_proposal(result.promotion_proposal_path, project_root=tmp_path)
+    _write_decision(
+        tmp_path,
+        "supervised_promote_active",
+        {
+            "decision": "PROMOTE",
+            "reason": "candidate 可以进入更大闭环观察",
+            "advisory_context": {
+                "active_count": 1,
+                "entries": [
+                    {
+                        "target_key": 'target:{"exercise_id":"local_transaction_closing_v1"}',
+                        "target_label": "local_transaction_closing_v1",
+                        "proposal_id": activation.proposal_id,
+                        "runtime_effect": "not_applied",
+                        "agent_consumption": "advisory",
+                    }
+                ],
+            },
+            "gates": [
+                {
+                    "name": "gym_promotion",
+                    "status": "pass",
+                    "reason": "mixed_readiness_gate pass",
+                    "metrics": {
+                        "promotion_proposal_path": result.promotion_proposal_path,
+                        "decision_path": result.decision_path,
+                    },
+                }
+            ],
+        },
+    )
+
+    html = Path(generate_supervised_dashboard(project_root=tmp_path).html_path).read_text(encoding="utf-8")
+
+    assert "Gym proposal 生命周期" in html
+    assert "active" in html
+    assert "not_applied" in html
+    assert "advisory" in html
+    assert "local_transaction_closing_v1" in html
+    assert "当轮 advisory context" in html
+    assert "active advisory baseline" in html
 
 
 def _write_decision(tmp_path: Path, session_id: str, overrides: dict) -> Path:

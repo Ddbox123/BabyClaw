@@ -39,6 +39,7 @@ from core.infrastructure.git_memory import get_git_memory_service
 from core.infrastructure.llm_utils import (
     build_system_message,
     MAX_CONSECUTIVE_FAILURES,
+    parse_tool_args,
     plan_llm_recovery,
 )
 from core.infrastructure.cli_utils import create_config_from_args, parse_args, should_launch_workbench
@@ -54,9 +55,13 @@ from core.infrastructure.boot_pipeline import (
 from langchain_core.messages import AIMessage, AIMessageChunk, SystemMessage, ToolMessage
 
 from core.infrastructure.runtime_input import (
+    build_chat_user_message,
     build_external_request_message,
     build_runtime_notice_message,
 )
+from core.evaluation.chat_dataset_capture import ChatDatasetCaptureService
+from core.evaluation.chat_segmenter import ChatTurnRecord
+from core.chat.chat_result_contract import build_chat_coding_result_contract
 
 from core.llm import get_llm_client, discover_model, doctor_llm_profile
 
@@ -84,6 +89,13 @@ from core.prompt_manager import (
 )
 from core.prompt_manager.task_analyzer import get_task_analyzer
 from core.orchestration.delegation_governor import DelegationGovernor
+from core.orchestration.agent_modes import (
+    AgentMode,
+    ModePolicy,
+    looks_like_explicit_evolution_request,
+    normalize_agent_mode,
+    resolve_mode_policy,
+)
 from core.orchestration.round_state import RoundStateController
 from core.orchestration.response_processor import ResponseProcessor, ResponseProcessingResult
 from core.orchestration.response_surface import ResponseSurfaceController
@@ -111,10 +123,12 @@ class SelfEvolvingAgent:
     支持定时苏醒，主动思考优化方向。
     """
 
-    def __init__(self, config: Optional[AppConfig] = None) -> None:
+    def __init__(self, config: Optional[AppConfig] = None, mode: Optional[str] = None) -> None:
         """初始化 Agent 实例"""
         self.config = config or get_config()
         self.name = self.config.agent.name
+        self.mode = normalize_agent_mode(mode or getattr(self.config.agent, "default_mode", None))
+        self.mode_policy = resolve_mode_policy(self.mode, self.config)
 
         # API Key 检查
         self.api_key = self.config.get_api_key()
@@ -162,6 +176,7 @@ class SelfEvolvingAgent:
         # 工作区域
         workspace_dir = getattr(self.config.agent, 'workspace', 'workspace')
         project_root = os.path.dirname(os.path.abspath(__file__))
+        self.project_root = project_root
         self.workspace_path = os.path.join(project_root, workspace_dir)
         os.makedirs(self.workspace_path, exist_ok=True)
 
@@ -199,13 +214,23 @@ class SelfEvolvingAgent:
         self._last_llm_error_category: Optional[str] = None
         self._last_llm_error_retryable: bool = False
         self._last_llm_recovery_action: Optional[str] = None
+        self._last_llm_error_message: str = ""
         self._last_visible_response_text: str = ""
         self._last_response_tool_calls: int = 0
         self._recent_tool_outputs: List[str] = []
+        self._recent_tool_records: List[Dict[str, Any]] = []
         self._active_goal: str = ""
         self._active_turn_messages: Optional[List[Any]] = None
         self._active_turn_goal: str = ""
         self._single_turn_mode_active: bool = False
+        self._last_turn_metadata: Dict[str, Any] = {}
+        self._chat_turn_records: List[ChatTurnRecord] = []
+        self._active_supervised_case_id: str = ""
+        self._pending_supervised_case_id: Optional[str] = None
+        self.chat_dataset_capture = ChatDatasetCaptureService(
+            project_root=Path(self.project_root),
+            config=self.config,
+        )
         self._load_previous_session_constraints()
 
     def _init_model_discovery(self):
@@ -387,6 +412,19 @@ class SelfEvolvingAgent:
 
     def _remember_tool_output(self, _tool_call: Dict[str, Any], result: Any, _action: Optional[str]) -> None:
         text = str(result or "").strip()
+        tool_name = str((_tool_call or {}).get("name") or "").strip()
+        tool_args = parse_tool_args(
+            (_tool_call or {}).get("args") or (_tool_call or {}).get("arguments") or {}
+        )
+        record = {
+            "name": tool_name,
+            "args": tool_args,
+            "action": str(_action or "").strip(),
+            "result_preview": compact_tool_output_for_diagnosis(text, max_chars=1200) if text else "",
+        }
+        self._recent_tool_records.append(record)
+        if len(self._recent_tool_records) > 20:
+            self._recent_tool_records = self._recent_tool_records[-20:]
         if not text:
             return
         self._recent_tool_outputs.append(compact_tool_output_for_diagnosis(text, max_chars=6000))
@@ -578,17 +616,184 @@ class SelfEvolvingAgent:
 
         return compressed, should_break
 
+    @staticmethod
+    def _fallback_mode_policy() -> ModePolicy:
+        return ModePolicy(
+            mode=AgentMode.SELF_EVOLUTION,
+            orchestrator_kind="evolution",
+            keep_multi_turn_context=True,
+            allow_auto_loop=True,
+            capture_chat_dataset_candidates=False,
+            route_explicit_evolution_requests=False,
+            reset_context_before_turn=False,
+            reset_context_between_cases=False,
+            allow_direct_supervised_payload=False,
+            finish_after_direct_response=False,
+            runtime_input_builder=build_external_request_message,
+        )
+
+    def _get_mode_policy(self) -> ModePolicy:
+        policy = getattr(self, "mode_policy", None)
+        if isinstance(policy, ModePolicy):
+            return policy
+        config = getattr(self, "config", None)
+        try:
+            if config is not None:
+                resolved = resolve_mode_policy(getattr(self, "mode", None), config)
+                self.mode_policy = resolved
+                self.mode = resolved.mode
+                return resolved
+        except Exception:
+            pass
+        fallback = self._fallback_mode_policy()
+        self.mode_policy = fallback
+        self.mode = fallback.mode
+        return fallback
+
+    def seed_chat_history(self, messages: List[Dict[str, Any]]) -> None:
+        """为 chat 模式恢复一段已持久化的对话历史。"""
+        policy = self._get_mode_policy()
+        if policy.mode != AgentMode.CHAT:
+            return
+        restored: List[Any] = [SystemMessage(content="")]
+        for item in list(messages or []):
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip().lower()
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            if role == "user":
+                restored.append(build_chat_user_message(content))
+            elif role == "assistant":
+                restored.append(AIMessage(content=content))
+        if len(restored) <= 1:
+            self._active_turn_messages = None
+            self._active_turn_goal = ""
+            return
+        self._active_turn_messages = restored
+        self._active_turn_goal = "__chat_session__"
+
+    def _reset_mode_context_for_supervised_case(self, case_id: Optional[str] = None) -> None:
+        self._active_turn_messages = None
+        self._active_turn_goal = ""
+        self._active_goal = ""
+        self._carryover_state_memory = ""
+        self._last_runtime_state_memory = ""
+        self._last_runtime_state_memory_key = ""
+        self._chat_turn_records = []
+        self._active_supervised_case_id = str(case_id or "").strip()
+        try:
+            session = get_session_state()
+            session.reset_runtime_constraints()
+            session.set_active_evolution_txn(None)
+        except Exception:
+            pass
+        try:
+            self.prompt_manager.clear_state_memory(persist=False)
+            self.prompt_manager.update_current_goal("")
+        except Exception:
+            pass
+
+    def _maybe_reset_supervised_case_context(self) -> None:
+        policy = self._get_mode_policy()
+        if policy.mode != AgentMode.SUPERVISED_EVOLUTION:
+            return
+        case_id = str(getattr(self, "_pending_supervised_case_id", None) or "").strip()
+        if case_id:
+            if case_id != getattr(self, "_active_supervised_case_id", ""):
+                self._reset_mode_context_for_supervised_case(case_id)
+            return
+        if (
+            getattr(self, "_active_supervised_case_id", "")
+            or getattr(self, "_active_turn_messages", None)
+            or getattr(self, "_active_goal", "")
+        ):
+            self._reset_mode_context_for_supervised_case(None)
+
+    def _capture_chat_dataset_candidate_if_needed(
+        self,
+        *,
+        user_prompt: str,
+        current_turn: int,
+        tool_names: List[str],
+        delegated: bool,
+    ) -> None:
+        policy = self._get_mode_policy()
+        if not policy.capture_chat_dataset_candidates:
+            return
+        service = getattr(self, "chat_dataset_capture", None)
+        if service is None or not service.should_capture_mode(policy.mode.value):
+            return
+        assistant_text = (getattr(self, "_last_visible_response_text", "") or "").strip()
+        record = ChatTurnRecord(
+            turn_number=int(current_turn or 0),
+            user_message=(user_prompt or "").strip(),
+            assistant_message=assistant_text,
+            tool_calls=list(dict.fromkeys(tool_names or [])),
+            tool_call_count=int(getattr(self, "_last_response_tool_calls", 0) or 0),
+            had_delegation=bool(delegated),
+            had_explicit_conclusion=bool("结论" in assistant_text or "总结" in assistant_text or "最终" in assistant_text),
+            had_next_action=bool("下一步" in assistant_text or "建议" in assistant_text or "接下来" in assistant_text),
+            metadata={"mode": policy.mode.value},
+        )
+        self._chat_turn_records.append(record)
+        conversation_logger = getattr(logger, "conversation", None)
+        source_log_path = ""
+        session_id = ""
+        if conversation_logger is not None:
+            try:
+                source_log_path = str(conversation_logger._get_session_file())
+                session_id = str(getattr(conversation_logger, "_session_id", "") or "")
+            except Exception:
+                source_log_path = ""
+                session_id = ""
+        try:
+            service.capture_candidate(
+                mode=policy.mode.value,
+                session_id=session_id or "chat_session",
+                source_log_path=source_log_path,
+                turns=self._chat_turn_records,
+            )
+        except Exception as exc:
+            _debug_logger.warning(f"chat candidate capture skipped: {type(exc).__name__}: {exc}", tag="CHAT")
+
+    def _run_chat_turn(self, user_prompt: str = None, goal_override: str = None) -> bool:
+        policy = self._get_mode_policy()
+        if policy.route_explicit_evolution_requests and looks_like_explicit_evolution_request(user_prompt or ""):
+            self._last_visible_response_text = "当前请求已标记为显式进化请求，请从进化入口继续。"
+            self._last_response_tool_calls = 0
+            self._last_turn_metadata = {
+                "status": "routed",
+                "evolution_route_requested": True,
+                "route_target": "workbench_evolution",
+            }
+            return True
+        return self._run_orchestrated_turn(user_prompt=user_prompt, goal_override=goal_override)
+
+    def _run_evolution_turn(self, user_prompt: str = None, goal_override: str = None) -> bool:
+        self._maybe_reset_supervised_case_context()
+        return self._run_orchestrated_turn(user_prompt=user_prompt, goal_override=goal_override)
+
     def think_and_act(self, user_prompt: str = None, goal_override: str = None) -> bool:
+        policy = self._get_mode_policy()
+        if policy.orchestrator_kind == "chat":
+            return self._run_chat_turn(user_prompt=user_prompt, goal_override=goal_override)
+        return self._run_evolution_turn(user_prompt=user_prompt, goal_override=goal_override)
+
+    def _run_orchestrated_turn(self, user_prompt: str = None, goal_override: str = None) -> bool:
         """苏醒时执行一次思考和行动。
 
         Returns:
             True: 继续运行, False: 结束当前主循环
         """
         ui = get_ui()
+        policy = self._get_mode_policy()
         if user_prompt is None:
             user_prompt = "开始自主进化"
         effective_goal = (goal_override or user_prompt or "").strip() or user_prompt
         self._active_goal = effective_goal
+        self._last_turn_metadata = {}
         self.prompt_manager.update_current_goal(effective_goal)
         self._pending_lifecycle_action = None
         context_limit = getattr(
@@ -611,7 +816,8 @@ class SelfEvolvingAgent:
             active_turn_messages=self._active_turn_messages,
             active_turn_goal=self._active_turn_goal,
             build_system_message=build_system_message,
-            build_external_request_message=build_external_request_message,
+            build_external_request_message=policy.runtime_input_builder,
+            allow_append_user_message=policy.mode == AgentMode.CHAT and policy.keep_multi_turn_context,
         )
         try:
             get_ui().note_context_window(
@@ -643,6 +849,8 @@ class SelfEvolvingAgent:
 
         round_state = self._create_round_state()
         lifecycle_action: Optional[str] = None
+        turn_tool_names: List[str] = []
+        delegated_this_turn = False
         try:
             for _ in range(round_state.max_iterations):
                 iteration = round_state.next_iteration()
@@ -672,6 +880,7 @@ class SelfEvolvingAgent:
                     messages=messages,
                 )
                 if delegated:
+                    delegated_this_turn = True
                     round_state.note_delegation(bool(delegated.get("useful")))
                     if delegated.get("break_round"):
                         ui.add_log("只读委派已返回结构化结论，本轮直接收束。", "INFO")
@@ -750,6 +959,9 @@ class SelfEvolvingAgent:
                     )
                     round_state.add_xml_tool_calls(len(processed.xml_tool_calls))
                     for xtc in processed.xml_tool_calls:
+                        tool_name = str(xtc.get("name") or "").strip()
+                        if tool_name:
+                            turn_tool_names.append(tool_name)
                         ui.update_status(
                             "ACTING",
                             **round_state.current_status(),
@@ -809,6 +1021,10 @@ class SelfEvolvingAgent:
 
                 tool_calls = processed.tool_calls
                 round_state.note_response_tools(tool_call_count)
+                for tool_call in tool_calls:
+                    tool_name = str(tool_call.get("name") or "").strip()
+                    if tool_name:
+                        turn_tool_names.append(tool_name)
                 if tool_calls:
                     ui.update_status(
                         "ACTING",
@@ -903,6 +1119,12 @@ class SelfEvolvingAgent:
             )
             self._active_turn_messages = carryover.messages
             self._active_turn_goal = carryover.goal
+            self._capture_chat_dataset_candidate_if_needed(
+                user_prompt=user_prompt,
+                current_turn=current_turn,
+                tool_names=turn_tool_names,
+                delegated=delegated_this_turn,
+            )
             self._refresh_retrospective_state_memory()
             _debug_logger.turn_end(current_turn, tool_count=round_state.total_tool_calls)
 
@@ -914,6 +1136,7 @@ class SelfEvolvingAgent:
         self._last_llm_error_category = None
         self._last_llm_error_retryable = False
         self._last_llm_recovery_action = None
+        self._last_llm_error_message = ""
         clean_messages = []
         for msg in messages:
             if isinstance(msg, AIMessage):
@@ -1008,6 +1231,7 @@ class SelfEvolvingAgent:
                     self._last_llm_error_category = category
                     self._last_llm_error_retryable = is_retryable
                     self._last_llm_recovery_action = recovery.action
+                    self._last_llm_error_message = f"{category}: {user_msg}".strip(": ")
                     disable_streaming_for_retry = disable_streaming_for_retry or recovery.disable_streaming
                     disable_tools_for_retry = disable_tools_for_retry or recovery.disable_tools
                     fallback_profile_id_for_retry = (
@@ -1135,6 +1359,7 @@ class SelfEvolvingAgent:
         )
 
     def run_loop(self, initial_prompt: str = None) -> None:
+        policy = self._get_mode_policy()
         session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         _debug_logger.start_session(session_id)
         _debug_logger.system("主循环开始", tag=self.name)
@@ -1147,6 +1372,7 @@ class SelfEvolvingAgent:
         )
         logger.start_session(metadata={
             "model": model_name,
+            "agent_mode": policy.mode.value,
             "token_limit": self._effective_max_token_limit,
             "tools_count": len(self.key_tools),
             "max_iterations": self.config.agent.max_iterations,
@@ -1167,6 +1393,8 @@ class SelfEvolvingAgent:
                 external_request = None
 
                 if not result:
+                    break
+                if not policy.allow_auto_loop:
                     break
 
                 _debug_logger.system("执行完成，准备下一轮...", tag="AGENT")
@@ -1234,14 +1462,27 @@ class SelfEvolvingAgent:
         if self._pending_lifecycle_action == "hibernated":
             _debug_logger.info("休眠动作已完成，当前主循环返回", tag="HIBERNATION")
 
-    def run_single_turn(self, initial_prompt: str = None, goal_override: str = None) -> Dict[str, Any]:
+    def run_single_turn(
+        self,
+        initial_prompt: str = None,
+        goal_override: str = None,
+        case_id: str = None,
+    ) -> Dict[str, Any]:
         """执行单轮思考并返回结构化摘要。"""
+        policy = self._get_mode_policy()
         session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         _debug_logger.start_session(session_id)
         _debug_logger.system("单轮主循环开始", tag=self.name)
+        llm_config = self.config.llm
+        model_name = (
+            llm_config.get_profile(role="primary").model
+            if hasattr(llm_config, "get_profile")
+            else getattr(llm_config, "model_name", "unknown")
+        )
         logger.start_session(metadata={
             "mode": "single_turn",
-            "model": getattr(self.config.llm, "model_name", "unknown"),
+            "agent_mode": policy.mode.value,
+            "model": model_name,
             "token_limit": self._effective_max_token_limit,
             "tools_count": len(self.key_tools),
             "max_iterations": self.config.agent.max_iterations,
@@ -1250,16 +1491,21 @@ class SelfEvolvingAgent:
         self._last_visible_response_text = ""
         self._last_response_tool_calls = 0
         self._recent_tool_outputs = []
+        self._recent_tool_records = []
+        self._last_turn_metadata = {}
+        self._last_llm_error_message = ""
         session = get_session_state()
         ok = False
         try:
             self._single_turn_mode_active = True
+            self._pending_supervised_case_id = case_id
             ok = self.think_and_act(user_prompt=initial_prompt, goal_override=goal_override)
             snapshot = session.get_attention_snapshot()
             latest_delegation = None
             if snapshot.get("delegation_findings"):
                 latest_delegation = snapshot["delegation_findings"][-1]
             summary = (self._last_visible_response_text or "").strip()
+            error_message = str(getattr(self, "_last_llm_error_message", "") or "").strip()
             parsed_payload: Dict[str, Any] = {}
             if summary.startswith("{") and summary.endswith("}"):
                 try:
@@ -1276,9 +1522,16 @@ class SelfEvolvingAgent:
                 status = "failed"
             elif not ok:
                 status = "stopped"
+            if not summary:
+                if error_message:
+                    summary = error_message
+                elif status == "failed":
+                    summary = "当前轮执行失败，请检查 LLM 配置或日志。"
+                elif status == "stopped":
+                    summary = "当前轮已停止，未产生可见回复。"
             result = {
                 "status": status,
-                "summary": summary[:800],
+                "summary": summary,
                 "findings": [],
                 "evidence": [],
                 "recommended_next_action": (
@@ -1287,24 +1540,34 @@ class SelfEvolvingAgent:
                     else ""
                 ),
                 "confidence": "medium" if summary else "low",
-                "raw_output": summary[:4000],
+                "raw_output": summary,
                 "tool_call_count": self._last_response_tool_calls,
+                "tool_trace": list(getattr(self, "_recent_tool_records", []) or []),
             }
+            if error_message:
+                result["error"] = error_message
             if parsed_payload:
                 result.update(parsed_payload)
-                result.setdefault("raw_output", summary[:4000])
+                result.setdefault("raw_output", summary)
                 result["status"] = result.get("status") or status
             elif inferred_payload:
                 result.update(inferred_payload)
-                result.setdefault("raw_output", summary[:4000])
+                result.setdefault("raw_output", summary)
                 result["status"] = result.get("status") or status
+            if self._last_turn_metadata:
+                result.update(self._last_turn_metadata)
+                result["status"] = result.get("status") or status
+            if policy.mode == AgentMode.CHAT:
+                result.update(build_chat_coding_result_contract(result))
             return result
         finally:
             self._single_turn_mode_active = False
+            self._pending_supervised_case_id = None
             _debug_logger.info("单轮运行结束", tag=self.name)
             _debug_logger.end_session()
             logger.end_session({
                 "mode": "single_turn",
+                "agent_mode": policy.mode.value,
                 "total_turns": logger._turn_count,
                 "tool_calls": self._last_response_tool_calls,
                 "ok": ok,

@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from core.infrastructure.workspace_manager import get_workspace
 from core.evaluation.selection_policy import execute_supervised_policy
+from core.gym import build_active_advisory_snapshot, summarize_active_advisory_baselines
 from scripts.evolution_harness import HarnessResult, run_harness
 
 
@@ -116,6 +117,7 @@ class SupervisedEvolutionDecision:
     baseline_success_rate: float
     candidate_success_rate: float
     score_delta: float
+    advisory_context: Dict[str, Any] = field(default_factory=dict)
     summary: Dict[str, Any] = field(default_factory=dict)
     decision_path: Optional[str] = None
     policy_action: Dict[str, Any] = field(default_factory=dict)
@@ -593,6 +595,8 @@ def _elapsed_seconds(started_at: str, ended_at: str) -> float:
 
 
 def format_decision_record_summary(decision: SupervisedEvolutionDecision) -> str:
+    advisory_context = getattr(decision, "advisory_context", {}) or {}
+    advisory_lines = _format_advisory_context_lines(advisory_context)
     gate_lines = [
         f"- {gate.name}: {gate.status} | {gate.reason}"
         for gate in decision.gates
@@ -612,6 +616,8 @@ def format_decision_record_summary(decision: SupervisedEvolutionDecision) -> str
         f"validation: {decision.baseline_summary.validation_passed}/{decision.baseline_summary.validation_failed} -> {decision.candidate_summary.validation_passed}/{decision.candidate_summary.validation_failed}",
         f"guarded tools: {decision.baseline_summary.total_guarded_tools} -> {decision.candidate_summary.total_guarded_tools}",
         f"delta: {decision.score_delta}",
+        "advisory context:",
+        *(advisory_lines or ["- 当前未记住 active advisory baseline"]),
         "gates:",
         *(gate_lines or ["- none"]),
         "cases:",
@@ -638,6 +644,8 @@ def run_supervised_evolution_session(
     session_id = f"supervised_{_now_stamp()}"
     started_at = _now_iso()
     runner = harness_runner or run_harness
+    advisory_context = build_active_advisory_snapshot(project_root=root)
+    advisory_lines = summarize_active_advisory_baselines(project_root=root, limit=3)
 
     baseline_runs: List[SupervisedEvolutionRun] = []
     candidate_runs: List[SupervisedEvolutionRun] = []
@@ -652,6 +660,8 @@ def run_supervised_evolution_session(
             "benchmark": str(bundle.get("benchmark") or "dry_run"),
             "case_total": len(cases),
             "keep_worktree": keep_worktree,
+            "active_advisory_count": advisory_context.get("active_count", 0),
+            "active_advisory_lines": advisory_lines,
         },
     )
 
@@ -777,6 +787,7 @@ def run_supervised_evolution_session(
         baseline_success_rate=_success_rate(baseline_runs),
         candidate_success_rate=_success_rate(candidate_runs),
         score_delta=score_delta,
+        advisory_context=advisory_context,
         summary={
             "case_count": len(cases),
             "baseline_successes": sum(1 for item in baseline_runs if item.status == "success"),
@@ -819,9 +830,34 @@ def run_supervised_evolution_session(
             "reason": payload.reason,
             "decision_path": payload.decision_path,
             "policy_action": payload.policy_action.get("action"),
+            "active_advisory_count": advisory_context.get("active_count", 0),
         },
     )
     return payload
+
+
+def _format_advisory_context_lines(advisory_context: Dict[str, Any]) -> list[str]:
+    if not isinstance(advisory_context, dict):
+        return []
+    count = int(advisory_context.get("active_count") or 0)
+    entries = advisory_context.get("entries") if isinstance(advisory_context.get("entries"), list) else []
+    if count <= 0:
+        return ["- 当前未记住 active advisory baseline"]
+    lines = [f"- active_count={count}"]
+    for item in entries[:3]:
+        if not isinstance(item, dict):
+            continue
+        lines.append(
+            "- "
+            f"{item.get('target_label') or item.get('target_key') or '-'} "
+            f"proposal={item.get('proposal_id') or '-'} "
+            f"runtime_effect={item.get('runtime_effect') or 'not_applied'} "
+            f"agent_consumption={item.get('agent_consumption') or 'advisory'}"
+        )
+    hidden = count - min(len(entries), 3)
+    if hidden > 0:
+        lines.append(f"- ... 还有 {hidden} 个 active advisory baseline")
+    return lines
 
 
 __all__ = [

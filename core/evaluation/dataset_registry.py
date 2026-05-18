@@ -93,6 +93,19 @@ def _default_registry_payload() -> Dict[str, Any]:
                 "tags": ["generated", "gym"],
             },
             {
+                "name": "chat_reviewed_multiturn",
+                "kind": "prompt_jsonl",
+                "description": "经人工审核通过的多轮 chat 协作片段，物化为单 case prompt，用于监督进化和回归评测。",
+                "source_path": "workspace/evaluation/datasets/chat_reviewed_multiturn.jsonl",
+                "bundle_name": "chat_reviewed_multiturn_v1",
+                "scenario": "conversation_collaboration",
+                "mode": "single_turn",
+                "timeout_seconds": 600,
+                "runnable": True,
+                "adapter_status": "ready",
+                "tags": ["chat", "multiturn", "reviewed"],
+            },
+            {
                 "name": "swe_bench_lite",
                 "kind": "swe_bench_jsonl",
                 "description": "SWE-bench Lite 本地 JSONL。字段通常包含 instance_id、repo、base_commit、problem_statement、patch、test_patch。",
@@ -248,11 +261,11 @@ def _slug(value: str, fallback: str) -> str:
 
 
 def _prompt_from_row(row: Dict[str, Any]) -> str:
-    for key in ("prompt", "problem_statement", "text", "instruction", "task"):
+    for key in ("prompt", "problem_statement", "text", "instruction", "task", "prompt_seed"):
         value = row.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    raise ValueError("JSONL row 缺少 prompt/problem_statement/text/instruction/task 字段")
+    raise ValueError("JSONL row 缺少 prompt/problem_statement/text/instruction/task/prompt_seed 字段")
 
 
 def _case_id_from_row(row: Dict[str, Any], index: int) -> str:
