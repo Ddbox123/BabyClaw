@@ -50,6 +50,10 @@ log_info/
 
 # Local web workbench outputs
 /web/dist/
+/web/.codex-temp/
+/web/*.tsbuildinfo
+/web/vite.config.js
+/web/vite.config.d.ts
 /web/.vite-*.log
 /web/vite-*.log
 
