@@ -1330,7 +1330,10 @@ class SelfEvolvingAgent:
                                 ui.stream_thought(streamed_reasoning, done=False)
                             if chunk_text:
                                 streamed_text += str(chunk_text)
-                                if not streamed_reasoning:
+                                stream_response = getattr(ui, "stream_response", None)
+                                if callable(stream_response):
+                                    stream_response(streamed_text, done=False)
+                                elif not streamed_reasoning:
                                     ui.stream_thought(streamed_text, done=False)
                         if full_chunk is not None:
                             final_content = ResponseProcessor.coerce_content_text(

@@ -16,6 +16,7 @@ from typing import Any
 from core.chat.chat_result_contract import build_chat_coding_result_contract
 from core.chat.chat_result_formatter import format_chat_reply
 from core.chat.chat_task_types import trim_lines
+from core.infrastructure.event_bus import EventNames, get_event_bus
 from core.mental_model_flags import is_mental_model_enabled
 from core.evaluation.chat_dataset_capture import ChatDatasetCaptureService
 from core.evaluation.chat_segmenter import ChatTurnRecord, has_conclusion_signal, has_next_action_signal
@@ -99,6 +100,7 @@ class SessionLiveOutputState:
     thought: str = ""
     content: str = ""
     mental_snapshot: dict[str, Any] | None = None
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
     updated_at: str = ""
 
 
@@ -108,7 +110,9 @@ class SessionTurnCapture:
 
     session_id: str
     thought: str = ""
+    content: str = ""
     mental_state: dict[str, str] = field(default_factory=dict)
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def note_thought(self, text: str) -> None:
         cleaned = _sanitize_thought_text(text)
@@ -118,12 +122,40 @@ class SessionTurnCapture:
     def clear_thought(self) -> None:
         self.thought = ""
 
+    def note_content(self, text: str) -> None:
+        cleaned = _sanitize_message_content("assistant", text)
+        if cleaned:
+            self.content = cleaned
+
+    def clear_content(self) -> None:
+        self.content = ""
+
     def note_mental_state(self, *, mood: str = "", feeling: str = "", whisper: str = "") -> None:
         self.mental_state = {
             "mood": str(mood or "").strip(),
             "feeling": str(feeling or "").strip(),
             "whisper": str(whisper or "").strip(),
         }
+
+    def note_tool_event(self, name: str, status: str, summary: str = "") -> None:
+        tool_name = str(name or "").strip()
+        if not tool_name:
+            return
+        entry = {
+            "name": tool_name,
+            "status": _normalize_tool_call_status(status, default="running"),
+        }
+        cleaned_summary = trim_lines(summary or "", max_lines=2)
+        if cleaned_summary:
+            entry["summary"] = cleaned_summary
+        for index in range(len(self.tool_calls) - 1, -1, -1):
+            existing = self.tool_calls[index]
+            if existing.get("name") == tool_name and existing.get("status") == "running":
+                self.tool_calls[index] = entry
+                return
+        self.tool_calls.append(entry)
+        if len(self.tool_calls) > 30:
+            self.tool_calls = self.tool_calls[-30:]
 
 
 def list_sessions() -> list[dict]:
@@ -347,9 +379,9 @@ def _normalize_messages(conversation_id: str, items: Any) -> list[dict[str, Any]
             entry["thought"] = thought
         if mental_snapshot is not None:
             entry["mentalSnapshot"] = mental_snapshot
-        tool_calls = normalize_chat_tool_calls(raw.get("tool_calls") or raw.get("tools") or [])
+        tool_calls = _normalize_message_tool_calls(raw.get("tool_calls") or raw.get("toolCalls") or raw.get("tools") or [])
         if tool_calls:
-            entry["toolCalls"] = [{"name": name, "status": "done"} for name in tool_calls]
+            entry["toolCalls"] = tool_calls
         messages.append(entry)
     return messages
 
@@ -736,6 +768,8 @@ def _persist_session_turn_result(session_id: str, result: Any) -> None:
             thought=_extract_chat_thought(result, assistant_text),
             mental_snapshot=_build_turn_mental_snapshot(result, lang),
         )
+        if isinstance(result, dict):
+            assistant_entry["toolCalls"] = _normalize_message_tool_calls(_extract_chat_tool_calls(result))
         conversation["messages"] = messages + [assistant_entry]
         existing_active_task = _normalize_session_active_task(
             conversation.get("active_task") or conversation.get("activeTask")
@@ -788,7 +822,7 @@ def _persist_session_turn_failure(session_id: str, context: dict[str, Any], exc:
 def _make_chat_message(
     role: str,
     content: str,
-    tool_calls: list[str] | None = None,
+    tool_calls: list[Any] | None = None,
     *,
     thought: str = "",
     mental_snapshot: dict[str, Any] | None = None,
@@ -804,7 +838,7 @@ def _make_chat_message(
     normalized_snapshot = _normalize_mental_snapshot(mental_snapshot)
     if normalized_snapshot is not None:
         message["mental_snapshot"] = normalized_snapshot
-    normalized_tool_calls = normalize_chat_tool_calls(tool_calls or [])
+    normalized_tool_calls = _normalize_persisted_tool_calls(tool_calls or [])
     if normalized_tool_calls:
         message["tool_calls"] = normalized_tool_calls
     return message
@@ -814,13 +848,82 @@ def _now_timestamp() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def _extract_chat_tool_calls(result: Any) -> list[str]:
+def _normalize_tool_call_status(value: Any, *, default: str = "done") -> str:
+    status = str(value or "").strip().lower()
+    if status in {"running", "pending", "done", "success", "failed", "error", "blocked"}:
+        if status == "success":
+            return "done"
+        if status == "error":
+            return "failed"
+        return status
+    return default
+
+
+def _tool_call_name(raw: Any) -> str:
+    if isinstance(raw, dict):
+        function_block = raw.get("function") or {}
+        if not isinstance(function_block, dict):
+            function_block = {}
+        return str(
+            raw.get("name")
+            or raw.get("tool_name")
+            or function_block.get("name")
+            or ""
+        ).strip()
+    return str(raw or "").strip()
+
+
+def _normalize_persisted_tool_calls(value: Any) -> list[dict[str, Any]]:
+    tool_calls: list[dict[str, Any]] = []
+    for item in list(value or []):
+        name = _tool_call_name(item)
+        if not name:
+            continue
+        status = _normalize_tool_call_status(
+            item.get("status") if isinstance(item, dict) else "",
+            default="done",
+        )
+        entry: dict[str, Any] = {
+            "name": name,
+            "status": status,
+        }
+        if isinstance(item, dict):
+            summary = trim_lines(
+                item.get("summary")
+                or item.get("result_preview")
+                or item.get("resultPreview")
+                or item.get("error")
+                or "",
+                max_lines=2,
+            )
+            if summary:
+                entry["summary"] = summary
+        tool_calls.append(entry)
+    return tool_calls
+
+
+def _normalize_message_tool_calls(value: Any) -> list[dict[str, Any]]:
+    tool_calls: list[dict[str, Any]] = []
+    for item in _normalize_persisted_tool_calls(value):
+        entry = {
+            "name": str(item.get("name") or "").strip(),
+            "status": _normalize_tool_call_status(item.get("status"), default="done"),
+        }
+        summary = trim_lines(item.get("summary") or "", max_lines=2)
+        if summary:
+            entry["summary"] = summary
+        if entry["name"]:
+            tool_calls.append(entry)
+    return tool_calls
+
+
+def _extract_chat_tool_calls(result: Any) -> list[dict[str, Any]]:
     if not isinstance(result, dict):
         return []
-    tool_calls = normalize_chat_tool_calls(result.get("tool_trace") or [])
+    tool_calls = _normalize_persisted_tool_calls(result.get("tool_trace") or [])
     if tool_calls:
         return tool_calls
-    return normalize_chat_tool_calls(result.get("tool_calls") or result.get("tools") or [])
+    return _normalize_persisted_tool_calls(result.get("tool_calls") or result.get("tools") or [])
 
 
 def _extract_chat_thought(result: Any, assistant_text: str) -> str:
@@ -944,6 +1047,22 @@ def _thought_duplicates_reply(thought: str, reply: str) -> bool:
 def _normalize_mental_snapshot(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
+    raw_metrics = value.get("metrics")
+    metrics = dict(raw_metrics) if isinstance(raw_metrics, dict) else {}
+    history_tail: list[dict[str, Any]] = []
+    if isinstance(value.get("historyTail"), list):
+        history_source = value.get("historyTail")
+    elif isinstance(value.get("history_tail"), list):
+        history_source = value.get("history_tail")
+    else:
+        history_source = []
+    for item in list(history_source or [])[-5:]:
+        if isinstance(item, dict):
+            history_tail.append({
+                "cognitiveState": str(item.get("cognitiveState") or item.get("state") or item.get("cognitive_state") or "").strip(),
+                "confidence": _coerce_confidence(item.get("confidence")),
+                "timestamp": str(item.get("timestamp") or item.get("updatedAt") or item.get("updated_at") or "").strip(),
+            })
     snapshot = {
         "mood": str(value.get("mood") or "").strip(),
         "feeling": str(value.get("feeling") or "").strip(),
@@ -957,6 +1076,9 @@ def _normalize_mental_snapshot(value: Any) -> dict[str, Any] | None:
         ),
         "updatedAt": str(value.get("updatedAt") or value.get("updated_at") or "").strip(),
         "source": str(value.get("source") or "").strip(),
+        "intervention": trim_lines(value.get("intervention") or "", max_lines=8),
+        "metrics": metrics,
+        "historyTail": history_tail,
     }
     if not snapshot["summary"]:
         snapshot["summary"] = snapshot["feeling"] or snapshot["whisper"]
@@ -1013,6 +1135,7 @@ def _live_mental_snapshot(state_info: dict[str, Any], lang: str) -> dict[str, An
 def _build_turn_mental_snapshot(result: Any, lang: str) -> dict[str, Any] | None:
     if not is_mental_model_enabled():
         return None
+    state_snapshot = None
     if isinstance(result, dict):
         explicit = _normalize_mental_snapshot(result.get("mental_snapshot") or result.get("mentalSnapshot"))
         if _has_meaningful_mental_snapshot(explicit):
@@ -1029,11 +1152,82 @@ def _build_turn_mental_snapshot(result: Any, lang: str) -> dict[str, Any] | None
     except Exception:
         runtime_snapshot = None
 
+    diagnosis_snapshot = _diagnosis_mental_snapshot(lang)
+
     if _has_meaningful_mental_snapshot(runtime_snapshot):
-        return runtime_snapshot
+        merged = dict(runtime_snapshot)
+        if diagnosis_snapshot:
+            for key in ("intervention", "metrics", "historyTail"):
+                if diagnosis_snapshot.get(key):
+                    merged[key] = diagnosis_snapshot[key]
+            if not merged.get("cognitiveState"):
+                merged["cognitiveState"] = diagnosis_snapshot.get("cognitiveState", "")
+            if not merged.get("confidence"):
+                merged["confidence"] = diagnosis_snapshot.get("confidence", 0.0)
+            if not merged.get("sampleSize"):
+                merged["sampleSize"] = diagnosis_snapshot.get("sampleSize", 0)
+            if not merged.get("interventionCount"):
+                merged["interventionCount"] = diagnosis_snapshot.get("interventionCount", 0)
+        return _normalize_mental_snapshot(merged)
     if _has_meaningful_mental_snapshot(state_snapshot):
         return state_snapshot
+    if _has_meaningful_mental_snapshot(diagnosis_snapshot):
+        return diagnosis_snapshot
     return None
+
+
+def _diagnosis_mental_snapshot(lang: str) -> dict[str, Any] | None:
+    try:
+        from core.infrastructure.mental_model import get_mental_model
+
+        mental_model = get_mental_model(workspace_root=str(PROJECT_ROOT / "workspace"))
+        diagnosis = mental_model.diagnose()
+        history = []
+        try:
+            history = mental_model.get_diagnosis_history(limit=5)
+        except Exception:
+            history = []
+    except Exception:
+        return None
+
+    metrics = getattr(diagnosis, "metrics", {}) or {}
+    cognitive_state = str(getattr(diagnosis, "state", "") or "").strip()
+    intervention = trim_lines(getattr(diagnosis, "intervention", "") or "", max_lines=8)
+    history_tail = [
+        {
+            "cognitiveState": str(getattr(item, "state", "") or "").strip(),
+            "confidence": _coerce_confidence(getattr(item, "confidence", 0.0)),
+            "timestamp": str(getattr(item, "timestamp", "") or "").strip(),
+        }
+        for item in list(history or [])[-5:]
+    ]
+    return _normalize_mental_snapshot({
+        "mood": "",
+        "feeling": "",
+        "whisper": "",
+        "summary": _mental_diagnosis_summary(lang, cognitive_state) if cognitive_state else "",
+        "cognitiveState": cognitive_state,
+        "confidence": _coerce_confidence(getattr(diagnosis, "confidence", 0.0)),
+        "sampleSize": metrics.get("sample_size") or 0,
+        "interventionCount": metrics.get("intervention_count") or 0,
+        "updatedAt": str(getattr(diagnosis, "timestamp", "") or "").strip(),
+        "source": "diagnosis",
+        "intervention": intervention,
+        "metrics": metrics,
+        "historyTail": history_tail,
+    })
+
+
+def _mental_diagnosis_summary(lang: str, cognitive_state: str) -> str:
+    labels = {
+        "normal": text_for(lang, zh="心智诊断稳定。", en="Mental diagnosis is stable."),
+        "productive": text_for(lang, zh="心智诊断显示当前推进顺畅。", en="Mental diagnosis shows productive progress."),
+        "looping": text_for(lang, zh="心智诊断检测到重复循环。", en="Mental diagnosis detected looping."),
+        "thrashing": text_for(lang, zh="心智诊断检测到工具或方案失稳。", en="Mental diagnosis detected thrashing."),
+        "tunnel_vision": text_for(lang, zh="心智诊断检测到隧道视野。", en="Mental diagnosis detected tunnel vision."),
+        "disoriented": text_for(lang, zh="心智诊断检测到方向分散。", en="Mental diagnosis detected disorientation."),
+    }
+    return labels.get(str(cognitive_state or "").strip().lower(), str(cognitive_state or "").strip())
 
 
 def _messages_with_live_output(session_id: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1052,8 +1246,9 @@ def _build_live_output_message(session_id: str) -> dict[str, Any] | None:
         thought = str(state.thought or "").strip()
         content = str(state.content or "").strip()
         mental_snapshot = _normalize_mental_snapshot(state.mental_snapshot)
+        tool_calls = _normalize_message_tool_calls(state.tool_calls)
         timestamp = str(state.updated_at or "").strip() or _now_timestamp()
-    if not thought and not content and mental_snapshot is None:
+    if not thought and not content and mental_snapshot is None and not tool_calls:
         return None
     message: dict[str, Any] = {
         "id": f"{session_id}-message-live",
@@ -1066,6 +1261,8 @@ def _build_live_output_message(session_id: str) -> dict[str, Any] | None:
         message["thought"] = thought
     if mental_snapshot is not None:
         message["mentalSnapshot"] = mental_snapshot
+    if tool_calls:
+        message["toolCalls"] = tool_calls
     return message
 
 
@@ -1075,6 +1272,7 @@ def _set_session_live_output(
     thought: Any = _UNSET,
     content: Any = _UNSET,
     mental_snapshot: Any = _UNSET,
+    tool_calls: Any = _UNSET,
 ) -> None:
     with _SESSION_LIVE_OUTPUTS_LOCK:
         state = _SESSION_LIVE_OUTPUTS.get(session_id)
@@ -1087,8 +1285,10 @@ def _set_session_live_output(
             state.content = str(content or "").strip()
         if mental_snapshot is not _UNSET:
             state.mental_snapshot = _normalize_mental_snapshot(mental_snapshot)
+        if tool_calls is not _UNSET:
+            state.tool_calls = _normalize_message_tool_calls(tool_calls)
         state.updated_at = _now_timestamp()
-        if not state.thought and not state.content and state.mental_snapshot is None:
+        if not state.thought and not state.content and state.mental_snapshot is None and not state.tool_calls:
             _SESSION_LIVE_OUTPUTS.pop(session_id, None)
     _publish_session_detail_snapshot(session_id)
 
@@ -1103,8 +1303,12 @@ def _attach_turn_capture_to_result(result: Any, capture: SessionTurnCapture) -> 
         return result
     if capture.thought and not result.get("thought") and not result.get("reasoning_content"):
         result["thought"] = capture.thought
+    if capture.content and not result.get("raw_output") and not result.get("summary"):
+        result["raw_output"] = capture.content
     if capture.mental_state and not result.get("state_info") and not result.get("stateInfo"):
         result["state_info"] = dict(capture.mental_state)
+    if capture.tool_calls and not result.get("tool_trace") and not result.get("tool_calls"):
+        result["tool_trace"] = list(capture.tool_calls)
     return result
 
 
@@ -1116,7 +1320,11 @@ def _capture_session_ui_stream(session_id: str, capture: SessionTurnCapture):
         ui = get_ui()
         original_stream_thought = getattr(ui, "stream_thought", None)
         original_clear_thought_stream = getattr(ui, "clear_thought_stream", None)
+        original_stream_response = getattr(ui, "stream_response", None)
+        original_clear_response_stream = getattr(ui, "clear_response_stream", None)
         original_set_pet_mental_state = getattr(ui, "set_pet_mental_state", None)
+        event_bus = get_event_bus()
+        callback_ids: list[str] = []
 
         def stream_thought_proxy(text: str, done: bool = False):
             if callable(original_stream_thought):
@@ -1132,6 +1340,20 @@ def _capture_session_ui_stream(session_id: str, capture: SessionTurnCapture):
             capture.clear_thought()
             _set_session_live_output(session_id, thought="")
 
+        def stream_response_proxy(text: str, done: bool = False):
+            if callable(original_stream_response):
+                original_stream_response(text, done=done)
+            cleaned = _sanitize_message_content("assistant", text)
+            if cleaned:
+                capture.note_content(cleaned)
+                _set_session_live_output(session_id, content=cleaned)
+
+        def clear_response_stream_proxy():
+            if callable(original_clear_response_stream):
+                original_clear_response_stream()
+            capture.clear_content()
+            _set_session_live_output(session_id, content="")
+
         def set_pet_mental_state_proxy(mood: str = "", feeling: str = "", whisper: str = ""):
             if callable(original_set_pet_mental_state):
                 original_set_pet_mental_state(mood=mood, feeling=feeling, whisper=whisper)
@@ -1142,14 +1364,42 @@ def _capture_session_ui_stream(session_id: str, capture: SessionTurnCapture):
             if snapshot is not None:
                 _set_session_live_output(session_id, mental_snapshot=snapshot)
 
+        def tool_event_proxy(event):
+            data = event.data or {}
+            name = str(data.get("name") or "").strip()
+            if not name:
+                return
+            status = {
+                EventNames.TOOL_START: "running",
+                EventNames.TOOL_SUCCESS: "done",
+                EventNames.TOOL_ERROR: "failed",
+            }.get(event.name, "running")
+            summary = str(data.get("result") or data.get("error") or "").strip()
+            capture.note_tool_event(name, status, summary)
+            _set_session_live_output(session_id, tool_calls=capture.tool_calls)
+
         setattr(ui, "stream_thought", stream_thought_proxy)
         setattr(ui, "clear_thought_stream", clear_thought_stream_proxy)
+        setattr(ui, "stream_response", stream_response_proxy)
+        setattr(ui, "clear_response_stream", clear_response_stream_proxy)
         setattr(ui, "set_pet_mental_state", set_pet_mental_state_proxy)
+        for event_name in (EventNames.TOOL_START, EventNames.TOOL_SUCCESS, EventNames.TOOL_ERROR):
+            callback_ids.append(
+                event_bus.subscribe(
+                    event_name,
+                    tool_event_proxy,
+                    callback_id=f"web_chat_{session_id}_{event_name}_{id(capture)}",
+                )
+            )
         try:
             yield
         finally:
+            for callback_id in callback_ids:
+                event_bus.unsubscribe_by_id(callback_id)
             setattr(ui, "stream_thought", original_stream_thought)
             setattr(ui, "clear_thought_stream", original_clear_thought_stream)
+            setattr(ui, "stream_response", original_stream_response)
+            setattr(ui, "clear_response_stream", original_clear_response_stream)
             setattr(ui, "set_pet_mental_state", original_set_pet_mental_state)
 
 

@@ -1,4 +1,4 @@
-import { BrainCircuit, ChevronDown, ChevronRight } from "lucide-react";
+import { ArrowDown, BrainCircuit, ChevronDown, ChevronRight } from "lucide-react";
 import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 import { ConversationMessage, MentalStateSnapshot } from "../../api/types";
@@ -71,7 +71,9 @@ export function ConversationView({
 }: ConversationViewProps) {
   const { lang, t, statusLabel } = useAppI18n();
   const timelineRef = useRef<HTMLDivElement | null>(null);
-  const [thoughtExpansion, setThoughtExpansion] = useState<Record<string, boolean>>({});
+  const [sectionExpansion, setSectionExpansion] = useState<Record<string, Record<string, boolean>>>({});
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  const previousStreamingRef = useRef<Record<string, boolean>>({});
   const resolvedActionMode = composerActionMode ?? "send";
   const resolvedActionDisabled =
     composerActionDisabled
@@ -102,13 +104,6 @@ export function ConversationView({
         .find((message) => message.role === "user")?.content ?? "",
     [messages],
   );
-  const latestToolCalls = useMemo(
-    () =>
-      [...messages]
-        .reverse()
-        .find((message) => (message.toolCalls?.length ?? 0) > 0)?.toolCalls ?? [],
-    [messages],
-  );
   const lastMessageTimestamp = useMemo(
     () => [...messages].reverse().find((message) => message.timestamp)?.timestamp ?? "",
     [messages],
@@ -123,6 +118,13 @@ export function ConversationView({
     { label: t("lastUpdated"), value: lastMessageTimestamp ? formatTimestamp(lastMessageTimestamp) : "--" },
   ];
   const resolvedStats = stats ?? [];
+  const latestToolCalls = useMemo(
+    () =>
+      [...messages]
+        .reverse()
+        .find((message) => (message.toolCalls?.length ?? 0) > 0)?.toolCalls ?? [],
+    [messages],
+  );
   const hasSessionMeta = resolvedStats.length > 0 || latestToolCalls.length > 0 || Boolean(lastMessageTimestamp);
   const hasMetaSection = hasSessionMeta || Boolean(supplementalContent);
 
@@ -153,12 +155,55 @@ export function ConversationView({
     if (!timeline) {
       return;
     }
-    if (autoScrollToLatest) {
+    const stickToBottom = () => {
       timeline.scrollTop = timeline.scrollHeight;
+    };
+    const handleScroll = () => {
+      const distance = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
+      setIsAtBottom(distance < 16);
+    };
+    if (autoScrollToLatest) {
+      stickToBottom();
+      setIsAtBottom(true);
+    }
+    handleScroll();
+    timeline.addEventListener("scroll", handleScroll);
+    return () => timeline.removeEventListener("scroll", handleScroll);
+  }, [autoScrollToLatest, sessionId, messages]);
+
+  useEffect(() => {
+    const previous = previousStreamingRef.current;
+    const nextStreaming: Record<string, boolean> = {};
+    let shouldCollapse = false;
+    for (const message of messages) {
+      if (message.role !== "assistant") {
+        continue;
+      }
+      nextStreaming[message.id] = Boolean(message.streaming);
+      if (previous[message.id] && !message.streaming) {
+        shouldCollapse = true;
+      }
+    }
+    previousStreamingRef.current = nextStreaming;
+    if (!shouldCollapse) {
       return;
     }
-    timeline.scrollTop = 0;
-  }, [autoScrollToLatest, sessionId, messages]);
+    setSectionExpansion((current) => {
+      const next = { ...current };
+      for (const message of messages) {
+        if (message.role !== "assistant" || message.streaming) {
+          continue;
+        }
+        next[message.id] = {
+          ...(next[message.id] ?? {}),
+          thought: false,
+          mental: false,
+          tools: false,
+        };
+      }
+      return next;
+    });
+  }, [messages]);
 
   function cognitiveStateLabel(snapshot: MentalStateSnapshot | undefined) {
     const value = String(snapshot?.cognitiveState ?? "").trim().toLowerCase() || "unknown";
@@ -189,18 +234,45 @@ export function ConversationView({
 
   function hasThoughtBlock(message: ConversationMessage) {
     return message.role === "assistant"
-      && (Boolean(message.thought?.trim()) || hasMentalSnapshot(message.mentalSnapshot));
+      && Boolean(message.thought?.trim());
   }
 
-  function isThoughtExpanded(message: ConversationMessage) {
-    return thoughtExpansion[message.id] ?? Boolean(message.streaming);
+  function hasMentalBlock(message: ConversationMessage) {
+    return message.role === "assistant" && hasMentalSnapshot(message.mentalSnapshot);
   }
 
-  function toggleThoughtExpansion(messageId: string, currentExpanded: boolean) {
-    setThoughtExpansion((current) => ({
+  function hasToolBlock(message: ConversationMessage) {
+    return message.role === "assistant" && (message.toolCalls?.length ?? 0) > 0;
+  }
+
+  function hasResponseBlock(message: ConversationMessage) {
+    return message.role === "assistant" && Boolean(message.content.trim());
+  }
+
+  function getExpansionState(messageId: string, section: string, defaultExpanded: boolean) {
+    if (section === "response") {
+      return sectionExpansion[messageId]?.[section] ?? true;
+    }
+    return sectionExpansion[messageId]?.[section] ?? defaultExpanded;
+  }
+
+  function toggleSection(messageId: string, section: string, defaultExpanded: boolean) {
+    setSectionExpansion((current) => ({
       ...current,
-      [messageId]: !currentExpanded,
+      [messageId]: {
+        ...(current[messageId] ?? {}),
+        [section]: !getExpansionState(messageId, section, defaultExpanded),
+      },
     }));
+  }
+
+  function scrollToBottom() {
+    const timeline = timelineRef.current;
+    if (!timeline) {
+      return;
+    }
+    timeline.scrollTop = timeline.scrollHeight;
+    setIsAtBottom(true);
   }
 
   return (
@@ -284,91 +356,173 @@ export function ConversationView({
                 {message.timestamp ? <span>{formatTimestamp(message.timestamp)}</span> : null}
               </div>
               {hasThoughtBlock(message) ? (
-                <section className={styles.thoughtBlock}>
+                <section className={styles.sectionBlock}>
                   <button
                     type="button"
-                    className={styles.thoughtToggle}
-                    aria-expanded={isThoughtExpanded(message)}
-                    onClick={() => toggleThoughtExpansion(message.id, isThoughtExpanded(message))}
-                    title={isThoughtExpanded(message) ? t("thoughtProcessVisible") : t("thoughtProcessHidden")}
+                    className={styles.sectionToggle}
+                    aria-expanded={getExpansionState(message.id, "thought", Boolean(message.streaming))}
+                    onClick={() => toggleSection(message.id, "thought", Boolean(message.streaming))}
+                    title={
+                      getExpansionState(message.id, "thought", Boolean(message.streaming))
+                        ? t("thoughtProcessVisible")
+                        : t("thoughtProcessHidden")
+                    }
                   >
-                    {isThoughtExpanded(message) ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                    {getExpansionState(message.id, "thought", Boolean(message.streaming)) ? (
+                      <ChevronDown size={16} />
+                    ) : (
+                      <ChevronRight size={16} />
+                    )}
                     <BrainCircuit size={16} />
                     <span>{t("thoughtProcess")}</span>
                   </button>
-
-                  {isThoughtExpanded(message) ? (
-                    <div className={styles.thoughtPanel}>
-                      {hasMentalSnapshot(message.mentalSnapshot) ? (
-                        <div className={styles.mentalSnapshot}>
-                          <div className={styles.thoughtSectionHeader}>
-                            <span className={styles.thoughtSectionLabel}>{t("mentalState")}</span>
-                            {(message.mentalSnapshot?.mood || cognitiveStateLabel(message.mentalSnapshot)) ? (
-                              <span className={styles.thoughtMetaPill}>
-                                {message.mentalSnapshot?.mood?.trim() || cognitiveStateLabel(message.mentalSnapshot)}
-                              </span>
-                            ) : null}
-                          </div>
-                          {(message.mentalSnapshot?.summary || message.mentalSnapshot?.feeling) ? (
-                            <p className={styles.mentalSummary}>
-                              {message.mentalSnapshot?.summary?.trim()
-                                || message.mentalSnapshot?.feeling?.trim()
-                                || t("mentalStatePending")}
-                            </p>
-                          ) : null}
-                          {message.mentalSnapshot?.whisper?.trim() ? (
-                            <p className={styles.mentalWhisper}>
-                              <span className={styles.thoughtSectionLabel}>{t("mentalWhisper")}</span>
-                              {message.mentalSnapshot.whisper.trim()}
-                            </p>
-                          ) : null}
-                          <div className={styles.thoughtMetaRow}>
-                            {message.mentalSnapshot?.cognitiveState?.trim() ? (
-                              <span className={styles.thoughtMetaPill}>
-                                {t("mentalCognitiveState")} {cognitiveStateLabel(message.mentalSnapshot)}
-                              </span>
-                            ) : null}
-                            {Number.isFinite(message.mentalSnapshot?.confidence)
-                              && (message.mentalSnapshot?.confidence ?? 0) > 0 ? (
-                                <span className={styles.thoughtMetaPill}>
-                                  {t("mentalConfidence")} {Math.round((message.mentalSnapshot?.confidence ?? 0) * 100)}%
-                                </span>
-                              ) : null}
-                          </div>
-                        </div>
-                      ) : null}
-
-                      {message.thought?.trim() ? (
-                        <div className={styles.thoughtTextBlock}>
-                          <p className={styles.thoughtText}>{message.thought.trim()}</p>
-                        </div>
-                      ) : null}
+                  {getExpansionState(message.id, "thought", Boolean(message.streaming)) ? (
+                    <div className={styles.sectionPanel}>
+                      <p className={styles.messageBody}>{message.thought?.trim()}</p>
                     </div>
                   ) : null}
                 </section>
               ) : null}
 
-              {message.content.trim() ? (
-                <div className={styles.responseBlock}>
-                  {hasThoughtBlock(message) ? (
-                    <span className={styles.responseLabel}>{t("responseLabel")}</span>
+              {hasMentalBlock(message) ? (
+                <section className={styles.sectionBlock}>
+                  <button
+                    type="button"
+                    className={styles.sectionToggle}
+                    aria-expanded={getExpansionState(message.id, "mental", Boolean(message.streaming))}
+                    onClick={() => toggleSection(message.id, "mental", Boolean(message.streaming))}
+                    title={
+                      getExpansionState(message.id, "mental", Boolean(message.streaming))
+                        ? t("mentalProcessVisible")
+                        : t("mentalProcessHidden")
+                    }
+                  >
+                    {getExpansionState(message.id, "mental", Boolean(message.streaming)) ? (
+                      <ChevronDown size={16} />
+                    ) : (
+                      <ChevronRight size={16} />
+                    )}
+                    <BrainCircuit size={16} />
+                    <span>{t("mentalProcess")}</span>
+                  </button>
+                  {getExpansionState(message.id, "mental", Boolean(message.streaming)) ? (
+                    <div className={styles.sectionPanel}>
+                      <div className={styles.mentalSnapshot}>
+                        <div className={styles.thoughtSectionHeader}>
+                          <span className={styles.thoughtSectionLabel}>{t("mentalState")}</span>
+                          {(message.mentalSnapshot?.mood || cognitiveStateLabel(message.mentalSnapshot)) ? (
+                            <span className={styles.thoughtMetaPill}>
+                              {message.mentalSnapshot?.mood?.trim() || cognitiveStateLabel(message.mentalSnapshot)}
+                            </span>
+                          ) : null}
+                        </div>
+                        {(message.mentalSnapshot?.summary || message.mentalSnapshot?.feeling) ? (
+                          <p className={styles.mentalSummary}>
+                            {message.mentalSnapshot?.summary?.trim()
+                              || message.mentalSnapshot?.feeling?.trim()
+                              || t("mentalStatePending")}
+                          </p>
+                        ) : null}
+                        {message.mentalSnapshot?.whisper?.trim() ? (
+                          <p className={styles.mentalWhisper}>
+                            <span className={styles.thoughtSectionLabel}>{t("mentalWhisper")}</span>
+                            {message.mentalSnapshot.whisper.trim()}
+                          </p>
+                        ) : null}
+                        <div className={styles.thoughtMetaRow}>
+                          {message.mentalSnapshot?.cognitiveState?.trim() ? (
+                            <span className={styles.thoughtMetaPill}>
+                              {t("mentalCognitiveState")} {cognitiveStateLabel(message.mentalSnapshot)}
+                            </span>
+                          ) : null}
+                          {Number.isFinite(message.mentalSnapshot?.confidence)
+                            && (message.mentalSnapshot?.confidence ?? 0) > 0 ? (
+                              <span className={styles.thoughtMetaPill}>
+                                {t("mentalConfidence")} {Math.round((message.mentalSnapshot?.confidence ?? 0) * 100)}%
+                              </span>
+                            ) : null}
+                          {message.mentalSnapshot?.source ? (
+                            <span className={styles.thoughtMetaPill}>{message.mentalSnapshot.source}</span>
+                          ) : null}
+                        </div>
+                        {message.mentalSnapshot?.intervention ? (
+                          <p className={styles.mentalIntervention}>{message.mentalSnapshot.intervention}</p>
+                        ) : null}
+                      </div>
+                    </div>
                   ) : null}
-                  <p className={styles.messageBody}>{message.content}</p>
-                </div>
+                </section>
               ) : null}
-              {message.toolCalls && message.toolCalls.length > 0 ? (
-                <div className={styles.toolRow}>
-                  {message.toolCalls.map((toolCall, index) => (
-                    <span key={`${message.id}-${toolCall.name}-${index}`} className={styles.toolPill}>
-                      {toolCall.name} · {statusLabel(toolCall.status)}
-                    </span>
-                  ))}
-                </div>
+
+              {hasToolBlock(message) ? (
+                <section className={styles.sectionBlock}>
+                  <button
+                    type="button"
+                    className={styles.sectionToggle}
+                    aria-expanded={getExpansionState(message.id, "tools", Boolean(message.streaming))}
+                    onClick={() => toggleSection(message.id, "tools", Boolean(message.streaming))}
+                    title={
+                      getExpansionState(message.id, "tools", Boolean(message.streaming))
+                        ? t("toolProcessVisible")
+                        : t("toolProcessHidden")
+                    }
+                  >
+                    {getExpansionState(message.id, "tools", Boolean(message.streaming)) ? (
+                      <ChevronDown size={16} />
+                    ) : (
+                      <ChevronRight size={16} />
+                    )}
+                    <span>{t("toolProcess")}</span>
+                  </button>
+                  {getExpansionState(message.id, "tools", Boolean(message.streaming)) ? (
+                    <div className={styles.sectionPanel}>
+                      <div className={styles.toolRow}>
+                        {message.toolCalls?.map((toolCall, index) => (
+                          <span key={`${message.id}-${toolCall.name}-${index}`} className={styles.toolPill}>
+                            {toolCall.name} · {statusLabel(toolCall.status)}
+                            {toolCall.summary ? ` · ${toolCall.summary}` : ""}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </section>
+              ) : null}
+
+              {hasResponseBlock(message) ? (
+                <section className={styles.sectionBlock}>
+                  <button
+                    type="button"
+                    className={styles.sectionToggle}
+                    aria-expanded={getExpansionState(message.id, "response", true)}
+                    onClick={() => toggleSection(message.id, "response", true)}
+                    title={getExpansionState(message.id, "response", true) ? t("responseHidden") : t("responseVisible")}
+                  >
+                    {getExpansionState(message.id, "response", true) ? (
+                      <ChevronDown size={16} />
+                    ) : (
+                      <ChevronRight size={16} />
+                    )}
+                    <span>{t("responseLabel")}</span>
+                  </button>
+                  {getExpansionState(message.id, "response", true) ? (
+                    <div className={styles.sectionPanel}>
+                      <p className={styles.messageBody}>{message.content}</p>
+                    </div>
+                  ) : null}
+                </section>
               ) : null}
             </article>
           ))
         )}
       </div>
+
+      {!isAtBottom ? (
+        <button type="button" className={styles.backToBottomButton} onClick={scrollToBottom} title={t("backToBottom")}>
+          <ArrowDown size={16} />
+          <span>{t("newContent")}</span>
+        </button>
+      ) : null}
 
       <div className={styles.composer}>
         <div className={styles.composerField}>

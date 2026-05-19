@@ -1,6 +1,7 @@
 .surface {
   display: flex;
   flex-direction: column;
+  position: relative;
   min-height: 0;
   height: 100%;
   overflow: hidden;
@@ -153,6 +154,7 @@
   display: grid;
   align-content: start;
   gap: 14px;
+  scroll-behavior: smooth;
 }
 
 .emptyState {
@@ -196,13 +198,13 @@
   overflow-wrap: anywhere;
 }
 
-.thoughtBlock {
+.sectionBlock {
   display: grid;
   gap: 10px;
   margin-bottom: 12px;
 }
 
-.thoughtToggle {
+.sectionToggle {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -215,11 +217,11 @@
   cursor: pointer;
 }
 
-.thoughtToggle:hover {
+.sectionToggle:hover {
   color: var(--fg-primary);
 }
 
-.thoughtPanel {
+.sectionPanel {
   display: grid;
   gap: 12px;
   padding: 12px 13px;
@@ -255,6 +257,14 @@
 .thoughtText {
   margin: 0;
   color: var(--fg-primary);
+  white-space: pre-wrap;
+  line-height: 1.58;
+  overflow-wrap: anywhere;
+}
+
+.mentalIntervention {
+  margin: 0;
+  color: var(--accent-warm-2);
   white-space: pre-wrap;
   line-height: 1.58;
   overflow-wrap: anywhere;
@@ -362,6 +372,27 @@
 .sendButton:disabled {
   cursor: not-allowed;
   opacity: 0.62;
+}
+
+.backToBottomButton {
+  position: absolute;
+  right: 28px;
+  bottom: 92px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(216, 167, 91, 0.24);
+  background: rgba(20, 23, 26, 0.92);
+  color: var(--accent-warm-2);
+  cursor: pointer;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+}
+
+.backToBottomButton:hover {
+  border-color: rgba(216, 167, 91, 0.38);
+  background: rgba(27, 31, 35, 0.98);
 }
 
 @media (max-width: 1280px) {

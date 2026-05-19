@@ -1177,6 +1177,76 @@ def test_submit_session_message_omits_mental_snapshot_when_disabled(tmp_path, mo
     assert "mentalSnapshot" not in payload["messages"][-1]
 
 
+def test_submit_session_message_includes_stream_friendly_tool_and_mental_payloads(tmp_path, monkeypatch):
+    _seed_chat_state(tmp_path, task_status="done")
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+
+    class DummyAgent:
+        def seed_chat_history(self, messages):
+            self.messages = list(messages)
+
+        def run_single_turn(self, initial_prompt=None):
+            return {
+                "status": "completed",
+                "summary": "已完成三段式输出。",
+                "raw_output": "最终回答内容。",
+                "thought": "这是一段可见思考。",
+                "reasoning_content": "这是一段可见思考。",
+                "state_info": {
+                    "mood": "专注",
+                    "feeling": "心智模型已展开。",
+                    "whisper": "工具调用继续保持单块。",
+                },
+                "mental_snapshot": {
+                    "mood": "专注",
+                    "feeling": "心智模型已展开。",
+                    "whisper": "工具调用继续保持单块。",
+                    "cognitiveState": "productive",
+                    "confidence": 0.91,
+                    "sampleSize": 3,
+                    "interventionCount": 1,
+                    "updatedAt": "2026-05-18T12:01:00",
+                    "source": "diagnosis",
+                    "intervention": "继续保持当前路径。",
+                    "metrics": {"sample_size": 3, "intervention_count": 1},
+                    "historyTail": [
+                        {"cognitiveState": "productive", "confidence": 0.91, "timestamp": "2026-05-18T12:01:00"},
+                    ],
+                },
+                "tool_trace": [
+                    {"name": "read_file_tool", "result_preview": "read ok", "status": "success"},
+                    {"name": "run_test_for_tool", "result_preview": "tests passed", "status": "success"},
+                ],
+                "tool_call_count": 2,
+            }
+
+    monkeypatch.setattr(session_service, "create_chat_agent", lambda: DummyAgent())
+    monkeypatch.setattr(
+        session_service,
+        "_schedule_session_turn",
+        lambda context: session_service._run_session_turn(context),
+    )
+
+    response = client.post(
+        "/api/sessions/session-live/messages",
+        json={"content": "继续把对话展示改成四段式"},
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assistant = payload["messages"][-1]
+    assert assistant["content"] == "最终回答内容。"
+    assert assistant["thought"] == "这是一段可见思考。"
+    assert assistant["mentalSnapshot"]["cognitiveState"] == "productive"
+    assert assistant["mentalSnapshot"]["intervention"] == "继续保持当前路径。"
+    assert assistant["mentalSnapshot"]["metrics"]["sample_size"] == 3
+    assert assistant["toolCalls"] == [
+        {"name": "read_file_tool", "status": "done", "summary": "read ok"},
+        {"name": "run_test_for_tool", "status": "done", "summary": "tests passed"},
+    ]
+    assert payload["currentPhase"] == "ready"
+
+
 def test_runtime_summary_prefers_current_phase_over_stale_task_progress(monkeypatch):
     monkeypatch.setattr(
         runtime_service,
@@ -1623,7 +1693,7 @@ def test_config_workspace_test_llm_reports_local_draft_route_clearly(monkeypatch
     assert payload["base_url"] == "http://localhost:11434/v1"
     assert payload["config_scope"] == "draft"
     assert payload["requires_api_key"] is False
-    assert payload["api_key_source"] == "profile-env:VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY"
+    assert payload["api_key_source"] == "missing"
 
 
 def test_config_workspace_apply_rejects_stale_base_hash(monkeypatch):
@@ -2039,7 +2109,38 @@ def test_chat_review_routes_list_and_approve_candidate(tmp_path, monkeypatch):
     dataset_entry = next(
         item for item in workbench_response.json()["datasets"] if item["name"] == "chat_reviewed_multiturn"
     )
-    assert dataset_entry["available"] is False
+    assert dataset_entry["available"] is True
+
+
+def test_workbench_dataset_list_backfills_new_builtin_datasets(tmp_path, monkeypatch):
+    registry_path = tmp_path / "workspace" / "evaluation" / "datasets" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "datasets": [
+                    {
+                        "name": "custom_prompt_jsonl",
+                        "kind": "prompt_jsonl",
+                        "bundle_name": "custom_prompt_jsonl_v1",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(evolution_service, "PROJECT_ROOT", tmp_path)
+
+    response = client.get("/api/evolution/workbench")
+
+    assert response.status_code == 200
+    rows = response.json()["datasets"]
+    assert any(item["name"] == "generated_cases" for item in rows)
+    assert any(item["name"] == "chat_reviewed_multiturn" for item in rows)
 
 
 def test_start_supervised_run_from_dataset_exposes_active_snapshot_and_sse(tmp_path, monkeypatch):

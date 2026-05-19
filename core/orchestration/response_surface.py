@@ -216,7 +216,11 @@ class ResponseSurfaceController:
             }
 
         ui = self._ui_getter()
-        ui.stream_thought(processed.visible_text, done=True)
+        stream_response = getattr(ui, "stream_response", None)
+        if callable(stream_response):
+            stream_response(processed.visible_text, done=True)
+        else:
+            ui.stream_thought(processed.visible_text, done=True)
         if not tool_call_count:
             for chunk in processed.visible_text.splitlines():
                 if chunk.strip():

@@ -189,6 +189,7 @@ export type SessionSummary = {
 export type ToolCall = {
   name: string;
   status: string;
+  summary?: string;
 };
 
 export type MentalStateSnapshot = {
@@ -202,6 +203,13 @@ export type MentalStateSnapshot = {
   interventionCount: number;
   updatedAt: string;
   source: string;
+  intervention?: string;
+  metrics?: Record<string, unknown>;
+  historyTail?: Array<{
+    cognitiveState: string;
+    confidence: number;
+    timestamp: string;
+  }>;
 };
 
 export type ConversationMessage = {

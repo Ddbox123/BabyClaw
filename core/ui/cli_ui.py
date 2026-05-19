@@ -156,6 +156,7 @@ class UIManager:
         self._subagent_process_events: List[str] = []
         self._subagent_thought_events: List[str] = []
         self._current_thought_stream = ""
+        self._current_response_stream = ""
         self._current_subagent_thought_stream = ""
 
         self._conversation_max = 400
@@ -189,6 +190,7 @@ class UIManager:
         self._subagent_process_events.clear()
         self._subagent_thought_events.clear()
         self._current_thought_stream = ""
+        self._current_response_stream = ""
         self._current_subagent_thought_stream = ""
         self._tool_count = 0
         self._iterations = 0
@@ -709,6 +711,18 @@ class UIManager:
 
     def clear_thought_stream(self):
         self._current_thought_stream = ""
+        self._update_status_line()
+
+    def stream_response(self, text: str, done: bool = False):
+        cleaned = str(text or "").strip()
+        self._current_response_stream = cleaned
+        if done and cleaned:
+            self._append_agent_block("main", cleaned)
+            self._current_response_stream = ""
+        self._update_status_line()
+
+    def clear_response_stream(self):
+        self._current_response_stream = ""
         self._update_status_line()
 
     def set_pet_mental_state(self, mood: str = "", feeling: str = "", whisper: str = ""):
@@ -2632,7 +2646,16 @@ class UIManager:
             thought_lines.extend(self._prefixed_agent_lines("sub", "\n".join(sub_live)))
         if not thought_lines:
             thought_lines = ["[dim]等待思考...[/dim]"]
-        output_lines = self._build_workspace_summary_lines()
+        output_lines = []
+        response_live = self._build_live_thought_block(
+            "回答(进行中)",
+            self._current_response_stream,
+            width=68,
+            max_lines=8,
+        )
+        if response_live:
+            output_lines.extend(self._prefixed_agent_lines("main", "\n".join(response_live)))
+        output_lines.extend(self._build_workspace_summary_lines())
         tool_lines = self._tool_activity_events[-28:] if self._tool_activity_events else ["[dim]工具调用尚未开始。[/dim]"]
         work_layout = Layout()
         work_layout.split_row(
