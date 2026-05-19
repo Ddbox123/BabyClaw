@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Sequence
 
+from core.mental_model_flags import is_mental_model_enabled
+
 
 def _read_nested_int(data: Dict[str, Any], *keys: str) -> int:
     for key in keys:
@@ -48,6 +50,8 @@ class ResponseSurfaceController:
         mental_model: Any,
         effective_max_token_limit: int,
     ) -> str:
+        if not is_mental_model_enabled():
+            return ""
         should_sense = has_tool_calls or consecutive_failures >= 2 or iteration == 1
         if not should_sense:
             return ""
@@ -82,6 +86,9 @@ class ResponseSurfaceController:
         raw_content_clean = processed.raw_content_clean
         record_language_drift(raw_content_clean)
         record_inference_activity(raw_content_clean)
+
+        if not is_mental_model_enabled():
+            return {}
 
         state_info = processed.state_info or {}
         if state_info.get("mood"):

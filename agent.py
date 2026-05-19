@@ -111,6 +111,10 @@ from core.pet_system import get_pet_system
 EVOLUTION_TEST_PROMPT = "制定重启任务，然后对重启任务打勾，然后运行 `trigger_self_restart_tool` 重启你自己。"
 SUBAGENT_RESULT_MARKER = "__VIBELUTION_SUBAGENT_RESULT__"
 
+
+class TurnStopRequested(Exception):
+    """Raised when the active single turn received a web stop request."""
+
 # ============================================================================
 # Self-Evolving Agent 主类
 # ============================================================================
@@ -224,6 +228,7 @@ class SelfEvolvingAgent:
         self._active_turn_goal: str = ""
         self._single_turn_mode_active: bool = False
         self._last_turn_metadata: Dict[str, Any] = {}
+        self._turn_interrupt_checker = None
         self._chat_turn_records: List[ChatTurnRecord] = []
         self._active_supervised_case_id: str = ""
         self._pending_supervised_case_id: Optional[str] = None
@@ -674,6 +679,104 @@ class SelfEvolvingAgent:
         self._active_turn_messages = restored
         self._active_turn_goal = "__chat_session__"
 
+    def export_turn_carryover(self) -> Dict[str, Any]:
+        messages = self._serialize_turn_messages(self._active_turn_messages)
+        goal = str(getattr(self, "_active_turn_goal", "") or "").strip()
+        if not messages or not goal:
+            return {}
+        return {
+            "messages": messages,
+            "goal": goal,
+        }
+
+    def seed_turn_carryover(self, payload: Dict[str, Any] | None) -> None:
+        if not isinstance(payload, dict):
+            return
+        goal = str(payload.get("goal") or "").strip()
+        messages = self._deserialize_turn_messages(payload.get("messages") or [])
+        if not goal or not messages:
+            return
+        self._active_turn_messages = messages
+        self._active_turn_goal = goal
+
+    def _serialize_turn_messages(self, messages: Optional[List[Any]]) -> List[Dict[str, Any]]:
+        serialized: List[Dict[str, Any]] = []
+        for item in list(messages or []):
+            payload = self._serialize_turn_message(item)
+            if payload:
+                serialized.append(payload)
+        return serialized
+
+    def _serialize_turn_message(self, message: Any) -> Dict[str, Any]:
+        if isinstance(message, AIMessage):
+            payload: Dict[str, Any] = {
+                "kind": "ai",
+                "content": message.content,
+                "tool_calls": list(getattr(message, "tool_calls", []) or []),
+            }
+            additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+            if additional_kwargs:
+                payload["additional_kwargs"] = dict(additional_kwargs)
+            response_metadata = getattr(message, "response_metadata", None) or {}
+            if response_metadata:
+                payload["response_metadata"] = dict(response_metadata)
+            return payload
+        if isinstance(message, ToolMessage):
+            return {
+                "kind": "tool",
+                "content": message.content,
+                "tool_call_id": str(getattr(message, "tool_call_id", "") or ""),
+            }
+        if isinstance(message, SystemMessage):
+            return {
+                "kind": "system",
+                "content": message.content,
+            }
+        if isinstance(message, dict):
+            payload = dict(message)
+            payload["kind"] = "dict"
+            return payload
+        content = getattr(message, "content", None)
+        if content not in (None, ""):
+            return {
+                "kind": "system",
+                "content": content,
+            }
+        return {}
+
+    def _deserialize_turn_messages(self, messages: List[Dict[str, Any]]) -> List[Any]:
+        restored: List[Any] = []
+        for item in list(messages or []):
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or "").strip().lower()
+            if kind == "ai":
+                restored.append(
+                    AIMessage(
+                        content=item.get("content", ""),
+                        tool_calls=list(item.get("tool_calls") or []),
+                        additional_kwargs=dict(item.get("additional_kwargs") or {}),
+                        response_metadata=dict(item.get("response_metadata") or {}),
+                    )
+                )
+                continue
+            if kind == "tool":
+                restored.append(
+                    ToolMessage(
+                        content=item.get("content", ""),
+                        tool_call_id=str(item.get("tool_call_id") or ""),
+                    )
+                )
+                continue
+            if kind == "system":
+                restored.append(SystemMessage(content=item.get("content", "")))
+                continue
+            if kind == "dict":
+                payload = dict(item)
+                payload.pop("kind", None)
+                restored.append(payload)
+        return restored
+
     def _reset_mode_context_for_supervised_case(self, case_id: Optional[str] = None) -> None:
         self._active_turn_messages = None
         self._active_turn_goal = ""
@@ -852,7 +955,9 @@ class SelfEvolvingAgent:
         turn_tool_names: List[str] = []
         delegated_this_turn = False
         try:
+            self._raise_if_turn_stop_requested()
             for _ in range(round_state.max_iterations):
+                self._raise_if_turn_stop_requested()
                 iteration = round_state.next_iteration()
                 ui.update_status(
                     "THINKING",
@@ -879,6 +984,7 @@ class SelfEvolvingAgent:
                     total_tool_calls=round_state.total_tool_calls,
                     messages=messages,
                 )
+                self._raise_if_turn_stop_requested()
                 if delegated:
                     delegated_this_turn = True
                     round_state.note_delegation(bool(delegated.get("useful")))
@@ -917,6 +1023,7 @@ class SelfEvolvingAgent:
                         f"由于上下文超过最大承受能力，现在强制进行了一次压缩"
                         f"（{current_tokens} → {after_tokens} tokens）。"
                     ))
+                self._raise_if_turn_stop_requested()
                 response = self._invoke_llm(messages)
                 if response is None:
                     consecutive_failures = round_state.note_llm_failure()
@@ -966,6 +1073,7 @@ class SelfEvolvingAgent:
                             "ACTING",
                             **round_state.current_status(),
                         )
+                        self._raise_if_turn_stop_requested()
                         self.tool_lifecycle.execute_tool(xtc, messages)
                     messages.append(AIMessage(content=raw_content))
                     continue
@@ -1018,6 +1126,19 @@ class SelfEvolvingAgent:
                 )
                 self._last_visible_response_text = response_surface["last_visible_response_text"]
                 self._last_response_tool_calls = response_surface["last_response_tool_calls"]
+                reasoning_content = ResponseProcessor.coerce_content_text(
+                    (getattr(response, "additional_kwargs", None) or {}).get("reasoning_content", "")
+                ).strip()
+                if reasoning_content:
+                    self._last_turn_metadata = {
+                        **dict(getattr(self, "_last_turn_metadata", {}) or {}),
+                        "reasoning_content": reasoning_content,
+                    }
+                if processed.state_info:
+                    self._last_turn_metadata = {
+                        **dict(getattr(self, "_last_turn_metadata", {}) or {}),
+                        "state_info": dict(processed.state_info),
+                    }
 
                 tool_calls = processed.tool_calls
                 round_state.note_response_tools(tool_call_count)
@@ -1036,6 +1157,7 @@ class SelfEvolvingAgent:
                         **round_state.current_status(),
                     )
                 messages.append(processed.build_ai_message(response))
+                self._raise_if_turn_stop_requested()
                 if not tool_calls and TurnOutcomeController.is_readonly_platform_judgment_complete(
                     getattr(self, "_active_goal", "") or "",
                     self._last_visible_response_text,
@@ -1052,7 +1174,9 @@ class SelfEvolvingAgent:
                     ui.add_log("单轮请求已给出直接回答，本轮收束。", "INFO")
                     break
                 round_state.add_tool_calls(len(tool_calls))
+                self._raise_if_turn_stop_requested()
                 lifecycle_action = self.tool_lifecycle.execute_tools(tool_calls, messages)
+                self._raise_if_turn_stop_requested()
                 if lifecycle_action == "turn_complete":
                     get_session_state().note_scope_completion("当前事务已完成，停止当前轮继续扩散。")
                 lifecycle_decision = self._get_turn_outcome_controller().handle_lifecycle_action(lifecycle_action)
@@ -1075,6 +1199,7 @@ class SelfEvolvingAgent:
                     reason = consume_compression_request()
                     _debug_logger.info(f"[压缩] 感知层请求压缩: {reason}", tag="STATE")
                     messages, _ = self._compress_messages(messages, iteration, reason=reason)
+                    self._raise_if_turn_stop_requested()
 
                 stop_reason = self._get_turn_outcome_controller().should_stop_for_convergence(
                     iteration=iteration,
@@ -1095,6 +1220,15 @@ class SelfEvolvingAgent:
                         ui.add_log(stop_reason, "WARN")
                         break
 
+        except TurnStopRequested as stop_request:
+            self._last_turn_metadata = {
+                **dict(getattr(self, "_last_turn_metadata", {}) or {}),
+                "status": "stopped",
+                "stop_requested": True,
+                "stop_reason": str(stop_request or "").strip(),
+            }
+            self._last_visible_response_text = ""
+            ui.add_log("收到网页终止请求，本轮在安全点收束。", "WARN")
         except Exception as e:
             self._last_turn_failed = True
             ui.update_status(
@@ -1167,6 +1301,7 @@ class SelfEvolvingAgent:
             fallback_profile_id_for_retry = None
             while attempt < MAX_CONSECUTIVE_FAILURES:
                 try:
+                    self._raise_if_turn_stop_requested()
                     llm_for_turn = self._get_llm_for_current_mode(
                         disable_tools=disable_tools_for_retry,
                         profile_id=fallback_profile_id_for_retry,
@@ -1180,6 +1315,7 @@ class SelfEvolvingAgent:
                         streamed_text = ""
                         streamed_reasoning = ""
                         for chunk in llm_for_turn.stream(clean_messages):
+                            self._raise_if_turn_stop_requested()
                             full_chunk = ResponseProcessor.merge_stream_chunk(full_chunk, chunk)
                             chunk_kwargs = getattr(chunk, "additional_kwargs", None) or {}
                             chunk_reasoning = str(chunk_kwargs.get("reasoning_content_delta") or "")
@@ -1212,7 +1348,10 @@ class SelfEvolvingAgent:
                                 additional_kwargs=final_kwargs,
                                 response_metadata=getattr(full_chunk, "response_metadata", None) or {},
                             )
+                    self._raise_if_turn_stop_requested()
                     return llm_for_turn.invoke(clean_messages)
+                except TurnStopRequested:
+                    raise
                 except KeyboardInterrupt:
                     raise
                 except Exception as e:
@@ -1357,6 +1496,24 @@ class SelfEvolvingAgent:
             "[短路] 当前处于重启测试模式，只允许任务管理与重启闭环工具。"
             "请优先：创建任务 -> 勾选任务 -> 调用 trigger_self_restart_tool。"
         )
+
+    def set_turn_interrupt_checker(self, checker=None) -> None:
+        self._turn_interrupt_checker = checker
+
+    def _current_turn_stop_reason(self) -> str:
+        checker = getattr(self, "_turn_interrupt_checker", None)
+        if not callable(checker):
+            return ""
+        try:
+            reason = checker()
+        except Exception:
+            return ""
+        return str(reason or "").strip()
+
+    def _raise_if_turn_stop_requested(self) -> None:
+        reason = self._current_turn_stop_reason()
+        if reason:
+            raise TurnStopRequested(reason)
 
     def run_loop(self, initial_prompt: str = None) -> None:
         policy = self._get_mode_policy()
@@ -1563,6 +1720,7 @@ class SelfEvolvingAgent:
         finally:
             self._single_turn_mode_active = False
             self._pending_supervised_case_id = None
+            self._turn_interrupt_checker = None
             _debug_logger.info("单轮运行结束", tag=self.name)
             _debug_logger.end_session()
             logger.end_session({

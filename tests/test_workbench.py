@@ -119,10 +119,11 @@ def test_workbench_config_panel_uses_default_panel_port(monkeypatch):
 
     shell._open_config_panel()
 
-    assert opened["url"] == "http://127.0.0.1:8765/"
+    assert opened["url"] == "http://127.0.0.1:8000/config"
     assert "--port" in opened["cmd"]
-    assert opened["cmd"][opened["cmd"].index("--port") + 1] == "8765"
-    assert shell._recent_status == "已打开配置页面：http://127.0.0.1:8765/"
+    assert opened["cmd"][opened["cmd"].index("--port") + 1] == "8000"
+    assert opened["cmd"][1].endswith("scripts\\web_workbench.py")
+    assert shell._recent_status == "已打开配置页面：http://127.0.0.1:8000/config"
 
 
 def test_workbench_config_panel_reuses_existing_server(monkeypatch):
@@ -140,8 +141,8 @@ def test_workbench_config_panel_reuses_existing_server(monkeypatch):
 
     shell._open_config_panel()
 
-    assert opened["url"] == "http://127.0.0.1:8765/"
-    assert shell._recent_status == "已打开配置页面：http://127.0.0.1:8765/"
+    assert opened["url"] == "http://127.0.0.1:8000/config"
+    assert shell._recent_status == "已打开配置页面：http://127.0.0.1:8000/config"
 
 
 def test_workbench_supervised_evolution_path_updates_status(monkeypatch):
@@ -666,7 +667,7 @@ def test_workbench_supervised_evolution_prints_progress_events(monkeypatch):
         decision_path = "workspace/supervised_evolution/decisions/demo.json"
         policy_action = {}
 
-    def fake_run_workbench_session(*, bundle_name, keep_worktree, progress_callback=None):
+    def fake_run_workbench_session(*, bundle_name, keep_worktree, progress_callback=None, checkpoint_callback=None):
         progress_callback(
             {
                 "event": "session_start",

@@ -73,7 +73,16 @@ from core.ui.cli_ui import get_ui
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_PANEL_PORT = 8765
+def _default_workbench_port() -> int:
+    raw_value = str(os.environ.get("VIBELUTION_PORT") or "").strip()
+    try:
+        port = int(raw_value)
+    except ValueError:
+        return 8000
+    return port if 0 < port < 65536 else 8000
+
+
+CONFIG_PANEL_PORT = _default_workbench_port()
 CONFIG_PANEL_BROWSER_PROFILE_DIR = PROJECT_ROOT / ".runtime" / "config_panel_browser"
 
 
@@ -404,8 +413,9 @@ class AgentWorkbenchShell:
             self.ui.console.print(render())
 
     def _open_config_panel(self):
-        panel_script = PROJECT_ROOT / "scripts" / "config_panel.py"
-        url = f"http://127.0.0.1:{CONFIG_PANEL_PORT}/"
+        panel_script = PROJECT_ROOT / "scripts" / "web_workbench.py"
+        url = f"http://127.0.0.1:{CONFIG_PANEL_PORT}/config"
+        health_url = f"http://127.0.0.1:{CONFIG_PANEL_PORT}/api/health"
         cmd = [
             sys.executable,
             str(panel_script),
@@ -415,7 +425,7 @@ class AgentWorkbenchShell:
             str(CONFIG_PANEL_PORT),
             "--no-browser",
         ]
-        if not _config_panel_is_ready(url):
+        if not _config_panel_is_ready(health_url):
             try:
                 subprocess.Popen(
                     cmd,
@@ -426,7 +436,7 @@ class AgentWorkbenchShell:
                 )
                 deadline = time.time() + 3.0
                 while time.time() < deadline:
-                    if _config_panel_is_ready(url):
+                    if _config_panel_is_ready(health_url):
                         break
                     time.sleep(0.2)
             except Exception:
