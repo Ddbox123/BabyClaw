@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(pytest tests/ -v --tb=no -q)",
-      "Bash(pytest tests/ -v --tb=no --continue-on-collection-errors)",
-      "Bash(pytest tests/ -v --tb=no --ignore=tests/test_code_analysis_tools.py --ignore=tests/test_runner.py -q)"
-    ]
-  }
-}

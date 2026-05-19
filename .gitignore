@@ -71,6 +71,9 @@ workspace/
 
 # Local project operator rules (keep out of GitHub)
 /AGENTS.md
+/.arts/
+/.claude/
+/.codeartsdoer/
 
 # OS
 .DS_Store
