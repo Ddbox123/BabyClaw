@@ -814,6 +814,12 @@ export function ChatCodingRoute() {
           <h3 className={styles.sectionTitle}>{detail?.title ?? runtime?.sessionTitle ?? t("loadingSession")}</h3>
           <p className={styles.contextLine}>{sessionStateLine}</p>
           <div className={styles.taskSummaryBlock}>
+            <span className={styles.taskSummaryLabel}>{t("fileContext")}</span>
+            <p className={styles.taskSummaryValue} title={detail?.defaultFileContext ?? "workspace"}>
+              {detail?.defaultFileContext ?? runtime?.defaultRoute ?? "workspace"}
+            </p>
+          </div>
+          <div className={styles.taskSummaryBlock}>
             <span className={styles.taskSummaryLabel}>{t("currentTask")}</span>
             <p className={styles.taskSummaryValue} title={sessionSummary}>
               {sessionSummary}
@@ -1003,6 +1009,7 @@ export function ChatCodingRoute() {
                 messages={detail.messages}
                 taskSummary={detail.taskSummary}
                 defaultFileContext={detail.defaultFileContext}
+                showSessionOverview={false}
                 stats={conversationStats}
                 composerValue={activeDraft}
                 composerPlaceholder={composerPlaceholder}

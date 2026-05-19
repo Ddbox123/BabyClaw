@@ -24,6 +24,7 @@ type ConversationViewProps = {
   }>;
   headerActions?: ReactNode;
   supplementalContent?: ReactNode;
+  showSessionOverview?: boolean;
   autoScrollToLatest?: boolean;
   composerValue: string;
   composerPlaceholder: string;
@@ -53,6 +54,7 @@ export function ConversationView({
   stats,
   headerActions,
   supplementalContent,
+  showSessionOverview = true,
   autoScrollToLatest = true,
   composerValue,
   composerPlaceholder,
@@ -126,7 +128,7 @@ export function ConversationView({
     [messages],
   );
   const hasSessionMeta = resolvedStats.length > 0 || latestToolCalls.length > 0 || Boolean(lastMessageTimestamp);
-  const hasMetaSection = hasSessionMeta || Boolean(supplementalContent);
+  const hasMetaSection = showSessionOverview && (hasSessionMeta || Boolean(supplementalContent));
 
   function formatTimestamp(timestamp: string) {
     if (!timestamp) {
@@ -288,7 +290,7 @@ export function ConversationView({
         </div>
       </div>
 
-      {resolvedSummaryItems.length > 0 ? (
+      {showSessionOverview && resolvedSummaryItems.length > 0 ? (
         <div className={styles.summaryGrid}>
           {resolvedSummaryItems.map((item) => (
             <section key={item.label} className={styles.summaryCard}>
