@@ -167,6 +167,35 @@ def test_run_workbench_session_forwards_progress_callback(monkeypatch):
     assert calls[0]["progress_callback"] is callback
 
 
+def test_run_workbench_session_forwards_checkpoint_callback(monkeypatch):
+    decision = SimpleNamespace(
+        decision="HOLD",
+        bundle_name="demo_bundle",
+        policy_action={},
+    )
+    calls = []
+    checkpoints = []
+
+    def fake_run(**kwargs):
+        calls.append(kwargs)
+        kwargs["checkpoint_callback"]({"phase": "case_boundary", "case_id": "probe"})
+        return decision
+
+    monkeypatch.setattr("core.evaluation.supervised_evolution.run_supervised_evolution_session", fake_run)
+    monkeypatch.setattr(
+        "core.evaluation.supervised_evolution.format_decision_record_summary",
+        lambda item: f"summary:{item.decision}",
+    )
+
+    callback = checkpoints.append
+
+    result = run_workbench_session("demo_bundle", keep_worktree=True, checkpoint_callback=callback)
+
+    assert result.decision is decision
+    assert checkpoints == [{"phase": "case_boundary", "case_id": "probe"}]
+    assert calls[0]["checkpoint_callback"] is callback
+
+
 def test_decision_history_helpers_sort_and_select(tmp_path: Path):
     decisions_dir = tmp_path / "workspace" / "supervised_evolution" / "decisions"
     decisions_dir.mkdir(parents=True)

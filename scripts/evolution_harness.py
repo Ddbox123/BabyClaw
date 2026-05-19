@@ -24,11 +24,13 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 REPORT_DIR = PROJECT_ROOT / "log_info" / "harness_reports"
+LIVE_CASE_TRANSCRIPT_LIMIT = 8
+LIVE_CASE_TEXT_LIMIT = 4000
 DEFAULT_TEST_PROMPT = "制定重启任务，然后对重启任务打勾，然后运行 `trigger_self_restart_tool` 重启你自己。"
 DEFAULT_TRANSACTION_PROMPT = (
     "执行一轮非重启演化事务探针："
@@ -482,6 +484,138 @@ def read_conversation_events(path: Path) -> List[Dict[str, Any]]:
         if isinstance(payload, dict):
             events.append(payload)
     return events
+
+
+def _truncate_live_case_text(text: str, *, limit: int = LIVE_CASE_TEXT_LIMIT) -> str:
+    normalized = str(text or "").strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _resolve_live_case_payload_ref(base_dir: Path, value: str) -> Optional[Path]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    candidate = (base_dir / raw).resolve()
+    try:
+        candidate.relative_to(base_dir.resolve())
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def _read_live_case_event_text(event: Dict[str, Any], field_name: str, *, base_dir: Path) -> str:
+    inline_value = event.get(field_name)
+    if isinstance(inline_value, str) and inline_value.strip():
+        return _truncate_live_case_text(inline_value)
+
+    ref_path = _resolve_live_case_payload_ref(base_dir, str(event.get(f"{field_name}_ref") or ""))
+    if ref_path is not None:
+        try:
+            return _truncate_live_case_text(ref_path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            pass
+
+    preview_value = event.get(f"{field_name}_preview")
+    if isinstance(preview_value, str) and preview_value.strip():
+        return _truncate_live_case_text(preview_value)
+
+    return ""
+
+
+def build_live_case_io_payload(log_info_dir: Path) -> Dict[str, Any]:
+    candidates = sorted(log_info_dir.glob("conversation_*.jsonl"), key=lambda path: path.stat().st_mtime)
+    if not candidates:
+        return {}
+
+    conversation_path = candidates[-1]
+    events = read_conversation_events(conversation_path)
+    if not events:
+        return {"conversation_path": str(conversation_path)}
+
+    transcript: List[Dict[str, Any]] = []
+    payload_root = conversation_path.parent
+    for event in events:
+        event_type = str(event.get("type") or "").strip().lower()
+        timestamp = str(event.get("timestamp") or "").strip()
+        if event_type == "external_request":
+            content = _read_live_case_event_text(event, "content", base_dir=payload_root)
+            if content:
+                transcript.append(
+                    {
+                        "timestamp": timestamp,
+                        "kind": "input",
+                        "label": "prompt",
+                        "content": content,
+                    }
+                )
+            continue
+
+        if event_type == "llm_response":
+            content = _read_live_case_event_text(event, "content", base_dir=payload_root)
+            if not content:
+                content = _read_live_case_event_text(event, "raw_response", base_dir=payload_root)
+            if content:
+                transcript.append(
+                    {
+                        "timestamp": timestamp,
+                        "kind": "assistant",
+                        "label": "assistant",
+                        "content": content,
+                    }
+                )
+            continue
+
+        if event_type == "tool_call":
+            content = _read_live_case_event_text(event, "tool_result", base_dir=payload_root)
+            if not content:
+                tool_args = event.get("tool_args")
+                if tool_args:
+                    try:
+                        content = _truncate_live_case_text(json.dumps(tool_args, ensure_ascii=False, indent=2))
+                    except TypeError:
+                        content = _truncate_live_case_text(str(tool_args))
+            if content:
+                transcript.append(
+                    {
+                        "timestamp": timestamp,
+                        "kind": "tool",
+                        "label": str(event.get("tool_name") or "tool").strip() or "tool",
+                        "content": content,
+                        "status": str(event.get("status") or "").strip(),
+                    }
+                )
+            continue
+
+        if event_type == "error":
+            content = str(event.get("error_msg") or event.get("traceback") or "").strip()
+            if content:
+                transcript.append(
+                    {
+                        "timestamp": timestamp,
+                        "kind": "error",
+                        "label": str(event.get("error_type") or "error").strip() or "error",
+                        "content": _truncate_live_case_text(content),
+                    }
+                )
+
+    if not transcript:
+        return {"conversation_path": str(conversation_path)}
+
+    trimmed = transcript[-LIVE_CASE_TRANSCRIPT_LIMIT:]
+    latest_input = next((item["content"] for item in reversed(trimmed) if item["kind"] == "input"), "")
+    latest_output_entry = next((item for item in reversed(trimmed) if item["kind"] != "input"), None)
+
+    return {
+        "conversation_path": str(conversation_path),
+        "latest_input": latest_input,
+        "latest_output": latest_output_entry["content"] if latest_output_entry else "",
+        "latest_output_kind": latest_output_entry["kind"] if latest_output_entry else "",
+        "latest_output_label": latest_output_entry["label"] if latest_output_entry else "",
+        "transcript": trimmed,
+        "updated_at": str((latest_output_entry or trimmed[-1]).get("timestamp") or ""),
+    }
 
 
 def is_restart_trigger_line(line: str) -> bool:
@@ -1314,6 +1448,7 @@ def run_harness(
     post_restart_observe_seconds: int,
     keep_worktree: bool,
     scenario: str = "restart",
+    progress_callback: Callable[[Dict[str, Any]], None] | None = None,
 ) -> HarnessResult:
     harness_id = uuid.uuid4().hex
     started_at = now_iso()
@@ -1384,6 +1519,7 @@ def run_harness(
     pre_restart_agent_pids = {process.pid}
     reentered_agent_pids: List[int] = []
     deadline = time.time() + timeout_seconds
+    last_live_case_fingerprint = ""
 
     try:
         while time.time() < deadline:
@@ -1441,6 +1577,14 @@ def run_harness(
                             restart_observed_at = time.time()
                 else:
                     process_history[pid].last_seen = ts
+
+            if progress_callback is not None:
+                live_case_payload = build_live_case_io_payload(log_info_dir)
+                if live_case_payload:
+                    fingerprint = json.dumps(live_case_payload, ensure_ascii=False, sort_keys=True)
+                    if fingerprint != last_live_case_fingerprint:
+                        progress_callback(dict(live_case_payload))
+                        last_live_case_fingerprint = fingerprint
 
             if expect_restart and restart_reentered and restart_observed_at is not None:
                 latest_conversation = summarize_latest_matching_file(

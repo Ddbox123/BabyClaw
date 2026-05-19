@@ -20,6 +20,7 @@ DEFAULT_BUNDLE_NAME = "supervised_evolution_dry_run_v1"
 DEFAULT_BUNDLE_PATH = Path("workspace/evaluation/bundles") / f"{DEFAULT_BUNDLE_NAME}.json"
 DEFAULT_BUNDLE_TEMPLATE_DIR = Path(__file__).resolve().parent / "bundles"
 ProgressCallback = Callable[[Dict[str, Any]], None]
+CheckpointCallback = Callable[[Dict[str, Any]], None]
 
 
 def _workspace_bundle_path(root: Path, bundle_name: str) -> Path:
@@ -573,6 +574,12 @@ def _emit_progress(progress_callback: Optional[ProgressCallback], payload: Dict[
     progress_callback(event)
 
 
+def _run_checkpoint(checkpoint_callback: Optional[CheckpointCallback], payload: Dict[str, Any]) -> None:
+    if checkpoint_callback is None:
+        return
+    checkpoint_callback(dict(payload))
+
+
 def _has_drift_warning(*, status: str, reason: str) -> bool:
     text = f"{status} {reason}".lower()
     markers = (
@@ -636,6 +643,7 @@ def run_supervised_evolution_session(
     harness_runner: Optional[Callable[..., HarnessResult]] = None,
     promotion_gate_runner: Optional[Callable[..., Any]] = None,
     progress_callback: Optional[ProgressCallback] = None,
+    checkpoint_callback: Optional[CheckpointCallback] = None,
 ) -> SupervisedEvolutionDecision:
     root = (project_root or get_workspace().project_root).resolve()
     bundle_path = resolve_supervised_bundle_path(bundle_name, project_root=root)
@@ -664,6 +672,15 @@ def run_supervised_evolution_session(
             "active_advisory_lines": advisory_lines,
         },
     )
+    _run_checkpoint(
+        checkpoint_callback,
+        {
+            "phase": "session_start",
+            "session_id": session_id,
+            "bundle_name": str(bundle.get("bundle_name") or bundle_name),
+            "case_total": len(cases),
+        },
+    )
 
     for case_index, case in enumerate(cases, start=1):
         case_id = str(case.get("case_id") or "").strip() or "case"
@@ -690,11 +707,29 @@ def run_supervised_evolution_session(
                     "role": role,
                     "scenario": scenario,
                     "mode": mode,
+                    "prompt": prompt,
                     "timeout_seconds": timeout_seconds,
                     "keep_worktree": keep_worktree,
                 },
             )
             try:
+                def emit_live_case_progress(payload: Dict[str, Any]) -> None:
+                    _emit_progress(
+                        progress_callback,
+                        {
+                            "event": "role_live",
+                            "session_id": session_id,
+                            "case_index": case_index,
+                            "case_total": len(cases),
+                            "case_id": case_id,
+                            "role": role,
+                            "scenario": scenario,
+                            "mode": mode,
+                            "prompt": prompt,
+                            **payload,
+                        },
+                    )
+
                 result = runner(
                     repo_root=root,
                     mode=mode,
@@ -704,6 +739,7 @@ def run_supervised_evolution_session(
                     expect_restart=expect_restart,
                     post_restart_observe_seconds=post_restart_observe_seconds,
                     keep_worktree=keep_worktree,
+                    progress_callback=emit_live_case_progress,
                 )
             except Exception as exc:
                 _emit_progress(
@@ -756,6 +792,29 @@ def run_supervised_evolution_session(
                     report_path=report_path,
                 )
             )
+            _run_checkpoint(
+                checkpoint_callback,
+                {
+                    "phase": "role_boundary",
+                    "session_id": session_id,
+                    "bundle_name": str(bundle.get("bundle_name") or bundle_name),
+                    "case_index": case_index,
+                    "case_total": len(cases),
+                    "case_id": case_id,
+                    "role": role,
+                },
+            )
+        _run_checkpoint(
+            checkpoint_callback,
+            {
+                "phase": "case_boundary",
+                "session_id": session_id,
+                "bundle_name": str(bundle.get("bundle_name") or bundle_name),
+                "case_index": case_index,
+                "case_total": len(cases),
+                "case_id": case_id,
+            },
+        )
 
     baseline_summary = _build_run_aggregate(baseline_runs)
     candidate_summary = _build_run_aggregate(candidate_runs)

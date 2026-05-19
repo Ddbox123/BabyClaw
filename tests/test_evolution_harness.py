@@ -7,6 +7,7 @@ from pathlib import Path
 
 from scripts.evolution_harness import (
     build_post_restart_observation,
+    build_live_case_io_payload,
     build_agent_command,
     build_synthetic_venv,
     classify_tool_event_phase,
@@ -483,6 +484,35 @@ def test_read_conversation_events_ignores_broken_jsonl_rows(tmp_path: Path):
     events = read_conversation_events(path)
 
     assert [item["type"] for item in events] == ["debug", "tool_call"]
+
+
+def test_build_live_case_io_payload_reads_inline_and_referenced_content(tmp_path: Path):
+    payload_dir = tmp_path / "payloads"
+    payload_dir.mkdir()
+    (payload_dir / "tool_result.txt").write_text("tool result body", encoding="utf-8")
+    conversation_path = tmp_path / "conversation_demo.jsonl"
+    conversation_path.write_text(
+        "\n".join(
+            [
+                '{"type":"external_request","timestamp":"2026-05-19T12:00:01Z","content":"prompt body"}',
+                '{"type":"tool_call","timestamp":"2026-05-19T12:00:02Z","tool_name":"read_file_tool","status":"success","tool_result_ref":"payloads/tool_result.txt"}',
+                '{"type":"llm_response","timestamp":"2026-05-19T12:00:03Z","content":"assistant reply"}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    payload = build_live_case_io_payload(tmp_path)
+
+    assert payload["conversation_path"].endswith("conversation_demo.jsonl")
+    assert payload["latest_input"] == "prompt body"
+    assert payload["latest_output"] == "assistant reply"
+    assert payload["latest_output_kind"] == "assistant"
+    assert payload["latest_output_label"] == "assistant"
+    assert payload["updated_at"] == "2026-05-19T12:00:03Z"
+    assert [item["kind"] for item in payload["transcript"]] == ["input", "tool", "assistant"]
+    assert payload["transcript"][1]["label"] == "read_file_tool"
+    assert payload["transcript"][1]["content"] == "tool result body"
 
 
 def test_safe_modify_probe_summary_reports_marker_and_dirty_state(tmp_path: Path):

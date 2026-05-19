@@ -270,6 +270,119 @@ def test_run_supervised_evolution_session_emits_progress_events(tmp_path: Path):
     assert candidate_finish["observational"] is True
 
 
+def test_run_supervised_evolution_session_forwards_live_case_events(tmp_path: Path):
+    bundle_dir = tmp_path / "workspace" / "evaluation" / "bundles"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    bundle_path = bundle_dir / f"{DEFAULT_BUNDLE_NAME}.json"
+    bundle_path.write_text(
+        """
+{
+  "benchmark": "dry",
+  "bundle_name": "supervised_evolution_dry_run_v1",
+  "cases": [
+    {
+      "case_id": "probe",
+      "scenario": "transaction",
+      "mode": "single_turn",
+      "baseline_prompt": "baseline",
+      "candidate_prompt": "candidate"
+    }
+  ]
+}
+        """.strip(),
+        encoding="utf-8",
+    )
+    events = []
+
+    def fake_runner(**kwargs):
+        kwargs["progress_callback"](
+            {
+                "conversation_path": "log_info/conversation_probe.jsonl",
+                "latest_input": kwargs["prompt"],
+                "latest_output": f"{kwargs['prompt']} output",
+                "latest_output_kind": "assistant",
+                "latest_output_label": "assistant",
+                "updated_at": "2026-05-14T00:00:03Z",
+                "transcript": [
+                    {
+                        "timestamp": "2026-05-14T00:00:01Z",
+                        "kind": "input",
+                        "label": "prompt",
+                        "content": kwargs["prompt"],
+                    },
+                    {
+                        "timestamp": "2026-05-14T00:00:03Z",
+                        "kind": "assistant",
+                        "label": "assistant",
+                        "content": f"{kwargs['prompt']} output",
+                    },
+                ],
+            }
+        )
+        return _fake_result("success", f"{kwargs['prompt']} ok", kwargs["prompt"])
+
+    run_supervised_evolution_session(
+        bundle_name=DEFAULT_BUNDLE_NAME,
+        project_root=tmp_path,
+        harness_runner=fake_runner,
+        progress_callback=events.append,
+    )
+
+    live_events = [event for event in events if event["event"] == "role_live"]
+    assert len(live_events) == 2
+    assert live_events[0]["case_id"] == "probe"
+    assert live_events[0]["role"] == "baseline"
+    assert live_events[0]["prompt"] == "baseline"
+    assert live_events[0]["latest_output"] == "baseline output"
+    assert live_events[0]["transcript"][1]["kind"] == "assistant"
+    assert live_events[1]["role"] == "candidate"
+    assert live_events[1]["latest_input"] == "candidate"
+
+
+def test_run_supervised_evolution_session_emits_safe_checkpoints(tmp_path: Path):
+    bundle_dir = tmp_path / "workspace" / "evaluation" / "bundles"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    bundle_path = bundle_dir / f"{DEFAULT_BUNDLE_NAME}.json"
+    bundle_path.write_text(
+        """
+{
+  "benchmark": "dry",
+  "bundle_name": "supervised_evolution_dry_run_v1",
+  "cases": [
+    {
+      "case_id": "probe",
+      "scenario": "transaction",
+      "mode": "single_turn",
+      "baseline_prompt": "baseline",
+      "candidate_prompt": "candidate"
+    }
+  ]
+}
+        """.strip(),
+        encoding="utf-8",
+    )
+    checkpoints = []
+
+    def fake_runner(**kwargs):
+        return _fake_result("success", f"{kwargs['prompt']} ok", kwargs["prompt"])
+
+    run_supervised_evolution_session(
+        bundle_name=DEFAULT_BUNDLE_NAME,
+        project_root=tmp_path,
+        harness_runner=fake_runner,
+        checkpoint_callback=checkpoints.append,
+    )
+
+    assert checkpoints[0]["phase"] == "session_start"
+    assert checkpoints[1]["phase"] == "role_boundary"
+    assert checkpoints[1]["case_id"] == "probe"
+    assert checkpoints[1]["role"] == "baseline"
+    assert checkpoints[2]["phase"] == "role_boundary"
+    assert checkpoints[2]["role"] == "candidate"
+    assert checkpoints[3]["phase"] == "case_boundary"
+    assert checkpoints[3]["case_id"] == "probe"
+
+
 def test_run_supervised_evolution_session_captures_active_advisory_context(tmp_path: Path):
     bundle_dir = tmp_path / "workspace" / "evaluation" / "bundles"
     bundle_dir.mkdir(parents=True, exist_ok=True)

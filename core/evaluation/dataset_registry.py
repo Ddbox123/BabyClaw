@@ -408,10 +408,16 @@ def materialize_dataset_bundle(
 
     if spec.kind == "supervised_bundle":
         source_bundle = resolve_supervised_bundle_path(spec.bundle_name, project_root=root)
-        if source_bundle != bundle_path:
+        payload = json.loads(source_bundle.read_text(encoding="utf-8"))
+        cases = list(payload.get("cases") or [])
+        if limit is not None:
+            payload["cases"] = cases[:limit]
+        if source_bundle != bundle_path or limit is not None:
+            bundle_path.parent.mkdir(parents=True, exist_ok=True)
+            bundle_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        elif not bundle_path.exists():
             bundle_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_bundle, bundle_path)
-        payload = json.loads(bundle_path.read_text(encoding="utf-8"))
         return DatasetMaterialization(
             dataset_name=spec.name,
             bundle_name=spec.bundle_name,

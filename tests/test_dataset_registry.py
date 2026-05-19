@@ -35,6 +35,14 @@ def test_materialize_builtin_supervised_bundle(tmp_path: Path):
     assert Path(result.bundle_path).exists()
 
 
+def test_materialize_builtin_supervised_bundle_respects_limit(tmp_path: Path):
+    result = materialize_dataset_bundle("supervised_dry_run", project_root=tmp_path, limit=1)
+    bundle = json.loads(Path(result.bundle_path).read_text(encoding="utf-8"))
+
+    assert result.case_count == 1
+    assert len(bundle["cases"]) == 1
+
+
 def test_materialize_custom_prompt_jsonl(tmp_path: Path):
     registry_path = ensure_dataset_registry(tmp_path)
     dataset_path = tmp_path / "workspace" / "evaluation" / "datasets" / "custom_prompt_tasks.jsonl"
