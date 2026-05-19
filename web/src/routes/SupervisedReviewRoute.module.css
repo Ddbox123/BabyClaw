@@ -1,0 +1,543 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  color: rgba(240, 237, 230, 0.94);
+}
+
+.toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.toolbarIntro {
+  max-width: 760px;
+}
+
+.toolbarControls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.eyebrow {
+  margin: 0 0 6px;
+  color: rgba(201, 170, 118, 0.86);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.title {
+  margin: 0;
+  font-size: 38px;
+  line-height: 1.08;
+}
+
+.subtitle {
+  margin: 10px 0 0;
+  max-width: 780px;
+  color: rgba(217, 212, 202, 0.76);
+  line-height: 1.6;
+}
+
+.summaryStrip {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.summaryCard,
+.queuePanel,
+.detailPanel,
+.metricCard,
+.factCard,
+.evidenceCard,
+.transcriptCard {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(32, 37, 44, 0.92);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.22);
+}
+
+.summaryCard {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.summaryCard span {
+  color: rgba(217, 212, 202, 0.72);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.summaryCard strong {
+  font-size: 19px;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.92fr) minmax(0, 1.48fr);
+  gap: 16px;
+  min-height: 0;
+}
+
+.queuePanel,
+.detailPanel {
+  padding: 18px;
+  min-height: 720px;
+}
+
+.queuePanel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.panelHeader,
+.detailHeader,
+.sectionHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.sectionTitle,
+.detailTitle {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.2;
+}
+
+.detailLead {
+  margin: 10px 0 0;
+  color: rgba(232, 226, 213, 0.84);
+  line-height: 1.6;
+}
+
+.secondaryPill,
+.statusBadge,
+.signalPill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.secondaryPill {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(224, 219, 209, 0.8);
+}
+
+.statusBadge {
+  border: 1px solid transparent;
+}
+
+.statusPending {
+  background: rgba(255, 214, 120, 0.12);
+  border-color: rgba(255, 214, 120, 0.2);
+  color: rgba(255, 226, 160, 0.96);
+}
+
+.statusPositive {
+  background: rgba(100, 214, 155, 0.12);
+  border-color: rgba(100, 214, 155, 0.2);
+  color: rgba(173, 244, 206, 0.98);
+}
+
+.statusNegative {
+  background: rgba(255, 140, 140, 0.12);
+  border-color: rgba(255, 140, 140, 0.2);
+  color: rgba(255, 190, 190, 0.98);
+}
+
+.statusDiscard {
+  background: rgba(185, 193, 207, 0.12);
+  border-color: rgba(185, 193, 207, 0.18);
+  color: rgba(226, 229, 234, 0.9);
+}
+
+.queueControls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.filterSegmented,
+.decisionSegmented {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.filterButton,
+.decisionButton,
+.primaryAction,
+.secondaryAction {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(236, 231, 222, 0.9);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.filterButtonActive,
+.decisionButtonActive,
+.primaryAction {
+  background: rgba(196, 156, 85, 0.16);
+  border-color: rgba(196, 156, 85, 0.3);
+  color: rgba(249, 236, 210, 0.98);
+}
+
+.searchField {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(223, 218, 210, 0.8);
+}
+
+.searchField input,
+.formField input,
+.formField select,
+.textAreaField textarea {
+  width: 100%;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: rgba(245, 243, 238, 0.96);
+  font: inherit;
+}
+
+.searchField input::placeholder,
+.textAreaField textarea::placeholder,
+.formField input::placeholder {
+  color: rgba(206, 200, 189, 0.45);
+}
+
+.queueMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: rgba(214, 209, 199, 0.72);
+  font-size: 13px;
+}
+
+.queueList,
+.detailPanel {
+  min-height: 0;
+}
+
+.queueList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.queueItem {
+  width: 100%;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  background: rgba(22, 26, 32, 0.72);
+  color: inherit;
+  text-align: left;
+  transition: border-color 140ms ease, transform 140ms ease, background 140ms ease;
+}
+
+.queueItem:hover,
+.queueItemActive {
+  border-color: rgba(194, 155, 86, 0.28);
+  background: rgba(29, 34, 41, 0.92);
+}
+
+.queueItemTop,
+.queueFooter,
+.signalRow,
+.evidenceTop,
+.metaRow,
+.actionRow,
+.detailHeaderActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.queueHeadline {
+  margin: 10px 0;
+  color: rgba(232, 228, 220, 0.84);
+  line-height: 1.5;
+}
+
+.signalRow {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.signalPill {
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(216, 211, 201, 0.82);
+}
+
+.queueFooter {
+  color: rgba(199, 193, 182, 0.66);
+  font-size: 12px;
+}
+
+.detailPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow: auto;
+}
+
+.factGrid,
+.metricGrid,
+.signalColumns,
+.formGrid {
+  display: grid;
+  gap: 12px;
+}
+
+.factGrid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.metricGrid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.signalColumns {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.factCard,
+.metricCard {
+  padding: 14px;
+}
+
+.factCard span,
+.metricCard span,
+.formField span,
+.textAreaField span {
+  display: block;
+  margin-bottom: 8px;
+  color: rgba(207, 202, 192, 0.68);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.factCard strong,
+.metricCard strong {
+  display: block;
+  line-height: 1.5;
+}
+
+.metricCard p {
+  margin: 10px 0 0;
+  color: rgba(215, 211, 201, 0.72);
+  line-height: 1.5;
+}
+
+.signalSection,
+.detailSection,
+.transcriptSection {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  background: rgba(16, 20, 25, 0.42);
+  padding: 14px;
+}
+
+.signalSection h3,
+.detailSection h3 {
+  margin: 0 0 10px;
+  font-size: 18px;
+}
+
+.signalSection ul,
+.detailList {
+  margin: 0;
+  padding-left: 18px;
+  color: rgba(234, 228, 216, 0.9);
+  line-height: 1.65;
+}
+
+.evidenceList,
+.transcriptList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.evidenceCard,
+.transcriptCard {
+  padding: 14px;
+  background: rgba(29, 34, 41, 0.84);
+}
+
+.evidenceCard p,
+.transcriptCard p {
+  margin: 8px 0 0;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.formGrid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.formField,
+.textAreaField {
+  display: block;
+}
+
+.formField input,
+.formField select,
+.textAreaField textarea {
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.textAreaField textarea {
+  min-height: 108px;
+  padding: 12px;
+  resize: vertical;
+}
+
+.primaryAction:disabled,
+.decisionButton:disabled,
+.filterButton:disabled {
+  opacity: 0.56;
+  cursor: not-allowed;
+}
+
+.feedbackText {
+  margin: 0;
+  color: rgba(165, 237, 197, 0.92);
+}
+
+.errorText {
+  margin: 0;
+  color: rgba(255, 168, 168, 0.96);
+}
+
+.hintText {
+  margin: 0;
+  color: rgba(214, 209, 199, 0.72);
+  line-height: 1.5;
+}
+
+.transcriptSection summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.transcriptMeta {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.metaRow {
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  color: rgba(222, 217, 207, 0.82);
+}
+
+.metaRow span {
+  flex: 1;
+  text-align: right;
+  word-break: break-all;
+}
+
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+  min-height: 240px;
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 18px;
+  color: rgba(216, 211, 201, 0.72);
+}
+
+.emptyState h3 {
+  margin: 0;
+  color: rgba(245, 243, 238, 0.94);
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 1280px) {
+  .summaryStrip,
+  .factGrid,
+  .metricGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .workspace,
+  .signalColumns,
+  .formGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .summaryStrip,
+  .factGrid,
+  .metricGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .title {
+    font-size: 30px;
+  }
+}

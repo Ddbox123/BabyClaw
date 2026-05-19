@@ -1,0 +1,109 @@
+.surface {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-height: 0;
+  height: 100%;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.headerCopy {
+  min-width: 0;
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  color: var(--fg-tertiary);
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.fileName {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.28rem;
+}
+
+.filePath {
+  margin: 8px 0 0;
+  color: var(--fg-secondary);
+  word-break: break-all;
+}
+
+.metaBlock {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.changedPill,
+.sourcePill {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+}
+
+.changedPill {
+  color: var(--accent-warm-2);
+  background: rgba(216, 167, 91, 0.12);
+  border: 1px solid rgba(216, 167, 91, 0.18);
+}
+
+.sourcePill {
+  color: var(--fg-secondary);
+  background: rgba(124, 155, 150, 0.1);
+  border: 1px solid rgba(124, 155, 150, 0.18);
+}
+
+.editorWrap {
+  display: grid;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.editorWrap :global(.cm-theme),
+.editorWrap :global(.cm-editor) {
+  height: 100%;
+  min-height: 0;
+}
+
+.editorWrap :global(.cm-scroller) {
+  overflow: auto;
+}
+
+.editorWrap :global(.cm-content),
+.editorWrap :global(.cm-gutter) {
+  min-height: 100%;
+}
+
+.editorWrap :global(.cm-logLineError) {
+  color: var(--state-error);
+}
+
+.editorWrap :global(.cm-logLineWarning) {
+  color: var(--state-warning);
+}
+
+.editorWrap :global(.cm-logLineError .cm-cursor),
+.editorWrap :global(.cm-logLineWarning .cm-cursor) {
+  border-left-color: currentColor;
+}
+
+.footnote {
+  margin: 0;
+  padding: 10px 20px 14px;
+  color: var(--fg-tertiary);
+  font-size: 0.82rem;
+  border-top: 1px solid var(--border-soft);
+}

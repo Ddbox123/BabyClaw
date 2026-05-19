@@ -1,0 +1,27 @@
+:root {
+  color-scheme: dark;
+
+  --bg-canvas: #15171a;
+  --bg-panel: #1b1f23;
+  --bg-panel-soft: #22272c;
+  --bg-active: #292f35;
+
+  --fg-primary: #ece6dc;
+  --fg-secondary: #b7b0a4;
+  --fg-tertiary: #8c877d;
+
+  --accent-warm: #d8a75b;
+  --accent-warm-2: #e7bf7a;
+  --accent-cool: #7c9b96;
+
+  --state-success: #7ea37c;
+  --state-warning: #d7a054;
+  --state-error: #bb6c5d;
+
+  --border-soft: rgba(236, 230, 220, 0.08);
+  --border-strong: rgba(236, 230, 220, 0.12);
+
+  --font-display: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+  --font-body: "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", monospace;
+}

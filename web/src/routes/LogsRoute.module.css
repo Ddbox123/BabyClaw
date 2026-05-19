@@ -1,0 +1,840 @@
+.route {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  background: rgba(18, 20, 22, 0.74);
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 22px 24px 16px;
+  border-bottom: 1px solid var(--border-strong);
+  background: rgba(22, 25, 28, 0.78);
+}
+
+.eyebrow,
+.sidebarEyebrow {
+  margin: 0 0 6px;
+  color: var(--fg-tertiary);
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.title,
+.sidebarTitle {
+  margin: 0;
+  font-family: var(--font-display);
+}
+
+.title {
+  font-size: 1.6rem;
+}
+
+.subtitle {
+  margin: 10px 0 0;
+  max-width: 68ch;
+  color: var(--fg-secondary);
+  line-height: 1.5;
+}
+
+.headerMeta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.metaPill {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-soft);
+  background: rgba(27, 31, 35, 0.82);
+  color: var(--fg-secondary);
+  font-size: 0.8rem;
+}
+
+.rootButton {
+  display: grid;
+  gap: 6px;
+  min-height: 84px;
+  width: 100%;
+  padding: 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(27, 31, 35, 0.78);
+  color: var(--fg-primary);
+  text-align: left;
+}
+
+.rootButtonActive {
+  border-color: rgba(216, 167, 91, 0.24);
+  box-shadow: inset 2px 0 0 var(--accent-warm);
+  background: rgba(34, 39, 44, 0.94);
+}
+
+.rootButtonLabel {
+  font-family: var(--font-display);
+  font-size: 0.98rem;
+}
+
+.rootButtonPath {
+  color: var(--fg-secondary);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.rootState {
+  color: #8fd0b5;
+  font-size: 0.78rem;
+}
+
+.rootStateMissing {
+  color: #e79b9b;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
+  min-height: 0;
+}
+
+.staticLayout,
+.resizableLayout,
+.sidebar,
+.previewPane,
+.rightRail {
+  min-height: 0;
+}
+
+.staticLayout {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  min-height: 0;
+}
+
+.resizableLayout {
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sidebar {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 14px;
+  padding: 18px;
+  border-right: 1px solid var(--border-soft);
+  background: rgba(21, 24, 27, 0.76);
+}
+
+.resizableLayout > .sidebar {
+  flex: 0 0 var(--logs-sidebar-width, 320px);
+  width: var(--logs-sidebar-width, 320px);
+  min-width: var(--logs-sidebar-width, 320px);
+  max-width: var(--logs-sidebar-width, 320px);
+  border-right: 0;
+}
+
+.sidebarHeader {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(27, 31, 35, 0.78);
+}
+
+.selectionToolbar {
+  display: grid;
+  gap: 10px;
+}
+
+.selectionPill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(124, 155, 150, 0.22);
+  background: rgba(124, 155, 150, 0.12);
+  color: var(--accent-cool);
+  font-size: 0.78rem;
+}
+
+.selectionActions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.filterGroup,
+.sceneHeaderControls,
+.sceneCardHeaderRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sceneHeaderControls,
+.sceneCardHeaderRow {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.filterButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-soft);
+  background: rgba(20, 23, 26, 0.72);
+  color: var(--fg-secondary);
+  cursor: pointer;
+  font-size: 0.78rem;
+}
+
+.filterButton:hover {
+  border-color: var(--border-strong);
+  background: rgba(34, 39, 44, 0.9);
+}
+
+.filterButtonActive {
+  border-color: rgba(216, 167, 91, 0.28);
+  background: rgba(216, 167, 91, 0.12);
+  color: var(--fg-primary);
+}
+
+.toolbarButton,
+.deleteButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 38px;
+  width: 100%;
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-soft);
+  background: rgba(20, 23, 26, 0.72);
+  color: var(--fg-primary);
+  cursor: pointer;
+}
+
+.toolbarButton:hover:not(:disabled),
+.deleteButton:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: rgba(34, 39, 44, 0.9);
+}
+
+.deleteButton {
+  border-color: rgba(192, 94, 94, 0.22);
+  background: rgba(192, 94, 94, 0.14);
+  color: #f0b3b3;
+}
+
+.deleteButton:hover:not(:disabled) {
+  border-color: rgba(192, 94, 94, 0.32);
+  background: rgba(192, 94, 94, 0.2);
+}
+
+.toolbarButton:disabled,
+.deleteButton:disabled,
+.copyButton:disabled,
+.clearButton:disabled,
+.treeSelectButton:disabled,
+.treeFileButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.notice {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.noticeSuccess {
+  color: #8fd0b5;
+}
+
+.noticeError {
+  color: #f0a6a6;
+}
+
+.panelSearch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--fg-tertiary);
+}
+
+.panelSearchInput {
+  width: 100%;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(27, 31, 35, 0.82);
+  color: var(--fg-primary);
+  padding: 9px 12px;
+  font: inherit;
+}
+
+.fileList {
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding-right: 4px;
+}
+
+.panelState,
+.emptySurface {
+  display: grid;
+  place-items: center;
+  min-height: 0;
+  padding: 20px;
+  color: var(--fg-secondary);
+  text-align: center;
+  line-height: 1.5;
+}
+
+.panelState {
+  border: 1px dashed var(--border-soft);
+  border-radius: 8px;
+  background: rgba(27, 31, 35, 0.62);
+}
+
+.emptySurface {
+  height: 100%;
+  background: rgba(27, 31, 35, 0.92);
+}
+
+.previewPane {
+  display: grid;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  padding: 18px 20px;
+  background: rgba(27, 31, 35, 0.92);
+}
+
+.resizeHandle {
+  position: relative;
+  flex: 0 0 16px;
+  width: 16px;
+  min-width: 16px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  cursor: col-resize;
+  outline: none;
+  touch-action: none;
+}
+
+.resizeHandle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 3px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: rgba(236, 230, 220, 0.08);
+  transition: background-color 150ms ease, box-shadow 150ms ease;
+}
+
+.resizeHandle:hover::before,
+.resizeHandle:focus-visible::before,
+.resizeHandleActive::before {
+  background: rgba(216, 167, 91, 0.52);
+  box-shadow: 0 0 12px rgba(216, 167, 91, 0.18);
+}
+
+.rightRail {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 14px;
+  padding: 18px;
+  border-left: 1px solid var(--border-soft);
+  background: rgba(21, 24, 27, 0.82);
+}
+
+.railHeader {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(27, 31, 35, 0.78);
+}
+
+.railTitle {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.02rem;
+}
+
+.railText {
+  margin: 0;
+  color: var(--fg-secondary);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.rootNav {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.treeDir {
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(27, 31, 35, 0.78);
+  padding: 8px 10px;
+}
+
+.treeDir summary {
+  cursor: pointer;
+  color: var(--fg-primary);
+}
+
+.treeChildren {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  margin-left: 10px;
+}
+
+.treeFileRow {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: stretch;
+}
+
+.treeFileRowActive {
+  position: relative;
+}
+
+.treeSelectButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  min-width: 34px;
+  padding: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(20, 23, 26, 0.72);
+  color: var(--fg-tertiary);
+  cursor: pointer;
+}
+
+.treeSelectButtonActive {
+  color: var(--accent-cool);
+  border-color: rgba(124, 155, 150, 0.26);
+  background: rgba(124, 155, 150, 0.12);
+}
+
+.treeFileButton {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: rgba(34, 39, 44, 0.82);
+  color: var(--fg-secondary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.treeFileButtonActive {
+  color: var(--fg-primary);
+  border-color: rgba(216, 167, 91, 0.22);
+  background: rgba(216, 167, 91, 0.12);
+}
+
+.treeFileName {
+  color: var(--fg-primary);
+}
+
+.treeFilePath {
+  font-size: 0.78rem;
+  color: var(--fg-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.copyButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: rgba(27, 31, 35, 0.82);
+  color: var(--fg-primary);
+  cursor: pointer;
+}
+
+.copyButton:hover {
+  border-color: var(--border-strong);
+  background: rgba(41, 47, 53, 0.92);
+}
+
+.sceneCard {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(27, 31, 35, 0.8);
+}
+
+.sceneCardActive {
+  border-color: rgba(216, 167, 91, 0.24);
+  background: rgba(34, 39, 44, 0.94);
+  box-shadow: inset 2px 0 0 var(--accent-warm);
+}
+
+.sceneCardTop {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.sceneCardButton {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sceneCardHeader,
+.sceneCardMeta,
+.scenePillRow,
+.timelineHeader,
+.timelineFields,
+.timelineRawRefs,
+.sceneRawHeader,
+.rawFileTabs,
+.sceneMetricGrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sceneCardHeader {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sceneCardHeader strong,
+.sceneDetailTitle,
+.timelineCode {
+  color: var(--fg-primary);
+}
+
+.sceneCardStatus,
+.sceneCardMeta,
+.sceneCardSummary,
+.sceneDetailSummary,
+.timelineHeader,
+.timelineMessage,
+.timelineField {
+  color: var(--fg-secondary);
+}
+
+.sceneCardMeta,
+.timelineHeader,
+.timelineField {
+  font-size: 0.78rem;
+}
+
+.sceneCardSummary,
+.timelineMessage {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.sceneDetailSurface {
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+}
+
+.sceneDetailHeader,
+.sceneInfoGrid {
+  display: grid;
+  gap: 16px;
+}
+
+.sceneDetailHeader {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.sceneDetailTitle {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.18rem;
+}
+
+.sceneMetricGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.sceneMetricCard,
+.sceneInfoCard,
+.timelineItem,
+.rawFileButton {
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(20, 23, 26, 0.72);
+}
+
+.sceneMetricCard {
+  min-height: 88px;
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.sceneMetricCard span {
+  color: var(--fg-tertiary);
+  font-size: 0.78rem;
+}
+
+.sceneMetricCard strong {
+  color: var(--fg-primary);
+  font-size: 0.92rem;
+  overflow-wrap: anywhere;
+}
+
+.sceneInfoGrid {
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+}
+
+.sceneInfoCard {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  padding: 14px;
+  min-height: 0;
+}
+
+.sceneInfoCard h3 {
+  margin: 0;
+  color: var(--fg-primary);
+  font-size: 0.96rem;
+}
+
+.timelineList,
+.sceneRawPreview {
+  min-height: 0;
+}
+
+.timelineList {
+  display: grid;
+  gap: 10px;
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.timelineItem {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.timelineItemError {
+  border-color: rgba(187, 108, 93, 0.38);
+  background: rgba(187, 108, 93, 0.12);
+}
+
+.timelineItemWarning {
+  border-color: rgba(215, 160, 84, 0.34);
+  background: rgba(215, 160, 84, 0.1);
+}
+
+.timelineItemError .timelineCode,
+.timelineItemError .timelineMessage,
+.timelineItemError .timelineHeader,
+.timelineItemError .timelineField {
+  color: var(--state-error);
+}
+
+.timelineItemWarning .timelineCode,
+.timelineItemWarning .timelineMessage,
+.timelineItemWarning .timelineHeader,
+.timelineItemWarning .timelineField {
+  color: var(--state-warning);
+}
+
+.timelineHeader {
+  color: var(--fg-tertiary);
+}
+
+.timelineCode {
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.timelineFields {
+  gap: 6px;
+}
+
+.timelineField {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(36, 42, 47, 0.92);
+}
+
+.timelineRawRefs .toolbarButton {
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.sceneRawHeader {
+  align-items: start;
+  justify-content: space-between;
+}
+
+.rawFileTabs {
+  gap: 10px;
+}
+
+.rawFileButton {
+  display: grid;
+  gap: 4px;
+  min-width: 180px;
+  padding: 10px 12px;
+  text-align: left;
+  color: var(--fg-secondary);
+  cursor: pointer;
+}
+
+.rawFileButtonActive {
+  border-color: rgba(216, 167, 91, 0.24);
+  background: rgba(216, 167, 91, 0.1);
+  color: var(--fg-primary);
+}
+
+.sceneRawPreview {
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.previewActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+
+.clearButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid rgba(192, 94, 94, 0.22);
+  border-radius: 999px;
+  background: rgba(192, 94, 94, 0.14);
+  color: #f0b3b3;
+  cursor: pointer;
+}
+
+.clearButton:hover:not(:disabled) {
+  border-color: rgba(192, 94, 94, 0.32);
+  background: rgba(192, 94, 94, 0.2);
+}
+
+@media (max-width: 960px) {
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .staticLayout,
+  .resizableLayout {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  .resizableLayout > .sidebar {
+    width: auto;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .resizeHandle {
+    display: none;
+  }
+
+  .rightRail {
+    border-left: 0;
+    border-top: 1px solid var(--border-soft);
+  }
+
+  .sceneDetailHeader,
+  .sceneInfoGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .header {
+    flex-direction: column;
+  }
+
+  .headerMeta {
+    justify-content: flex-start;
+  }
+
+  .selectionActions {
+    grid-template-columns: 1fr;
+  }
+
+  .sceneMetricGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

@@ -1,0 +1,127 @@
+.page {
+  display: grid;
+  gap: 18px;
+  padding: 22px;
+}
+
+.hero,
+.metricCard,
+.card {
+  border-radius: 12px;
+  border: 1px solid var(--border-soft);
+  background: rgba(27, 31, 35, 0.82);
+}
+
+.hero {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 20px;
+  padding: 22px;
+}
+
+.avatarPanel {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 10px;
+  border-radius: 10px;
+  background: rgba(34, 39, 44, 0.86);
+  padding: 18px;
+}
+
+.avatarOrb {
+  width: 94px;
+  height: 94px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: rgba(216, 167, 91, 0.18);
+  color: var(--accent-warm-2);
+  font-family: var(--font-display);
+  font-size: 2.2rem;
+}
+
+.avatarMeta,
+.statusLine,
+.supportText {
+  color: var(--fg-secondary);
+}
+
+.eyebrow,
+.cardTitle {
+  margin: 0 0 8px;
+  color: var(--fg-tertiary);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 2rem;
+}
+
+.metricGrid,
+.statusGrid {
+  display: grid;
+  gap: 14px;
+}
+
+.metricGrid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.metricCard,
+.card {
+  padding: 18px;
+}
+
+.metricCard {
+  display: grid;
+  gap: 6px;
+}
+
+.metricCard span {
+  color: var(--fg-secondary);
+}
+
+.metricCard strong {
+  color: var(--fg-primary);
+  font-size: 1.4rem;
+}
+
+.statusGrid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.statList {
+  display: grid;
+  gap: 8px;
+  color: var(--fg-secondary);
+}
+
+.progressTrack {
+  height: 12px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(34, 39, 44, 0.88);
+}
+
+.progressFill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-warm), var(--accent-warm-2));
+}
+
+.badgeRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.badge {
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: rgba(124, 155, 150, 0.12);
+  color: var(--accent-cool);
+}

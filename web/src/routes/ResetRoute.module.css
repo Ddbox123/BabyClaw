@@ -1,0 +1,62 @@
+.page {
+  display: grid;
+  gap: 18px;
+  padding: 22px;
+}
+
+.hero,
+.card,
+.inventoryItem {
+  border-radius: 12px;
+  border: 1px solid var(--border-soft);
+  background: rgba(27, 31, 35, 0.82);
+}
+
+.hero,
+.card {
+  padding: 20px;
+}
+
+.eyebrow,
+.cardTitle {
+  margin: 0 0 8px;
+  color: var(--fg-tertiary);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.9rem;
+}
+
+.warning,
+.cardText,
+.metaLine {
+  color: var(--fg-secondary);
+}
+
+.presetGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.inventoryGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.inventoryItem {
+  padding: 14px;
+}
+
+.inventoryTop {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--fg-primary);
+}

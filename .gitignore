@@ -38,6 +38,8 @@ node_modules/
 # Project specific
 backups/
 logs/
+!/web/src/logs/
+!/web/src/logs/**
 log_info/
 .runtime/
 *.pyc
