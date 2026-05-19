@@ -39,11 +39,23 @@ node_modules/
 backups/
 logs/
 log_info/
+.runtime/
 *.pyc
 *.pyo
 .env
 *.log
 *.bak
+
+# Local web workbench outputs
+/web/dist/
+/web/.vite-*.log
+/web/vite-*.log
+
+# Root-level review artifacts
+/tmp-*.png
+/tmp-*.html
+/edge-*.png
+/supervised-live-audit.png
 
 # Pytest cache
 .pytest_cache/
