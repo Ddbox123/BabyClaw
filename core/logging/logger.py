@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 import json
 from datetime import datetime
@@ -410,6 +411,8 @@ class ConversationLogger:
             return
         self._initialized = True
         self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._session_metadata: Dict[str, Any] = {}
+        self._session_file_stem = ""
         self._actor = "main"
         self._actor_label = ""
         self._parent_turn = None
@@ -450,11 +453,89 @@ class ConversationLogger:
         """确保日志目录存在"""
         os.makedirs(self._log_dir, exist_ok=True)
 
+    @staticmethod
+    def _compact_log_fragment(text: Any, *, limit: int = 36) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+
+        pieces: list[str] = []
+        last_was_sep = False
+        for char in raw:
+            if char.isalnum():
+                pieces.append(char)
+                last_was_sep = False
+                continue
+            if char in {"-", "_"}:
+                if pieces and not last_was_sep:
+                    pieces.append("_")
+                    last_was_sep = True
+                continue
+            if char.isspace() or char in {"/", "\\", ":", ".", ",", "|", "，", "。", "、"}:
+                if pieces and not last_was_sep:
+                    pieces.append("_")
+                    last_was_sep = True
+                continue
+            if pieces and not last_was_sep:
+                pieces.append("_")
+                last_was_sep = True
+
+        slug = re.sub(r"_+", "_", "".join(pieces)).strip("_")
+        if not slug:
+            return ""
+        return slug[:limit].strip("_")
+
+    def _build_session_label(self) -> str:
+        metadata = dict(self._session_metadata or {})
+        topic_keys = (
+            "agent_mode",
+            "conversation_topic",
+            "session_topic",
+            "title",
+            "goal",
+            "summary",
+        )
+        fragments: list[str] = []
+        for key in topic_keys:
+            value = metadata.get(key)
+            if not value:
+                continue
+            fragment = self._compact_log_fragment(value, limit=28)
+            if fragment:
+                fragments.append(fragment)
+            if len(fragments) >= 2:
+                break
+
+        actor_label = self._compact_log_fragment(self._actor_label, limit=18)
+        if actor_label:
+            fragments.insert(0, actor_label)
+
+        if not fragments and not self._inherited_session:
+            fallback_parts = [
+                self._compact_log_fragment(metadata.get("mode"), limit=18),
+            ]
+            fragments = [part for part in fallback_parts if part]
+
+        fragments = [fragment for fragment in fragments if fragment]
+        if not fragments:
+            return ""
+        return "__".join(fragments)
+
     def _get_session_file(self) -> str:
         """获取当前会话的日志文件路径"""
         if self._current_session_file is None:
+            if self._inherited_session:
+                stem = f"conversation_{self._session_id}"
+            else:
+                if not self._session_file_stem:
+                    label = self._build_session_label()
+                    if label:
+                        self._session_file_stem = f"conversation_{self._session_id}__{label}"
+                    else:
+                        self._session_file_stem = f"conversation_{self._session_id}"
+                stem = self._session_file_stem
             self._current_session_file = os.path.join(
-                self._log_dir, f"conversation_{self._session_id}.jsonl"
+                self._log_dir, f"{stem}.jsonl"
             )
         return self._current_session_file
 
@@ -529,12 +610,15 @@ class ConversationLogger:
 
     def start_session(self, metadata: dict = None):
         """记录会话开始"""
+        self._session_metadata = dict(metadata or {})
+        self._session_file_stem = ""
         self._session_active = True
         record = {
             "type": "session_attach" if self._actor != "main" else "session_start",
             "timestamp": self._timestamp(),
             "session_id": self._session_id,
             "metadata": metadata or {},
+            "session_label": self._build_session_label(),
         }
         self._write(record)
 
@@ -830,6 +914,8 @@ class ConversationLogger:
         if not self._inherited_session:
             self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._current_session_file = None
+        self._session_file_stem = ""
+        self._session_metadata = {}
         self._turn_count = 0
         self._session_active = True
 

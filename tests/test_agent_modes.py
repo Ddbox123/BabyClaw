@@ -56,6 +56,51 @@ def test_chat_mode_routes_explicit_evolution_request_without_running_orchestrato
     assert agent._last_turn_metadata["route_target"] == "workbench_evolution"
 
 
+def test_seed_chat_history_seeds_mental_conversation_context():
+    agent = SelfEvolvingAgent.__new__(SelfEvolvingAgent)
+    agent.config = _make_config()
+    agent.mode = AgentMode.CHAT
+    agent.mode_policy = resolve_mode_policy("chat", agent.config)
+    captured = {}
+    agent.mental_model = SimpleNamespace(
+        seed_conversation_context=lambda messages: captured.setdefault("messages", list(messages))
+    )
+
+    agent.seed_chat_history([
+        {
+            "role": "user",
+            "content": "你话还没说完",
+            "timestamp": "2026-05-20T14:00:00",
+        },
+        {
+            "role": "assistant",
+            "content": "这是一个被截断的心智模型回答。",
+            "mental_snapshot": {
+                "mood": "沉思",
+                "feeling": "正在延续心智模型话题。",
+            },
+            "timestamp": "2026-05-20T14:01:00",
+        },
+    ])
+
+    assert captured["messages"][0]["content"] == "你话还没说完"
+    assert captured["messages"][1]["mental_snapshot"]["mood"] == "沉思"
+    assert agent._active_turn_goal == "__chat_session__"
+
+
+def test_seed_chat_history_clears_mental_context_outside_chat_mode():
+    agent = SelfEvolvingAgent.__new__(SelfEvolvingAgent)
+    agent.config = _make_config()
+    agent.mode = AgentMode.SELF_EVOLUTION
+    agent.mode_policy = resolve_mode_policy("self_evolution", agent.config)
+    called = {}
+    agent.mental_model = SimpleNamespace(clear_conversation_context=lambda: called.setdefault("cleared", True))
+
+    agent.seed_chat_history([{"role": "user", "content": "不应恢复到自进化模式"}])
+
+    assert called["cleared"] is True
+
+
 def test_supervised_case_reset_clears_short_term_context(monkeypatch):
     agent = SelfEvolvingAgent.__new__(SelfEvolvingAgent)
     agent.config = _make_config()

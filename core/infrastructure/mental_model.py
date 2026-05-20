@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from collections import deque
 from dataclasses import dataclass, field
@@ -226,6 +227,7 @@ class MentalModel:
         # 感知层 — 由 agent.py 注入共享 LLM 实例
         self._shared_llm = None
         self._last_state_output: Dict[str, Any] = {}
+        self._conversation_context: Dict[str, Any] = {}
 
         # 注册全局事件监听
         self._register_listeners()
@@ -731,12 +733,28 @@ class MentalModel:
         self._intervention_count = 0
         self._last_state_output = {}
         self._last_validation = {}
+        self._conversation_context = {}
 
     # ── 感知层（内省调用） ──────────────────────────────────
 
     def set_shared_llm(self, llm):
         """由 agent.py 注入主模型的 LLM 实例，感知层复用同一实例"""
         self._shared_llm = llm
+
+    def seed_conversation_context(self, messages: List[Dict[str, Any]]) -> None:
+        """用已恢复的 chat 历史为感知层提供会话连续性。"""
+        context = self._build_conversation_context(messages)
+        self._conversation_context = context
+        if context.get("last_mental_state"):
+            self._last_state_output = dict(context["last_mental_state"])
+
+    def clear_conversation_context(self) -> None:
+        """清除会话连续性，避免跨会话串用上一段 chat 状态。"""
+        self._conversation_context = {}
+
+    def get_conversation_context(self) -> Dict[str, Any]:
+        """返回当前感知层使用的会话连续性上下文。"""
+        return dict(self._conversation_context)
 
     def sense_state(self, think_content: str, tool_summary: str,
                      token_ratio: float = 0.0, iteration: int = 0) -> str:
@@ -756,6 +774,7 @@ class MentalModel:
 
         metrics = self.diagnose().metrics
         self_model = self.get_self_model()
+        conversation_context = self._format_conversation_context_for_prompt()
 
         # token 压力描述
         token_pressure = ""
@@ -780,6 +799,7 @@ class MentalModel:
 ## 思维空间
 - 上下文压力: {token_ratio:.0%} ({token_pressure})
 - 当前迭代: {iteration}
+{conversation_context}
 
 ## 自我认知
 - 擅长: {', '.join(self_model.get('strengths', [])[:2])}
@@ -797,6 +817,7 @@ class MentalModel:
             ])
             state_block = self._extract_state_block(resp.content)
             if state_block:
+                state_block = self._stabilize_state_with_conversation_context(state_block)
                 self._last_state_output = state_block
                 return f"<state>\n{json.dumps(state_block, ensure_ascii=False, indent=2)}\n</state>"
         except Exception:
@@ -853,12 +874,138 @@ class MentalModel:
         if token_ratio > 0.70:
             state["whisper"] = "上下文拥挤，调用 compress_context_tool 后再继续"
 
+        state = self._stabilize_state_with_conversation_context(state)
         self._last_state_output = state
         return f"<state>\n{json.dumps(state, ensure_ascii=False, indent=2)}\n</state>"
 
     def get_last_state(self) -> Dict[str, Any]:
         """获取最近一次感知层输出"""
         return self._last_state_output
+
+    def _build_conversation_context(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        normalized: List[Dict[str, Any]] = []
+        last_mental_state: Dict[str, Any] = {}
+        for item in list(messages or []):
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            content = self._sanitize_conversation_text(item.get("content") or "")
+            thought = self._sanitize_conversation_text(item.get("thought") or "")
+            mental_state = item.get("mental_snapshot")
+            if mental_state is None:
+                mental_state = item.get("mentalSnapshot")
+            if isinstance(mental_state, dict) and mental_state:
+                last_mental_state = self._compact_mental_state(mental_state)
+            if not content and not thought and not mental_state:
+                continue
+            normalized.append({
+                "role": role,
+                "content": content[:220],
+                "thought": thought[:180],
+                "timestamp": str(item.get("timestamp") or "").strip(),
+            })
+
+        if not normalized:
+            return {}
+
+        user_messages = [item for item in normalized if item["role"] == "user"]
+        assistant_messages = [item for item in normalized if item["role"] == "assistant"]
+        context: Dict[str, Any] = {
+            "turn_count": len(normalized),
+            "user_turn_count": len(user_messages),
+            "assistant_turn_count": len(assistant_messages),
+            "recent_messages": normalized[-6:],
+            "latest_user_message": (user_messages[-1]["content"] if user_messages else ""),
+            "latest_assistant_message": (assistant_messages[-1]["content"] if assistant_messages else ""),
+            "last_mental_state": last_mental_state,
+        }
+        return context
+
+    @staticmethod
+    def _sanitize_conversation_text(value: Any) -> str:
+        text = str(value or "")
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<state>.*?</state>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
+    @staticmethod
+    def _compact_mental_state(value: Dict[str, Any]) -> Dict[str, Any]:
+        compact: Dict[str, Any] = {}
+        for key in ("mood", "feeling", "whisper", "summary", "cognitiveState", "source", "updatedAt"):
+            text = str(value.get(key) or "").strip()
+            if text:
+                compact[key] = text[:240]
+        for key in ("confidence", "sampleSize", "interventionCount"):
+            if key in value:
+                compact[key] = value.get(key)
+        metrics = value.get("metrics")
+        if isinstance(metrics, dict):
+            compact["metrics"] = {
+                str(key): metrics[key]
+                for key in ("reason", "sample_size", "success_rate", "intervention_count")
+                if key in metrics
+            }
+        return compact
+
+    def _format_conversation_context_for_prompt(self) -> str:
+        context = self._conversation_context if isinstance(self._conversation_context, dict) else {}
+        if not context:
+            return ""
+        recent_lines: List[str] = []
+        for item in list(context.get("recent_messages") or [])[-4:]:
+            if not isinstance(item, dict):
+                continue
+            role = "用户" if item.get("role") == "user" else "我"
+            content = str(item.get("content") or item.get("thought") or "").strip()
+            if content:
+                recent_lines.append(f"- {role}: {content[:140]}")
+        last_state = context.get("last_mental_state") if isinstance(context.get("last_mental_state"), dict) else {}
+        state_line = ""
+        if last_state:
+            state_bits = [
+                str(last_state.get("mood") or "").strip(),
+                str(last_state.get("summary") or last_state.get("feeling") or "").strip(),
+            ]
+            state_text = " | ".join(bit for bit in state_bits if bit)
+            if state_text:
+                state_line = f"- 上一次心智状态: {state_text[:180]}"
+        lines = [
+            "",
+            "## 对话连续性",
+            f"- 已恢复对话轮数: {context.get('turn_count', 0)}",
+        ]
+        latest_user = str(context.get("latest_user_message") or "").strip()
+        if latest_user:
+            lines.append(f"- 最近用户意图: {latest_user[:160]}")
+        if state_line:
+            lines.append(state_line)
+        if recent_lines:
+            lines.append("- 最近对话片段:")
+            lines.extend(recent_lines)
+        lines.append("- 判断当前感受时要延续这段对话；除非没有历史，不要把自己描述为刚苏醒。")
+        return "\n".join(lines)
+
+    def _stabilize_state_with_conversation_context(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(state, dict):
+            return state
+        context = self._conversation_context if isinstance(self._conversation_context, dict) else {}
+        if not context.get("turn_count"):
+            return state
+        stabilized = dict(state)
+        text = " ".join(str(stabilized.get(key) or "") for key in ("feeling", "summary", "whisper"))
+        wake_markers = ("刚苏醒", "刚刚苏醒", "刚醒", "苏醒", "很开阔", "很宽敞", "空间很开阔", "空间很宽敞")
+        if any(marker in text for marker in wake_markers):
+            latest_user = str(context.get("latest_user_message") or "").strip()
+            stabilized["feeling"] = "我正在延续上一段对话，已经有明确上下文，不是从空白中重新开始。"
+            stabilized["summary"] = stabilized["feeling"]
+            stabilized["whisper"] = (
+                f"接住用户刚才的脉络：{latest_user[:80]}"
+                if latest_user else "接住上一轮脉络继续推进。"
+            )
+        return stabilized
 
 
 # ============================================================================

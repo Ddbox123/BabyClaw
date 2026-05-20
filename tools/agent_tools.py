@@ -117,10 +117,14 @@ def _extract_conversation_log_path(goal: str, scope: Any) -> Optional[Path]:
     for text in candidates:
         stripped = str(text).strip().strip("'\"")
         direct_path = Path(stripped)
-        if re.fullmatch(r"conversation_\d{8}_\d{6}\.jsonl", direct_path.name, flags=re.IGNORECASE):
+        if re.fullmatch(r"conversation_\d{8}_\d{6}(?:__.+)?\.jsonl", direct_path.name, flags=re.IGNORECASE):
             if direct_path.exists():
                 return direct_path.resolve()
-        match = re.search(r"(log_info[\\/]+conversation_\d{8}_\d{6}\.jsonl)", text, flags=re.IGNORECASE)
+        match = re.search(
+            r"(log_info[\\/]+conversation_\d{8}_\d{6}(?:__[^\\/]+)?\.jsonl)",
+            text,
+            flags=re.IGNORECASE,
+        )
         if not match:
             continue
         path = Path(match.group(1).replace("/", os.sep).replace("\\", os.sep))

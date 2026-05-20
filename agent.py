@@ -659,7 +659,13 @@ class SelfEvolvingAgent:
         """为 chat 模式恢复一段已持久化的对话历史。"""
         policy = self._get_mode_policy()
         if policy.mode != AgentMode.CHAT:
+            mental_clear = getattr(getattr(self, "mental_model", None), "clear_conversation_context", None)
+            if callable(mental_clear):
+                mental_clear()
             return
+        mental_seed = getattr(getattr(self, "mental_model", None), "seed_conversation_context", None)
+        if callable(mental_seed):
+            mental_seed(list(messages or []))
         restored: List[Any] = [SystemMessage(content="")]
         for item in list(messages or []):
             if not isinstance(item, dict):
@@ -1537,6 +1543,7 @@ class SelfEvolvingAgent:
             "tools_count": len(self.key_tools),
             "max_iterations": self.config.agent.max_iterations,
             "awake_interval": self.config.agent.awake_interval,
+            "session_topic": f"main_loop_{policy.mode.value}",
         })
         logger.log_action("会话开始", f"模型: {model_name}")
         get_state_manager().set_state(AgentState.AWAKENING, action="主循环启动")
@@ -1647,6 +1654,7 @@ class SelfEvolvingAgent:
             "tools_count": len(self.key_tools),
             "max_iterations": self.config.agent.max_iterations,
             "awake_interval": self.config.agent.awake_interval,
+            "conversation_topic": str(initial_prompt or goal_override or case_id or "single_turn").strip()[:160],
         })
         self._last_visible_response_text = ""
         self._last_response_tool_calls = 0

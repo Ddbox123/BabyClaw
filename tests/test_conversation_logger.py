@@ -113,3 +113,19 @@ def test_external_request_api_writes_external_request(tmp_path):
 
     assert lines[-1]["type"] == "external_request"
     assert lines[-1]["content"] == "外部任务"
+
+
+def test_session_file_name_includes_readable_label(tmp_path):
+    logger = _fresh_logger(tmp_path)
+    logger._session_id = "20260520_120001"
+    logger._current_session_file = None
+    logger.start_session({
+        "mode": "single_turn",
+        "agent_mode": "chat",
+        "conversation_topic": "继续修复对话日志吞消息问题",
+    })
+
+    session_file = Path(logger._get_session_file())
+    assert session_file.name == "conversation_20260520_120001__chat__继续修复对话日志吞消息问题.jsonl"
+    record = json.loads(session_file.read_text(encoding="utf-8").splitlines()[-1])
+    assert record["session_label"] == "chat__继续修复对话日志吞消息问题"

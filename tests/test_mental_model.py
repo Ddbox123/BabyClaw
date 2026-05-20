@@ -372,6 +372,70 @@ class TestMentalModel:
         assert isinstance(state, str)
         assert "<state>" in state
 
+    def test_conversation_context_prevents_fresh_wakeup_state(self, mental_model):
+        """Restored chat history keeps the mental layer continuous."""
+        mental_model.seed_conversation_context([
+            {
+                "role": "user",
+                "content": "你话还没说完",
+                "timestamp": "2026-05-20T14:00:00",
+            },
+            {
+                "role": "assistant",
+                "content": "这是一个被截断的心智模型回答。",
+                "mental_snapshot": {
+                    "mood": "沉思",
+                    "feeling": "正在延续心智模型话题。",
+                    "whisper": "接着上一段回答继续。",
+                    "sampleSize": 3,
+                },
+                "timestamp": "2026-05-20T14:01:00",
+            },
+        ])
+
+        state = mental_model._stabilize_state_with_conversation_context({
+            "mood": "期待而清醒",
+            "feeling": "我刚苏醒，思维空间很开阔，但还不知道下一步要走向哪里。",
+            "whisper": "先看看当前的项目状态。",
+        })
+
+        assert "刚苏醒" not in state["feeling"]
+        assert "延续上一段对话" in state["feeling"]
+        assert "你话还没说完" in state["whisper"]
+        context = mental_model.get_conversation_context()
+        assert context["turn_count"] == 2
+        assert context["last_mental_state"]["mood"] == "沉思"
+
+    def test_clear_conversation_context_removes_session_continuity(self, mental_model):
+        mental_model.seed_conversation_context([
+            {"role": "user", "content": "继续上一段"},
+            {"role": "assistant", "content": "好的。"},
+        ])
+
+        mental_model.clear_conversation_context()
+
+        assert mental_model.get_conversation_context() == {}
+
+    def test_sense_state_prompt_includes_conversation_context(self, mental_model):
+        """The subjective mental prompt receives compact session continuity."""
+        captured = {}
+
+        class DummyLLM:
+            def invoke(self, messages):
+                captured["prompt"] = messages[-1].content
+                return MagicMock(content='<state>{"mood":"专注","feeling":"延续中","whisper":"继续"}</state>')
+
+        mental_model.set_shared_llm(DummyLLM())
+        mental_model.seed_conversation_context([
+            {"role": "user", "content": "你知道你上文说了什么吗"},
+            {"role": "assistant", "content": "我确实记得。"},
+        ])
+
+        mental_model.sense_state("正在复盘上下文", "尚无工具调用")
+
+        assert "## 对话连续性" in captured["prompt"]
+        assert "你知道你上文说了什么吗" in captured["prompt"]
+
     def test_diagnose_with_metrics(self, mental_model):
         """diagnose() returns metrics in Diagnosis"""
         diagnosis = mental_model.diagnose()
