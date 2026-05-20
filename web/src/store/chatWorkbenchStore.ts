@@ -19,32 +19,18 @@ export const useChatWorkbenchStore = create<ChatWorkbenchState>((set) => ({
   activeSessionId: null,
   sessionWorkspaces: {},
   setActiveSession: (activeSessionId) => set({ activeSessionId }),
-  hydrateSession: (sessionId, previewTabs, activePreviewPath) =>
+  hydrateSession: (sessionId) =>
     set((state) => {
       const existing = state.sessionWorkspaces[sessionId];
       if (existing) {
-        const mergedTabs = [...existing.openTabs];
-        for (const tab of previewTabs) {
-          if (!mergedTabs.includes(tab)) {
-            mergedTabs.push(tab);
-          }
-        }
-        return {
-          sessionWorkspaces: {
-            ...state.sessionWorkspaces,
-            [sessionId]: {
-              openTabs: mergedTabs,
-              activeTab: existing.activeTab || activePreviewPath || "agent",
-            },
-          },
-        };
+        return state;
       }
       return {
         sessionWorkspaces: {
           ...state.sessionWorkspaces,
           [sessionId]: {
-            openTabs: [...previewTabs],
-            activeTab: activePreviewPath || "agent",
+            openTabs: [],
+            activeTab: "agent",
           },
         },
       };

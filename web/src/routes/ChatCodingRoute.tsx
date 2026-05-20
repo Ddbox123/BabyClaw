@@ -352,11 +352,7 @@ export function ChatCodingRoute() {
 
   useEffect(() => {
     if (activeSessionId && sessionDetailQuery.data) {
-      hydrateSession(
-        activeSessionId,
-        sessionDetailQuery.data.previewTabs,
-        sessionDetailQuery.data.activePreviewPath,
-      );
+      hydrateSession(activeSessionId, [], "agent");
     }
   }, [activeSessionId, hydrateSession, sessionDetailQuery.data]);
 
@@ -408,8 +404,8 @@ export function ChatCodingRoute() {
 
   const workspace = activeSessionId
     ? sessionWorkspaces[activeSessionId] ?? {
-        openTabs: sessionDetailQuery.data?.previewTabs ?? [],
-        activeTab: sessionDetailQuery.data?.activePreviewPath ?? "agent",
+        openTabs: [],
+        activeTab: "agent",
       }
     : { openTabs: [], activeTab: "agent" };
 
