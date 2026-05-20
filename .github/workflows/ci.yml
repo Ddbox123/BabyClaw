@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python-lint:
+    name: Python Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install ruff
+        run: python -m pip install --upgrade pip ruff
+
+      - name: Detect changed Python files
+        id: changed-python
+        uses: tj-actions/changed-files@v46
+        with:
+          files: |
+            **/*.py
+
+      - name: Run ruff on changed Python files
+        if: steps.changed-python.outputs.any_changed == 'true'
+        run: python -m ruff check ${{ steps.changed-python.outputs.all_changed_files }}
+
+      - name: Skip when no Python files changed
+        if: steps.changed-python.outputs.any_changed != 'true'
+        run: echo "No Python files changed; skipping ruff."
+
+  python-tests:
+    name: Python Tests (Windows, py${{ matrix.python-version }})
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.11"
+          - "3.12"
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONUTF8: "1"
+      VIBELUTION_ENABLE_USER_ENV_FALLBACK: "0"
+      OPENAI_API_KEY: ""
+      DEEPSEEK_API_KEY: ""
+      MINIMAX_API_KEY: ""
+      VIBELUTION_LLM_DEEPSEEK_V4_FLASH_API_KEY: ""
+      VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY: ""
+      VIBELUTION_LLM_OPENAI_GPT_5_5_API_KEY: ""
+      VIBELUTION_LLM_REMOTE_MAIN_MINIMAX_M2_7_API_KEY: ""
+      VIBELUTION_LLM_SHARE_AI_API_KEY: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Create virtualenv and install dependencies
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+
+      - name: Bytecode smoke check
+        shell: pwsh
+        run: .\.venv\Scripts\python.exe -m compileall agent.py config core scripts tests tools
+
+      - name: Run pytest
+        shell: pwsh
+        run: .\.venv\Scripts\python.exe -m pytest tests -q
+
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Vitest
+        run: npm run test
+
+      - name: Build frontend
+        run: npm run build

@@ -279,6 +279,16 @@ npm run test
 npm run build
 ```
 
+### CI
+
+GitHub Actions currently enforces three gates:
+
+- Windows Python `3.11` and `3.12`: create project-local `.venv`, run `compileall`, then run `pytest tests -q`
+- Incremental Python lint: run `ruff check` only on changed `*.py` files
+- Frontend verification: `npm ci`, `npm run test`, `npm run build`
+
+The Python workflow explicitly clears provider API key environment variables before running tests so config-sensitive cases do not inherit machine secrets.
+
 ---
 
 ## 进一步阅读
