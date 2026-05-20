@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Search, Trash2, X } from "lucide-react";
+import { Check, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 import {
   lazy,
   Suspense,
@@ -227,6 +227,8 @@ export function ChatCodingRoute() {
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [sessionDrafts, setSessionDrafts] = useState<Record<string, string>>({});
   const [sessionComposerErrors, setSessionComposerErrors] = useState<Record<string, string>>({});
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [editingSessionTitle, setEditingSessionTitle] = useState("");
   const [sessionStreamConnected, setSessionStreamConnected] = useState(false);
   const layoutRef = useRef<HTMLDivElement | null>(null);
 
@@ -404,6 +406,36 @@ export function ChatCodingRoute() {
       setSessionComposerErrors((current) => ({
         ...current,
         [variables.sessionId]: describeError(error, t("deleteSessionFailed")),
+      }));
+      void queryClient.invalidateQueries({ queryKey: queryKeys.session(variables.sessionId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
+    },
+  });
+
+  const renameSessionMutation = useMutation({
+    mutationFn: async ({ sessionId, title }: { sessionId: string; title: string }) =>
+      fetchJson<SessionDetail>(`/api/sessions/${sessionId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ title }),
+      }),
+    onSuccess: (nextDetail, variables) => {
+      setEditingSessionId(null);
+      setEditingSessionTitle("");
+      setSessionComposerErrors((current) => ({
+        ...current,
+        [variables.sessionId]: "",
+      }));
+      queryClient.setQueryData(queryKeys.session(variables.sessionId), nextDetail);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.runtimeSummary() });
+    },
+    onError: (error, variables) => {
+      setSessionComposerErrors((current) => ({
+        ...current,
+        [variables.sessionId]: describeError(error, t("renameSessionFailed")),
       }));
       void queryClient.invalidateQueries({ queryKey: queryKeys.session(variables.sessionId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
@@ -818,6 +850,37 @@ export function ChatCodingRoute() {
     deleteSessionMutation.mutate({ sessionId: session.id });
   }
 
+  function beginRenameSession(session: SessionSummary) {
+    setEditingSessionId(session.id);
+    setEditingSessionTitle(session.title);
+    setSessionComposerErrors((current) => ({
+      ...current,
+      [session.id]: "",
+      __sessions__: "",
+    }));
+  }
+
+  function cancelRenameSession() {
+    setEditingSessionId(null);
+    setEditingSessionTitle("");
+  }
+
+  function submitRenameSession(session: SessionSummary) {
+    const title = editingSessionTitle.trim();
+    if (!title) {
+      setSessionComposerErrors((current) => ({
+        ...current,
+        [session.id]: t("renameSessionEmpty"),
+      }));
+      return;
+    }
+    if (title === session.title) {
+      cancelRenameSession();
+      return;
+    }
+    renameSessionMutation.mutate({ sessionId: session.id, title });
+  }
+
   function handleResizeStart(side: ResizableSide, event: PointerEvent<HTMLDivElement>) {
     if (event.button !== 0) {
       return;
@@ -1207,6 +1270,10 @@ export function ChatCodingRoute() {
                   deleteSessionMutation.isPending &&
                   deleteSessionMutation.variables?.sessionId === session.id;
                 const deleteDisabled = deletePending || isBusyPhase(session.currentPhase || session.status);
+                const renamePending =
+                  renameSessionMutation.isPending &&
+                  renameSessionMutation.variables?.sessionId === session.id;
+                const isEditingTitle = editingSessionId === session.id;
                 const itemError = sessionComposerErrors[session.id] ?? "";
                 return (
                   <div
@@ -1217,30 +1284,96 @@ export function ChatCodingRoute() {
                         : styles.sessionItem
                     }
                   >
-                    <button
-                      type="button"
-                      className={styles.sessionItemMain}
-                      onClick={() => setActiveSession(session.id)}
-                    >
-                      <div className={styles.sessionItemTop}>
-                        <span className={styles.sessionItemTitle}>{session.title}</span>
-                        <span className={styles.sessionState}>{statusLabel(session.status)}</span>
+                    {isEditingTitle ? (
+                      <div className={styles.sessionItemMain}>
+                        <div className={styles.sessionItemTop}>
+                          <input
+                            className={styles.sessionTitleInput}
+                            value={editingSessionTitle}
+                            maxLength={120}
+                            autoFocus
+                            onChange={(event) => setEditingSessionTitle(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                submitRenameSession(session);
+                              }
+                              if (event.key === "Escape") {
+                                event.preventDefault();
+                                cancelRenameSession();
+                              }
+                            }}
+                            aria-label={t("renameSession")}
+                          />
+                          <span className={styles.sessionState}>{statusLabel(session.status)}</span>
+                        </div>
+                        <p className={styles.sessionItemSummary} title={session.taskSummary}>
+                          {session.taskSummary}
+                        </p>
+                        <p className={styles.sessionItemMeta}>{formatTime(session.updatedAt || session.lastActive)}</p>
                       </div>
-                      <p className={styles.sessionItemSummary} title={session.taskSummary}>
-                        {session.taskSummary}
-                      </p>
-                      <p className={styles.sessionItemMeta}>{formatTime(session.updatedAt || session.lastActive)}</p>
-                    </button>
-                    <button
-                      type="button"
-                      className={styles.sessionDeleteButton}
-                      onClick={() => handleDeleteSession(session)}
-                      disabled={deleteDisabled}
-                      title={deleteDisabled ? t("deleteSessionBusy") : t("deleteSession")}
-                      aria-label={`${t("deleteSession")} ${session.title}`}
-                    >
-                      <Trash2 size={15} />
-                    </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className={styles.sessionItemMain}
+                        onClick={() => setActiveSession(session.id)}
+                      >
+                        <div className={styles.sessionItemTop}>
+                          <span className={styles.sessionItemTitle}>{session.title}</span>
+                          <span className={styles.sessionState}>{statusLabel(session.status)}</span>
+                        </div>
+                        <p className={styles.sessionItemSummary} title={session.taskSummary}>
+                          {session.taskSummary}
+                        </p>
+                        <p className={styles.sessionItemMeta}>{formatTime(session.updatedAt || session.lastActive)}</p>
+                      </button>
+                    )}
+                    {isEditingTitle ? (
+                      <div className={styles.sessionActionStack}>
+                        <button
+                          type="button"
+                          className={styles.sessionIconButton}
+                          onClick={() => submitRenameSession(session)}
+                          disabled={renamePending}
+                          title={t("saveSessionName")}
+                          aria-label={`${t("saveSessionName")} ${session.title}`}
+                        >
+                          <Check size={15} />
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.sessionIconButton}
+                          onClick={cancelRenameSession}
+                          disabled={renamePending}
+                          title={t("cancelRenameSession")}
+                          aria-label={t("cancelRenameSession")}
+                        >
+                          <X size={15} />
+                        </button>
+                      </div>
+                    ) : (
+                      <div className={styles.sessionActionStack}>
+                        <button
+                          type="button"
+                          className={styles.sessionIconButton}
+                          onClick={() => beginRenameSession(session)}
+                          title={t("renameSession")}
+                          aria-label={`${t("renameSession")} ${session.title}`}
+                        >
+                          <Pencil size={15} />
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.sessionDeleteButton}
+                          onClick={() => handleDeleteSession(session)}
+                          disabled={deleteDisabled}
+                          title={deleteDisabled ? t("deleteSessionBusy") : t("deleteSession")}
+                          aria-label={`${t("deleteSession")} ${session.title}`}
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                    )}
                     {itemError ? <p className={styles.sessionItemError}>{itemError}</p> : null}
                   </div>
                 );

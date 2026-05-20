@@ -725,6 +725,43 @@ def test_create_session_persists_new_active_empty_conversation(tmp_path, monkeyp
     ]
 
 
+def test_update_session_title_persists_to_list_and_detail(tmp_path, monkeypatch):
+    _seed_chat_state(tmp_path)
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+
+    response = client.patch(
+        "/api/sessions/session-live",
+        json={"title": "重命名后的会话"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] == "session-live"
+    assert payload["title"] == "重命名后的会话"
+
+    sessions_response = client.get("/api/sessions")
+    assert sessions_response.status_code == 200
+    assert sessions_response.json()[0]["title"] == "重命名后的会话"
+
+    state = load_chat_state(tmp_path)
+    assert state["conversations"][0]["title"] == "重命名后的会话"
+
+
+def test_update_session_title_rejects_empty_title(tmp_path, monkeypatch):
+    _seed_chat_state(tmp_path)
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+
+    response = client.patch(
+        "/api/sessions/session-live",
+        json={"title": "   "},
+    )
+
+    assert response.status_code == 422
+    assert "名称" in response.json()["detail"]
+    state = load_chat_state(tmp_path)
+    assert state["conversations"][0]["title"] == "真实会话"
+
+
 def test_delete_session_switches_to_latest_remaining_session(tmp_path, monkeypatch):
     save_chat_state(
         tmp_path,

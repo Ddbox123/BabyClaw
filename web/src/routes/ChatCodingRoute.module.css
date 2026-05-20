@@ -527,7 +527,7 @@
 .sessionItem {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 34px;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   text-align: left;
   padding: 12px;
@@ -552,6 +552,10 @@
   cursor: pointer;
 }
 
+.sessionItemMain:where(div) {
+  cursor: default;
+}
+
 .sessionItemTop {
   display: flex;
   align-items: flex-start;
@@ -563,6 +567,17 @@
   font-family: var(--font-display);
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.sessionTitleInput {
+  min-width: 0;
+  width: 100%;
+  border: 1px solid rgba(216, 167, 91, 0.3);
+  border-radius: 7px;
+  background: rgba(20, 23, 26, 0.9);
+  color: var(--fg-primary);
+  padding: 7px 8px;
+  font: inherit;
 }
 
 .sessionState {
@@ -590,11 +605,17 @@
   font-size: 0.82rem;
 }
 
+.sessionActionStack {
+  display: grid;
+  gap: 6px;
+  align-self: start;
+}
+
+.sessionIconButton,
 .sessionDeleteButton {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  align-self: start;
   width: 34px;
   height: 34px;
   border: 1px solid var(--border-soft);
@@ -604,12 +625,19 @@
   cursor: pointer;
 }
 
+.sessionIconButton:hover:not(:disabled) {
+  color: var(--accent-warm-2);
+  border-color: rgba(216, 167, 91, 0.3);
+  background: rgba(216, 167, 91, 0.12);
+}
+
 .sessionDeleteButton:hover:not(:disabled) {
   color: #e79b9b;
   border-color: rgba(192, 94, 94, 0.32);
   background: rgba(192, 94, 94, 0.12);
 }
 
+.sessionIconButton:disabled,
 .sessionDeleteButton:disabled {
   cursor: not-allowed;
   opacity: 0.45;

@@ -1,5 +1,5 @@
 import { ArrowDown, BrainCircuit, ChevronDown, ChevronRight } from "lucide-react";
-import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { ConversationMessage, MentalStateSnapshot } from "../../api/types";
 import { useAppI18n } from "../../i18n/useAppI18n";
@@ -80,6 +80,8 @@ export function ConversationView({
 }: ConversationViewProps) {
   const { lang, t, statusLabel } = useAppI18n();
   const timelineRef = useRef<HTMLDivElement | null>(null);
+  const initializedSessionRef = useRef("");
+  const atBottomRef = useRef(true);
   const [sectionExpansion, setSectionExpansion] = useState<Record<string, Record<string, boolean>>>({});
   const [isAtBottom, setIsAtBottom] = useState(true);
   const previousStreamingRef = useRef<Record<string, boolean>>({});
@@ -134,6 +136,18 @@ export function ConversationView({
         .find((message) => (message.toolCalls?.length ?? 0) > 0)?.toolCalls ?? [],
     [messages],
   );
+  const timelineScrollSignal = useMemo(
+    () =>
+      messages
+        .map(
+          (message) =>
+            `${message.id}:${message.content.length}:${message.thought?.length ?? 0}:${
+              message.toolCalls?.length ?? 0
+            }:${message.streaming ? 1 : 0}`,
+        )
+        .join("|"),
+    [messages],
+  );
   const hasSessionMeta = resolvedStats.length > 0 || latestToolCalls.length > 0 || Boolean(lastMessageTimestamp);
   const hasMetaSection = showSessionOverview && (hasSessionMeta || Boolean(supplementalContent));
 
@@ -159,26 +173,39 @@ export function ConversationView({
     return `${normalized.slice(0, maxLength - 1).trimEnd()}...`;
   }
 
+  useLayoutEffect(() => {
+    const timeline = timelineRef.current;
+    if (!timeline) {
+      return;
+    }
+    if (initializedSessionRef.current !== sessionId) {
+      initializedSessionRef.current = sessionId;
+      timeline.scrollTop = timeline.scrollHeight;
+      atBottomRef.current = true;
+      setIsAtBottom(true);
+      return;
+    }
+    if (autoScrollToLatest && atBottomRef.current) {
+      timeline.scrollTop = timeline.scrollHeight;
+      setIsAtBottom(true);
+    }
+  }, [autoScrollToLatest, sessionId, timelineScrollSignal]);
+
   useEffect(() => {
     const timeline = timelineRef.current;
     if (!timeline) {
       return;
     }
-    const stickToBottom = () => {
-      timeline.scrollTop = timeline.scrollHeight;
-    };
     const handleScroll = () => {
       const distance = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
-      setIsAtBottom(distance < 16);
+      const nextAtBottom = distance < 16;
+      atBottomRef.current = nextAtBottom;
+      setIsAtBottom(nextAtBottom);
     };
-    if (autoScrollToLatest) {
-      stickToBottom();
-      setIsAtBottom(true);
-    }
     handleScroll();
     timeline.addEventListener("scroll", handleScroll);
     return () => timeline.removeEventListener("scroll", handleScroll);
-  }, [autoScrollToLatest, sessionId, messages]);
+  }, [sessionId]);
 
   useEffect(() => {
     const previous = previousStreamingRef.current;
@@ -251,7 +278,8 @@ export function ConversationView({
     if (!timeline) {
       return;
     }
-    timeline.scrollTop = timeline.scrollHeight;
+    timeline.scrollTo({ top: timeline.scrollHeight, behavior: "smooth" });
+    atBottomRef.current = true;
     setIsAtBottom(true);
   }
 

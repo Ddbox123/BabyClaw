@@ -227,6 +227,34 @@ def create_chat_session() -> dict:
     return get_session_detail(session_id) or {}
 
 
+def update_chat_session_title(session_id: str, title: str) -> dict:
+    """Persist a user-facing chat session title."""
+
+    lang = get_web_language()
+    conversation_id = str(session_id or "").strip()
+    if not conversation_id:
+        raise SessionNotFoundError(text_for(lang, zh="未找到当前会话。", en="Session not found."))
+
+    normalized_title = trim_lines(title or "", max_lines=1).strip()
+    if not normalized_title:
+        raise SessionValidationError(text_for(lang, zh="请输入会话名称。", en="Enter a session name."))
+    if len(normalized_title) > 120:
+        normalized_title = normalized_title[:120].rstrip()
+
+    with _CHAT_STATE_LOCK:
+        payload = load_chat_state(PROJECT_ROOT)
+        conversation = _find_conversation_entry(payload, conversation_id)
+        if conversation is None:
+            raise SessionNotFoundError(text_for(lang, zh="未找到当前会话。", en="Session not found."))
+
+        conversation["title"] = normalized_title
+        payload["updated_at"] = _now_timestamp()
+        save_chat_state(PROJECT_ROOT, payload)
+
+    _publish_session_detail_snapshot(conversation_id)
+    return get_session_detail(conversation_id) or {}
+
+
 def delete_chat_session(session_id: str) -> dict:
     """Delete one chat session and return the next active session detail."""
 

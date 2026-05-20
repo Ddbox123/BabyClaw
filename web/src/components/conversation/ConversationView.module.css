@@ -154,7 +154,6 @@
   display: grid;
   align-content: start;
   gap: 14px;
-  scroll-behavior: smooth;
 }
 
 .emptyState {

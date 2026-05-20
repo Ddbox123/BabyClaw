@@ -17,6 +17,7 @@ from core.web.services.session_service import (
     request_stop_session_turn,
     stream_session_events,
     submit_session_message,
+    update_chat_session_title,
 )
 
 
@@ -25,6 +26,10 @@ router = APIRouter(tags=["sessions"])
 
 class SessionMessagePayload(BaseModel):
     content: str = ""
+
+
+class SessionUpdatePayload(BaseModel):
+    title: str = ""
 
 
 @router.get("/sessions")
@@ -43,6 +48,16 @@ def session_detail(session_id: str) -> dict:
     if detail is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return detail
+
+
+@router.patch("/sessions/{session_id}")
+def session_update(session_id: str, payload: SessionUpdatePayload) -> dict:
+    try:
+        return update_chat_session_title(session_id, payload.title)
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SessionValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.delete("/sessions/{session_id}")
