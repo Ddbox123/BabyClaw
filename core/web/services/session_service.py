@@ -454,6 +454,8 @@ def _sanitize_message_content(role: str, content: Any) -> str:
     text = re.sub(r"<state[^>]*>.*$", "", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"<state(?:\s[^>\n]*)?$", "", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"</?invoke[^>]*>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"</?parameter[^>]*>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<parameter(?:\s[^>\n]*)?$", "", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"</?[^>\n]*DSML[^>]*>", "", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>\n]*DSML[^>\n]*$", "", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"</?(?:think|thinking)[^>]*>", "", text, flags=re.IGNORECASE)
@@ -841,6 +843,7 @@ def _run_session_continuation_loop(
 def _persist_session_turn_result(session_id: str, result: Any) -> None:
     lang = get_web_language()
     capture_messages: list[dict[str, Any]] | None = None
+    runtime_stop_requested = _is_session_stop_requested(session_id)
     with _CHAT_STATE_LOCK:
         payload = load_chat_state(PROJECT_ROOT)
         conversation = _find_conversation_entry(payload, session_id)
@@ -848,7 +851,8 @@ def _persist_session_turn_result(session_id: str, result: Any) -> None:
             return
         messages = normalize_chat_messages(conversation.get("messages") or [])
         result_status = str(result.get("status") or "").strip().lower() if isinstance(result, dict) else ""
-        stop_requested = bool(result.get("stop_requested")) if isinstance(result, dict) else False
+        result_stop_requested = bool(result.get("stop_requested")) if isinstance(result, dict) else False
+        stop_requested = result_stop_requested and runtime_stop_requested
         assistant_text = (
             text_for(
                 lang,
@@ -1024,7 +1028,7 @@ def _extract_chat_tool_calls(result: Any) -> list[dict[str, Any]]:
 
 
 def _extract_chat_thought(result: Any, assistant_text: str) -> str:
-    if not isinstance(result, dict) or bool(result.get("stop_requested")):
+    if not isinstance(result, dict):
         return ""
 
     candidates = [
@@ -1124,6 +1128,8 @@ def _sanitize_thought_text(text: Any) -> str:
     cleaned = re.sub(r"<state[^>]*>.*$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
     cleaned = re.sub(r"<state(?:\s[^>\n]*)?$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
     cleaned = re.sub(r"</?invoke[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"</?parameter[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<parameter(?:\s[^>\n]*)?$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
     cleaned = re.sub(r"</?[^>\n]*DSML[^>]*>", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"<[^>\n]*DSML[^>\n]*$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
     cleaned = re.sub(r"</?[\w:-]*tool_call[^>]*>", "", cleaned, flags=re.IGNORECASE)

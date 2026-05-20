@@ -346,6 +346,40 @@ def _infer_structured_fallback(raw_output: str, process_output: str, exit_code: 
     }
 
 
+def _has_usable_subagent_conclusion(payload: Dict[str, Any]) -> bool:
+    summary = str(payload.get("summary") or "").strip()
+    if summary and not summary.lower().startswith("<think>"):
+        return True
+    for key in ("findings", "evidence"):
+        value = payload.get(key)
+        if isinstance(value, list) and any(str(item or "").strip() for item in value):
+            return True
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+
+def _mark_empty_subagent_result(
+    payload: Dict[str, Any],
+    *,
+    raw_output: str,
+    process_output: str,
+    exit_code: int,
+) -> Dict[str, Any]:
+    normalized = dict(payload)
+    normalized["status"] = "no_result"
+    normalized["summary"] = "子 agent 未返回可用结论"
+    normalized["message"] = "子 agent 进程结束，但没有返回可用于主 agent 裁决的摘要、发现或证据。"
+    normalized["recommended_next_action"] = "主 agent 接管并自行收束"
+    normalized["confidence"] = "low"
+    normalized.setdefault("findings", [])
+    normalized.setdefault("evidence", [])
+    normalized.setdefault("raw_output", raw_output[:8000])
+    normalized["process_output"] = process_output[:8000]
+    normalized.setdefault("exit_code", exit_code)
+    return normalized
+
+
 def _normalize_payload_with_fallback(payload: Dict[str, Any], raw_output: str, process_output: str, exit_code: int) -> Dict[str, Any]:
     summary = str(payload.get("summary") or "").strip()
     findings = payload.get("findings")
@@ -357,6 +391,14 @@ def _normalize_payload_with_fallback(payload: Dict[str, Any], raw_output: str, p
 
     inferred = _infer_structured_fallback(raw_output, process_output, exit_code)
     if not inferred:
+        status = str(payload.get("status") or "").strip().lower()
+        if status in {"completed", "success", "ok", "partial"} and not _has_usable_subagent_conclusion(payload):
+            return _mark_empty_subagent_result(
+                payload,
+                raw_output=raw_output,
+                process_output=process_output,
+                exit_code=exit_code,
+            )
         return payload
 
     merged = dict(payload)
@@ -379,6 +421,13 @@ def _normalize_payload_with_fallback(payload: Dict[str, Any], raw_output: str, p
         merged["recommended_next_action"] = inferred.get("recommended_next_action", "")
     if not merged.get("confidence"):
         merged["confidence"] = inferred.get("confidence", "low")
+    if not _has_usable_subagent_conclusion(merged):
+        return _mark_empty_subagent_result(
+            merged,
+            raw_output=raw_output,
+            process_output=process_output,
+            exit_code=exit_code,
+        )
     return merged
 
 
@@ -405,6 +454,14 @@ def _extract_structured_result(stdout: str, stderr: str, exit_code: int, task_ty
                 payload.setdefault("raw_output", raw_output[:8000])
                 payload["process_output"] = console_output[:8000]
                 payload.setdefault("exit_code", exit_code)
+                status = str(payload.get("status") or "").strip().lower()
+                if status in {"completed", "success", "ok", "partial"} and not _has_usable_subagent_conclusion(payload):
+                    payload = _mark_empty_subagent_result(
+                        payload,
+                        raw_output=raw_output,
+                        process_output=console_output,
+                        exit_code=exit_code,
+                    )
                 return payload
         except Exception:
             pass
@@ -422,6 +479,14 @@ def _extract_structured_result(stdout: str, stderr: str, exit_code: int, task_ty
                 payload.setdefault("raw_output", raw_output[:8000])
                 payload["process_output"] = console_output[:8000]
                 payload.setdefault("exit_code", exit_code)
+                status = str(payload.get("status") or "").strip().lower()
+                if status in {"completed", "success", "ok", "partial"} and not _has_usable_subagent_conclusion(payload):
+                    payload = _mark_empty_subagent_result(
+                        payload,
+                        raw_output=raw_output,
+                        process_output=console_output,
+                        exit_code=exit_code,
+                    )
                 return payload
         except Exception:
             pass
@@ -436,9 +501,26 @@ def _extract_structured_result(stdout: str, stderr: str, exit_code: int, task_ty
         inferred.setdefault("exit_code", exit_code)
         return inferred
 
-    summary = raw_output[:500] if raw_output else "子 agent 未返回结构化结果"
+    if not raw_output.strip():
+        return {
+            "status": "no_result",
+            "task_type": task_type or "inspect",
+            "goal": goal,
+            "summary": "子 agent 未返回可用结论",
+            "message": "子 agent 进程结束，但 stdout/stderr 中没有结构化结果或可推断证据。",
+            "findings": [],
+            "evidence": [],
+            "recommended_next_action": "主 agent 接管并自行收束",
+            "confidence": "low",
+            "scope_touched": scope,
+            "raw_output": "",
+            "process_output": "",
+            "exit_code": exit_code,
+        }
+
+    summary = raw_output[:500]
     return {
-        "status": "failed" if exit_code else "completed",
+        "status": "failed" if exit_code else "partial",
         "task_type": task_type or "inspect",
         "goal": goal,
         "summary": summary,

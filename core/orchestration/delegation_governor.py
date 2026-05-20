@@ -779,6 +779,11 @@ class DelegationGovernor:
         useful_statuses = {"completed", "success", "ok", "partial"}
         summary_is_think_only = bool(summary) and summary.strip().lower().startswith("<think>")
         summary_effective = "" if summary_is_think_only else summary
+        has_structured_evidence = any(str(item or "").strip() for item in findings + evidence)
+        if status in useful_statuses and not summary_effective and not has_structured_evidence:
+            status = "no_result"
+            result["status"] = status
+            result.setdefault("message", "子 agent 未返回可用结论")
         if status in useful_statuses and summary_effective:
             should_stop_round = self.should_stop_after_useful_delegation(
                 task_type=str(payload.get("task_type") or "inspect"),

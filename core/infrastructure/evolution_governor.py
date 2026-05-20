@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, List
@@ -26,6 +27,28 @@ class EvolutionGovernor:
         "write_dynamic_prompt_tool",
         "add_insight_to_dynamic_tool",
     }
+    _CLI_WRITE_PATTERNS = (
+        re.compile(
+            r"\bopen\(\s*['\"](?P<path>[^'\"]+)['\"]\s*,\s*['\"][^'\"]*[wax+][^'\"]*['\"]",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bPath\(\s*['\"](?P<path>[^'\"]+)['\"]\s*\)\.write_(?:text|bytes)\s*\(",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:Set-Content|Out-File|Add-Content)\b[^\r\n]*?(?:-Path|-LiteralPath|FilePath)?\s*['\"](?P<path>[^'\"]+)['\"]",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:Set-Content|Out-File|Add-Content)\b[^\r\n]*?(?:-Path|-LiteralPath|FilePath)\s+(?P<path>[^\s'\"]+)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?<![<>&])>{1,2}\s*['\"]?(?P<path>[A-Za-z0-9_./\\:-]+\.[A-Za-z0-9_]+)['\"]?",
+            re.IGNORECASE,
+        ),
+    )
 
     def __init__(self) -> None:
         self._bus = get_event_bus()
@@ -194,9 +217,42 @@ class EvolutionGovernor:
             if not file_path:
                 return []
             return [self._resolve_project_path(file_path)]
+        if tool_name == "cli_tool":
+            return self._resolve_cli_write_targets(str((tool_args or {}).get("command") or ""))
         if tool_name in self._DYNAMIC_PROMPT_TOOLS:
             return [get_workspace().get_prompt_path("DYNAMIC.md").resolve()]
         return []
+
+    @classmethod
+    def _resolve_cli_write_targets(cls, command: str) -> List[Path]:
+        targets: List[Path] = []
+        seen: set[str] = set()
+        for pattern in cls._CLI_WRITE_PATTERNS:
+            for match in pattern.finditer(command or ""):
+                raw_path = str(match.group("path") or "").strip()
+                if not raw_path or not cls._looks_like_cli_file_target(raw_path):
+                    continue
+                resolved = cls._resolve_project_path(raw_path)
+                key = str(resolved).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                targets.append(resolved)
+        return targets
+
+    @staticmethod
+    def _looks_like_cli_file_target(path_str: str) -> bool:
+        text = str(path_str or "").strip().strip("'\"")
+        if not text or text.startswith("-"):
+            return False
+        if text in {"nul", "/dev/null"}:
+            return False
+        if any(token in text for token in ("{", "}", "$(", "`")):
+            return False
+        suffix = Path(text).suffix
+        if suffix:
+            return True
+        return "/" in text or "\\" in text
 
     def _allowed_roots(self) -> List[Path]:
         evolution = get_config().evolution

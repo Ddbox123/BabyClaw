@@ -758,6 +758,48 @@ class TestToolExecutorErrorHandling:
         assert called["value"] is False
         assert "open_evolution_transaction_tool" in str(result)
 
+    def test_cli_python_write_to_risky_path_requires_active_txn(self, executor, monkeypatch, tmp_path):
+        project_root = tmp_path / "project"
+        project_root.mkdir(parents=True, exist_ok=True)
+
+        class _FakeWorkspace:
+            def __init__(self, root: Path):
+                self.project_root = root
+
+            def get_prompt_path(self, name: str) -> Path:
+                return self.project_root / "workspace" / "prompts" / name
+
+        evolution = SimpleNamespace(
+            allowed_target_dirs=["workspace/prompts/"],
+            audit_log_path="workspace/evolution/audit.jsonl",
+        )
+        monkeypatch.setattr(governor_module, "get_config", lambda: SimpleNamespace(evolution=evolution))
+        monkeypatch.setattr(governor_module, "get_workspace", lambda: _FakeWorkspace(project_root))
+        governor_module._governor = None
+
+        called = {"value": False}
+
+        def fake_cli_tool(command="", timeout=60):
+            called["value"] = True
+            return "should not run"
+
+        executor.register_tool("cli_tool", fake_cli_tool, timeout=5)
+        reset_session_state()
+
+        result, action = executor.execute(
+            "cli_tool",
+            {
+                "command": "python -c \"open('tools/bdd_test_runner.py','w').write('x')\"",
+                "timeout": 10,
+            },
+        )
+
+        assert action is None
+        assert called["value"] is False
+        assert "[演化治理]" in str(result)
+        assert "open_evolution_transaction_tool" in str(result)
+        assert "tools/bdd_test_runner.py" in str(result)
+
 
 class TestToolExecutorConvenience:
     """便捷功能测试"""

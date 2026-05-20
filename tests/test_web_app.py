@@ -1065,6 +1065,32 @@ def test_session_detail_hides_dsml_and_lone_angle_live_answer(tmp_path, monkeypa
     ]
 
 
+def test_session_detail_hides_parameter_live_answer(tmp_path, monkeypatch):
+    _seed_chat_state(tmp_path, task_status="reading")
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+
+    session_service._set_session_running("session-live", True)
+    session_service._set_session_live_output(
+        "session-live",
+        content="连续被拦截。让我尝试拆分写入。\n</parameter>",
+        thought="</parameter>\n<parameter",
+        tool_calls=[{"name": "cli_tool", "status": "running"}],
+    )
+    try:
+        response = client.get("/api/sessions/session-live")
+    finally:
+        session_service._clear_session_live_output("session-live")
+        session_service._set_session_running("session-live", False)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["messages"][-1]["streaming"] is True
+    assert payload["messages"][-1]["content"] == "连续被拦截。让我尝试拆分写入。"
+    assert "thought" not in payload["messages"][-1]
+    assert payload["messages"][-1]["toolCalls"] == [
+        {"name": "cli_tool", "status": "running"}
+    ]
+
 def test_session_detail_recovers_stale_running_state(tmp_path, monkeypatch):
     _seed_chat_state(tmp_path, task_status="reading")
     state = load_chat_state(tmp_path)
@@ -1390,6 +1416,49 @@ def test_submit_session_continue_recovers_goal_when_active_task_is_continue(tmp_
     assert active_task["title"] == "做一个测试工具吧,能够更快速的进行BDD调试,先规划一下,然后向我汇报"
     assert active_task["latest_summary"] != "<state"
 
+
+def test_persist_turn_result_cleans_parameter_and_requires_real_stop(tmp_path, monkeypatch):
+    (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tests" / "prompt_debugger.py").write_text("pass\n", encoding="utf-8")
+    _seed_chat_state(
+        tmp_path,
+        task_status="reading",
+        active_task={
+            "task_id": "bdd-tool-plan",
+            "kind": "coding",
+            "status": "reading",
+            "title": "做一个 BDD 调试测试工具规划并汇报",
+            "goal": "做一个 BDD 调试测试工具规划并汇报",
+            "read_files": ["tests/prompt_debugger.py"],
+            "latest_summary": "已读取测试工具结构。",
+            "updated_at": "2026-05-20T16:24:53",
+        },
+    )
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+    session_service._clear_session_turn_control("session-live")
+
+    session_service._persist_session_turn_result(
+        "session-live",
+        {
+            "status": "stopped",
+            "summary": "连续被拦截。让我尝试拆分写入。\n</parameter>",
+            "raw_output": "连续被拦截。让我尝试拆分写入。\n</parameter>",
+            "stop_requested": True,
+            "outcome": "progress",
+            "read_files": ["tests/prompt_debugger.py"],
+            "tool_call_count": 0,
+            "tool_trace": [],
+        },
+    )
+
+    state = load_chat_state(tmp_path)
+    message = state["conversations"][0]["messages"][-1]
+    assert message["role"] == "assistant"
+    assert message["content"] == "连续被拦截。让我尝试拆分写入。"
+    assert message["content"] != "本轮已按请求停止。"
+    active_task = state["conversations"][0]["active_task"]
+    assert active_task["latest_summary"] == "连续被拦截。让我尝试拆分写入。"
+    assert "</parameter>" not in json.dumps(active_task, ensure_ascii=False)
 
 def test_session_detail_uses_ready_phase_for_resting_sessions(tmp_path, monkeypatch):
     _seed_chat_state(tmp_path, task_status="done")

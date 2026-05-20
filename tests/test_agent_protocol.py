@@ -1538,6 +1538,37 @@ class TestToolMessageFlow:
         assert payload["status"] == "partial"
         assert "OSError" in payload["summary"]
 
+    def test_extract_structured_result_marks_empty_success_as_no_result(self):
+        payload = spawn_agent_impl.__globals__["_extract_structured_result"](
+            "",
+            "",
+            0,
+            "diagnose",
+            "分析为什么子 agent 没有返回",
+            {"log": "demo.jsonl"},
+        )
+
+        assert payload["status"] == "no_result"
+        assert payload["summary"] == "子 agent 未返回可用结论"
+        assert payload["recommended_next_action"] == "主 agent 接管并自行收束"
+
+    def test_extract_structured_result_rejects_empty_completed_payload(self):
+        payload = spawn_agent_impl.__globals__["_extract_structured_result"](
+            (
+                "__VIBELUTION_SUBAGENT_RESULT__"
+                '{"status":"completed","summary":"","findings":[],"evidence":[],'
+                '"recommended_next_action":"","confidence":"low"}'
+            ),
+            "",
+            0,
+            "diagnose",
+            "分析为什么子 agent 没有返回",
+            {"log": "demo.jsonl"},
+        )
+
+        assert payload["status"] == "no_result"
+        assert payload["summary"] == "子 agent 未返回可用结论"
+
     def test_spawn_agent_fast_path_scans_conversation_log(self, tmp_path):
         log_path = tmp_path / "conversation_20260511_162502.jsonl"
         log_path.write_text(
@@ -3301,6 +3332,71 @@ class TestRuntimeStateMemoryFlow:
         assert messages
         assert isinstance(messages[-1], SystemMessage)
         assert messages[-1].content.startswith("## 委派失败")
+        assert "unexpected_success" not in events
+
+    def test_apply_delegation_result_rejects_empty_completed_payload(self):
+        events = {"logs": [], "finished": []}
+
+        class DummyUI:
+            def add_log(self, text, level="INFO"):
+                events["logs"].append((level, text))
+
+            def add_content(self, *_args, **_kwargs):
+                return None
+
+            def add_delegation_evidence(self, *_args, **_kwargs):
+                return None
+
+            def finish_subagent_activity(self, **kwargs):
+                events["finished"].append(kwargs)
+
+        class DummySession:
+            def __init__(self):
+                self.failures = []
+
+            def record_delegation_result(self, *args, **kwargs):
+                events["unexpected_success"] = (args, kwargs)
+
+            def record_delegation_failure(self, *_args):
+                self.failures.append(_args)
+
+        session = DummySession()
+        governor = DelegationGovernor(
+            spawn_execute=lambda *_args, **_kwargs: ("{}", None),
+            sync_runtime_state_memory=lambda: None,
+            ui_getter=lambda: DummyUI(),
+            session_getter=lambda: session,
+        )
+        payload = {
+            "task_type": "diagnose",
+            "goal": "分析空子 agent 结果",
+            "root_goal": "分析空子 agent 结果，只做诊断，不要修改代码。",
+            "scope": {"log": "demo.jsonl"},
+        }
+        messages = []
+
+        outcome = governor.apply_result(
+            payload,
+            json.dumps(
+                {
+                    "status": "completed",
+                    "summary": "",
+                    "findings": [],
+                    "evidence": [],
+                    "recommended_next_action": "",
+                    "confidence": "low",
+                    "raw_output": "",
+                    "tool_call_count": 0,
+                },
+                ensure_ascii=False,
+            ),
+            messages,
+        )
+
+        assert outcome["delegated"] is True
+        assert outcome["useful"] is False
+        assert session.failures
+        assert events["finished"][0]["status"] == "no_result"
         assert "unexpected_success" not in events
 
     def test_restart_focus_guard_blocks_unrelated_file_edits(self):
