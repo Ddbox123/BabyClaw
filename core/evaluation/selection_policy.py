@@ -12,6 +12,8 @@ from typing import Any, Dict, List
 
 from config import get_config
 
+DEFAULT_OBSERVATION_BUDGET = 3
+
 
 @dataclass
 class PolicyExecutionRecord:
@@ -105,8 +107,15 @@ def _write_proposal(
 ) -> Dict[str, Any]:
     existing = _load_json_if_exists(proposal_path)
     observation_count = int(existing.get("observation_count") or 0)
+    observation_budget = int(existing.get("observation_budget") or DEFAULT_OBSERVATION_BUDGET)
+    expired_at = existing.get("expired_at")
+    expiration_reason = existing.get("expiration_reason")
     if status == "observing":
         observation_count += 1
+        if observation_count > observation_budget:
+            status = "expired"
+            expired_at = decision.ended_at
+            expiration_reason = "observation_budget_exhausted"
     elif observation_count <= 0:
         observation_count = 1
     proposal_payload = {
@@ -124,9 +133,14 @@ def _write_proposal(
         "decision": decision.decision,
         "decision_path": decision.decision_path,
         "observation_count": observation_count,
+        "observation_budget": observation_budget,
         "first_seen_at": existing.get("first_seen_at") or decision.started_at,
         "updated_at": decision.ended_at,
     }
+    if expired_at:
+        proposal_payload["expired_at"] = expired_at
+    if expiration_reason:
+        proposal_payload["expiration_reason"] = expiration_reason
     proposal_path.write_text(json.dumps(proposal_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return proposal_payload
 

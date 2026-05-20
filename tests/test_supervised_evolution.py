@@ -672,6 +672,69 @@ def test_run_supervised_evolution_session_reuses_proposal_and_increments_observa
     assert len(lineage_index["cases"][0]["chain"]) == 1
 
 
+def test_run_supervised_evolution_session_expires_observing_proposal_after_budget(tmp_path: Path):
+    bundle_dir = tmp_path / "workspace" / "evaluation" / "bundles"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    bundle_path = bundle_dir / f"{DEFAULT_BUNDLE_NAME}.json"
+    bundle_path.write_text(
+        """
+{
+  "benchmark": "dry",
+  "bundle_name": "supervised_evolution_dry_run_v1",
+  "cases": [
+    {
+      "case_id": "probe",
+      "scenario": "transaction",
+      "mode": "single_turn",
+      "baseline_prompt": "baseline",
+      "candidate_prompt": "candidate"
+    }
+  ]
+}
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    def fake_runner(**kwargs):
+        if kwargs["prompt"] == "baseline":
+            return _fake_result("success", "baseline ok", "baseline")
+        return _fake_result("success", "candidate ok", "candidate")
+
+    decisions = [
+        run_supervised_evolution_session(
+            bundle_name=DEFAULT_BUNDLE_NAME,
+            project_root=tmp_path,
+            harness_runner=fake_runner,
+        )
+        for _ in range(4)
+    ]
+
+    proposal_path = Path(decisions[-1].policy_action["proposal_paths"][0])
+    proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
+    assert proposal["status"] == "expired"
+    assert proposal["observation_count"] == 4
+    assert proposal["observation_budget"] == 3
+    assert proposal["expired_at"] == decisions[-1].ended_at
+    assert proposal["expiration_reason"] == "observation_budget_exhausted"
+    lineage_index = json.loads(Path(decisions[-1].policy_action["lineage_index_path"]).read_text(encoding="utf-8"))
+    assert lineage_index["cases"][0]["proposal_count"] == 1
+    assert lineage_index["cases"][0]["observation_cycles"] == 0
+    assert lineage_index["cases"][0]["chain"][0]["status"] == "expired"
+
+    expired_at = proposal["expired_at"]
+    fifth = run_supervised_evolution_session(
+        bundle_name=DEFAULT_BUNDLE_NAME,
+        project_root=tmp_path,
+        harness_runner=fake_runner,
+    )
+    proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
+    assert proposal["status"] == "expired"
+    assert proposal["observation_count"] == 5
+    assert proposal["expired_at"] == expired_at
+    lineage_index = json.loads(Path(fifth.policy_action["lineage_index_path"]).read_text(encoding="utf-8"))
+    assert lineage_index["cases"][0]["observation_cycles"] == 0
+
+
 def test_run_supervised_evolution_session_records_parent_lineage_after_prior_promotion(tmp_path: Path):
     bundle_dir = tmp_path / "workspace" / "evaluation" / "bundles"
     bundle_dir.mkdir(parents=True, exist_ok=True)
