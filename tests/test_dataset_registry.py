@@ -74,11 +74,15 @@ def test_materialize_builtin_supervised_bundle(tmp_path: Path):
 
 
 def test_materialize_builtin_supervised_bundle_respects_limit(tmp_path: Path):
+    full = materialize_dataset_bundle("supervised_dry_run", project_root=tmp_path)
     result = materialize_dataset_bundle("supervised_dry_run", project_root=tmp_path, limit=1)
     bundle = json.loads(Path(result.bundle_path).read_text(encoding="utf-8"))
+    full_bundle = json.loads(Path(full.bundle_path).read_text(encoding="utf-8"))
 
     assert result.case_count == 1
     assert len(bundle["cases"]) == 1
+    assert result.bundle_path != full.bundle_path
+    assert len(full_bundle["cases"]) > 1
 
 
 def test_materialize_custom_prompt_jsonl(tmp_path: Path):

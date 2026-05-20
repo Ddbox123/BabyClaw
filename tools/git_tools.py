@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+from core.infrastructure.agent_session import get_session_state
 from core.infrastructure.evolution_governor import get_evolution_governor
 from core.infrastructure.git_memory import get_git_memory_service
 
@@ -65,10 +66,12 @@ def explain_current_worktree_tool() -> str:
 
 def open_evolution_transaction_tool(summary: str = "") -> str:
     """打开一条演化事务记录。"""
+    txn_id = get_git_memory_service().open_evolution_transaction(summary=summary)
+    get_session_state().set_active_evolution_txn(txn_id)
     return json.dumps(
         {
             "status": "success",
-            "txn_id": get_git_memory_service().open_evolution_transaction(summary=summary),
+            "txn_id": txn_id,
             "summary": summary,
         },
         ensure_ascii=False,
@@ -82,6 +85,9 @@ def close_evolution_transaction_tool(txn_id: str, status: str = "success", summa
     if normalized not in {"success", "failed", "cancelled"}:
         normalized = "success"
     get_git_memory_service().close_evolution_transaction(txn_id=txn_id, status=normalized, summary=summary)
+    session = get_session_state()
+    if session.get_active_evolution_txn() == txn_id:
+        session.set_active_evolution_txn(None)
     return json.dumps(
         {
             "status": "success",

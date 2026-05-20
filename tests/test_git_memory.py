@@ -5,7 +5,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from core.infrastructure.agent_session import get_session_state
+from core.infrastructure.agent_session import get_session_state, reset_session_state
 from core.infrastructure.event_bus import EventNames
 from core.infrastructure.git_memory import GitMemoryService
 from tools.git_tools import (
@@ -110,15 +110,60 @@ class TestGitMemoryService:
 
         service = GitMemoryService()
         monkeypatch.setattr("tools.git_tools.get_git_memory_service", lambda: service)
+        session = reset_session_state()
 
         opened = open_evolution_transaction_tool("touch core loop")
         assert "txn_id" in opened
         import json
         txn_id = json.loads(opened)["txn_id"]
+        assert session.get_active_evolution_txn() == txn_id
 
         closed = close_evolution_transaction_tool(txn_id=txn_id, status="failed", summary="test failed")
         payload = json.loads(closed)
         assert payload["transaction_status"] == "failed"
+        assert session.get_active_evolution_txn() is None
+
+    def test_validation_event_does_not_auto_close_active_evolution_transaction(self, tmp_path, monkeypatch):
+        repo = _init_git_repo(tmp_path)
+        db_path = tmp_path / "brain.db"
+        fake_workspace = FakeWorkspace(repo, db_path)
+
+        class FakeBus:
+            def __init__(self):
+                self.handlers = {}
+
+            def publish(self, name, data=None, source=None):
+                for handler in self.handlers.get(name, []):
+                    handler(type("Evt", (), {"data": data or {}, "source": source})())
+
+            def subscribe(self, name, handler, priority=0):
+                self.handlers.setdefault(name, []).append(handler)
+                return True
+
+        fake_bus = FakeBus()
+        monkeypatch.setattr("core.infrastructure.git_memory.get_workspace", lambda: fake_workspace)
+        monkeypatch.setattr("core.infrastructure.git_memory.get_event_bus", lambda: fake_bus)
+
+        service = GitMemoryService()
+        session = reset_session_state()
+        txn_id = service.open_evolution_transaction("explicit close required")
+        session.set_active_evolution_txn(txn_id)
+
+        fake_bus.publish(
+            EventNames.VALIDATION_COMPLETED,
+            {"kind": "lint", "passed": True, "message": "ruff lint passed"},
+            source="test",
+        )
+
+        assert session.get_active_evolution_txn() == txn_id
+        with fake_workspace.get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT status, closed_at FROM EvolutionTransaction WHERE txn_id = ?", (txn_id,))
+            row = cursor.fetchone()
+
+        assert row is not None
+        assert row["status"] == "open"
+        assert row["closed_at"] is None
 
     def test_validation_event_syncs_attention_cache(self, tmp_path, monkeypatch):
         repo = _init_git_repo(tmp_path)

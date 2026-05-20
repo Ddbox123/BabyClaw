@@ -122,18 +122,6 @@ class GitMemoryService:
     def _on_validation_completed(self, event: Any) -> None:
         """验证完成后同步 attention cache，写入最近验证摘要。"""
         try:
-            session = get_session_state()
-            txn_id = session.get_active_evolution_txn()
-            if txn_id:
-                data = getattr(event, "data", {}) or {}
-                passed = bool(data.get("passed"))
-                summary = data.get("message") or data.get("kind") or "validation completed"
-                self.close_evolution_transaction(
-                    txn_id=txn_id,
-                    status="success" if passed else "failed",
-                    summary=f"validation: {summary}",
-                )
-                session.set_active_evolution_txn(None)
             self._sync_attention_cache()
         except Exception:
             pass

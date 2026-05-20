@@ -12,7 +12,10 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from core.infrastructure.workspace_manager import get_workspace
 
-from .supervised_evolution import DEFAULT_BUNDLE_NAME, resolve_supervised_bundle_path
+from .supervised_evolution import (
+    DEFAULT_BUNDLE_NAME,
+    resolve_supervised_bundle_path,
+)
 
 
 DATASET_REGISTRY_PATH = Path("workspace/evaluation/datasets/registry.json")
@@ -453,6 +456,13 @@ def materialize_dataset_bundle(
         payload = json.loads(source_bundle.read_text(encoding="utf-8"))
         cases = list(payload.get("cases") or [])
         if limit is not None:
+            bundle_path = (
+                root
+                / "workspace"
+                / "evaluation"
+                / "bundles"
+                / f"{spec.bundle_name}_limit_{max(1, int(limit))}.json"
+            )
             payload["cases"] = cases[:limit]
         if source_bundle != bundle_path or limit is not None:
             bundle_path.parent.mkdir(parents=True, exist_ok=True)

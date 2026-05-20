@@ -27,13 +27,48 @@ def _workspace_bundle_path(root: Path, bundle_name: str) -> Path:
     return root / "workspace" / "evaluation" / "bundles" / f"{bundle_name}.json"
 
 
+def _template_bundle_path(bundle_name: str) -> Path:
+    return DEFAULT_BUNDLE_TEMPLATE_DIR / f"{bundle_name}.json"
+
+
+def _should_refresh_default_bundle_from_template(bundle_path: Path, template_path: Path) -> bool:
+    """Repair only limit-polluted built-in dry-run bundles, not custom test bundles."""
+    if not bundle_path.exists():
+        return True
+    try:
+        existing = json.loads(bundle_path.read_text(encoding="utf-8"))
+        template = json.loads(template_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(existing, dict) or not isinstance(template, dict):
+        return False
+    if existing.get("bundle_name") != template.get("bundle_name"):
+        return False
+    if existing.get("benchmark") != template.get("benchmark"):
+        return False
+    existing_case_ids = {
+        str(item.get("case_id") or "").strip()
+        for item in (existing.get("cases") or [])
+        if isinstance(item, dict) and str(item.get("case_id") or "").strip()
+    }
+    template_case_ids = {
+        str(item.get("case_id") or "").strip()
+        for item in (template.get("cases") or [])
+        if isinstance(item, dict) and str(item.get("case_id") or "").strip()
+    }
+    return existing_case_ids < template_case_ids
+
+
 def _ensure_default_bundle_available(root: Path, bundle_name: str) -> Path:
     bundle_path = _workspace_bundle_path(root, bundle_name)
-    if bundle_path.exists() or bundle_name != DEFAULT_BUNDLE_NAME:
+    if bundle_name != DEFAULT_BUNDLE_NAME:
         return bundle_path
 
-    template_path = DEFAULT_BUNDLE_TEMPLATE_DIR / f"{bundle_name}.json"
-    if template_path.exists():
+    template_path = _template_bundle_path(bundle_name)
+    if not template_path.exists():
+        return bundle_path
+
+    if _should_refresh_default_bundle_from_template(bundle_path, template_path):
         bundle_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(template_path, bundle_path)
     return bundle_path
