@@ -161,18 +161,54 @@ def _default_registry_payload() -> Dict[str, Any]:
     }
 
 
+def _merge_registry_payload(existing: Dict[str, Any]) -> Dict[str, Any]:
+    defaults = list(_default_registry_payload().get("datasets") or [])
+    merged = list(existing.get("datasets") or [])
+    existing_names = {
+        str(item.get("name") or "").strip()
+        for item in merged
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    }
+    for default_item in defaults:
+        name = str(default_item.get("name") or "").strip()
+        if name and name not in existing_names:
+            merged.append(default_item)
+    return {
+        "version": int(existing.get("version") or 1),
+        "datasets": merged,
+    }
+
+
+def _bootstrap_builtin_dataset_sources(project_root: Path, specs: List[DatasetSpec]) -> None:
+    bootstrap_names = {"generated_cases", "chat_reviewed_multiturn"}
+    for spec in specs:
+        if spec.name not in bootstrap_names or not spec.source_path:
+            continue
+        source = resolve_source_path(spec, project_root)
+        if source is None or source.exists():
+            continue
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("", encoding="utf-8")
+
+
 def ensure_dataset_registry(project_root: Optional[Path] = None) -> Path:
-    path = _registry_path(project_root)
-    if path.exists():
-        return path
+    root = (project_root or get_workspace().project_root).resolve()
+    path = _registry_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_default_registry_payload(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if path.exists():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        payload = _merge_registry_payload(existing if isinstance(existing, dict) else {})
+        rendered = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        if path.read_text(encoding="utf-8") != rendered:
+            path.write_text(rendered, encoding="utf-8")
+    else:
+        path.write_text(json.dumps(_default_registry_payload(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    _bootstrap_builtin_dataset_sources(root, _dataset_specs_from_payload(payload))
     return path
 
 
-def load_dataset_specs(project_root: Optional[Path] = None) -> List[DatasetSpec]:
-    path = ensure_dataset_registry(project_root)
-    payload = json.loads(path.read_text(encoding="utf-8"))
+def _dataset_specs_from_payload(payload: Dict[str, Any]) -> List[DatasetSpec]:
     specs = []
     for item in payload.get("datasets") or []:
         specs.append(
@@ -191,6 +227,12 @@ def load_dataset_specs(project_root: Optional[Path] = None) -> List[DatasetSpec]
             )
         )
     return [item for item in specs if item.name and item.kind and item.bundle_name]
+
+
+def load_dataset_specs(project_root: Optional[Path] = None) -> List[DatasetSpec]:
+    path = ensure_dataset_registry(project_root)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return _dataset_specs_from_payload(payload)
 
 
 def get_dataset_spec(dataset_name: str, *, project_root: Optional[Path] = None) -> DatasetSpec:

@@ -26,6 +26,44 @@ def test_default_dataset_registry_lists_builtin_and_swe(tmp_path: Path):
     assert by_name["swe_bench_lite"]["adapter_status"] == "requires_swe_harness"
 
 
+def test_ensure_dataset_registry_backfills_missing_builtin_datasets(tmp_path: Path):
+    legacy_path = tmp_path / "workspace" / "evaluation" / "datasets" / "registry.json"
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "datasets": [
+                    {
+                        "name": "custom_prompt_jsonl",
+                        "kind": "prompt_jsonl",
+                        "bundle_name": "custom_prompt_jsonl_v1",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    ensure_dataset_registry(tmp_path)
+    payload = json.loads(legacy_path.read_text(encoding="utf-8"))
+    names = {item["name"] for item in payload["datasets"]}
+
+    assert "generated_cases" in names
+    assert "chat_reviewed_multiturn" in names
+    assert "custom_prompt_jsonl" in names
+
+
+def test_ensure_dataset_registry_bootstraps_generated_and_chat_sources(tmp_path: Path):
+    ensure_dataset_registry(tmp_path)
+
+    assert (tmp_path / "workspace" / "evaluation" / "datasets" / "generated_cases.jsonl").exists()
+    assert (tmp_path / "workspace" / "evaluation" / "datasets" / "chat_reviewed_multiturn.jsonl").exists()
+
+
 def test_materialize_builtin_supervised_bundle(tmp_path: Path):
     result = materialize_dataset_bundle("supervised_dry_run", project_root=tmp_path)
 
