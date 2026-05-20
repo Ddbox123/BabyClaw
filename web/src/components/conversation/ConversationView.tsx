@@ -4,6 +4,13 @@ import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { ConversationMessage, MentalStateSnapshot } from "../../api/types";
 import { useAppI18n } from "../../i18n/useAppI18n";
 import { shouldSubmitComposerOnKeydown } from "./composerShortcuts";
+import {
+  hasMentalBlock,
+  hasResponseBlock,
+  hasThoughtBlock,
+  hasToolBlock,
+  hasUserContent,
+} from "./messageSections";
 import styles from "./ConversationView.module.css";
 
 type ConversationViewProps = {
@@ -222,35 +229,6 @@ export function ConversationView({
     return key ? t(key) : snapshot?.cognitiveState ?? "";
   }
 
-  function hasMentalSnapshot(snapshot: MentalStateSnapshot | undefined) {
-    if (!snapshot) {
-      return false;
-    }
-    return [
-      snapshot.mood,
-      snapshot.feeling,
-      snapshot.whisper,
-      snapshot.cognitiveState,
-    ].some((value) => String(value ?? "").trim().length > 0);
-  }
-
-  function hasThoughtBlock(message: ConversationMessage) {
-    return message.role === "assistant"
-      && Boolean(message.thought?.trim());
-  }
-
-  function hasMentalBlock(message: ConversationMessage) {
-    return message.role === "assistant" && hasMentalSnapshot(message.mentalSnapshot);
-  }
-
-  function hasToolBlock(message: ConversationMessage) {
-    return message.role === "assistant" && (message.toolCalls?.length ?? 0) > 0;
-  }
-
-  function hasResponseBlock(message: ConversationMessage) {
-    return message.role === "assistant" && Boolean(message.content.trim());
-  }
-
   function getExpansionState(messageId: string, section: string, defaultExpanded: boolean) {
     if (section === "response") {
       return sectionExpansion[messageId]?.[section] ?? true;
@@ -357,6 +335,10 @@ export function ConversationView({
                 <span>{message.role === "assistant" ? t("agent") : t("operator")}</span>
                 {message.timestamp ? <span>{formatTimestamp(message.timestamp)}</span> : null}
               </div>
+              {hasUserContent(message) ? (
+                <p className={styles.messageBody}>{message.content}</p>
+              ) : null}
+
               {hasThoughtBlock(message) ? (
                 <section className={styles.sectionBlock}>
                   <button
