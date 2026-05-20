@@ -215,7 +215,7 @@ class TestGitMemoryService:
         assert attention["modified_entities"] == []
         assert attention["last_validation_summary"] == "All tests passed"
 
-    def test_risky_file_modification_opens_txn_and_validation_closes_it(self, tmp_path, monkeypatch):
+    def test_note_file_modified_tracks_risky_path_without_opening_txn(self, tmp_path, monkeypatch):
         repo = _init_git_repo(tmp_path)
         db_path = tmp_path / "brain.db"
         fake_workspace = FakeWorkspace(repo, db_path)
@@ -240,9 +240,8 @@ class TestGitMemoryService:
         session = get_session_state()
 
         service.note_file_modified("core/example.py")
-        txn_id = session.get_active_evolution_txn()
 
-        assert txn_id is not None
+        assert session.get_active_evolution_txn() is None
 
         fake_bus.publish(
             EventNames.VALIDATION_COMPLETED,
@@ -254,9 +253,8 @@ class TestGitMemoryService:
 
         with fake_workspace.get_db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT status, summary FROM EvolutionTransaction WHERE txn_id = ?", (txn_id,))
+            cursor.execute("SELECT COUNT(*) AS count FROM EvolutionTransaction")
             row = cursor.fetchone()
 
         assert row is not None
-        assert row["status"] == "success"
-        assert "All tests passed" in row["summary"]
+        assert row["count"] == 0

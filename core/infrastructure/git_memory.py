@@ -604,9 +604,6 @@ class GitMemoryService:
         entities = [entity["entity_ref"] for entity in self._entity_refs_for_path(filepath)]
         if entities:
             session.record_modified_entities(filepath, entities)
-        if _is_risky_evolution_path(filepath) and not session.get_active_evolution_txn():
-            txn_id = self.open_evolution_transaction(summary=f"risky_modify: {filepath}")
-            session.set_active_evolution_txn(txn_id)
         self._sync_attention_cache()
 
     def _sync_attention_cache(self, snapshot: Optional[WorkingTreeSnapshot] = None) -> None:
