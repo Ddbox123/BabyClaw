@@ -19,10 +19,14 @@ preset = "moose"
 [llm.profiles]
 
 [llm.profiles.primary]
-model = "deepseek-v4-pro"
+model = "deepseek-v4-flash"
 api_key_env = "VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY"
+transport = "chat_completions"
+contract = "reasoning_chat"
+reasoning_state_field = "reasoning_content"
+strict_compatibility = false
 temperature = 0.7
-max_output_tokens = 8192
+max_output_tokens = 384000
 timeout = 120
 connect_timeout = 20
 streaming = true
@@ -35,7 +39,7 @@ api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com"
 compat_mode = "openai"
 requires_api_key = true
-context_window = 131072
+context_window = 1000000
 
 [llm.profiles.mental_model]
 model = "deepseek-v4-flash"
