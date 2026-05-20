@@ -734,6 +734,7 @@ def create_key_tools() -> List[BaseTool]:
         constraints: str = "",
         deliverables: str = "",
         context_pack: str = "",
+        _cancel_checker=None,
     ) -> str:
         """
         【子 Agent 委托】启动子 Agent 执行指定任务并返回结果。
@@ -765,6 +766,7 @@ def create_key_tools() -> List[BaseTool]:
             constraints=constraints,
             deliverables=deliverables,
             context_pack=context_pack,
+            _cancel_checker=_cancel_checker,
         )
 
     # ── 学习卸载工具 (P2) ──────────────────────────────────────────────────

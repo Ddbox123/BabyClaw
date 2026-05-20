@@ -222,6 +222,13 @@ def request_stop_session_turn(session_id: str) -> dict:
             en="The operator requested this turn to stop.",
         )
     )
+    with _CHAT_STATE_LOCK:
+        payload = load_chat_state(PROJECT_ROOT)
+        conversation = _find_conversation_entry(payload, conversation_id)
+        if conversation is not None:
+            conversation["last_turn_status"] = "stopping"
+            payload["updated_at"] = _now_timestamp()
+            save_chat_state(PROJECT_ROOT, payload)
     _publish_session_detail_snapshot(conversation_id)
     return get_session_detail(conversation_id) or detail
 
@@ -320,6 +327,7 @@ def submit_session_message(session_id: str, content: str) -> dict:
 
 def _load_conversations() -> tuple[str, list[dict[str, Any]]]:
     payload = load_chat_state(PROJECT_ROOT)
+    payload = _repair_stale_running_conversations(payload)
     active_id = str(payload.get("active_conversation_id") or DEFAULT_CHAT_CONVERSATION_ID).strip()
     conversations: list[dict[str, Any]] = []
     for raw in list(payload.get("conversations") or []):
@@ -327,6 +335,45 @@ def _load_conversations() -> tuple[str, list[dict[str, Any]]]:
         if conversation is not None:
             conversations.append(conversation)
     return active_id or DEFAULT_CHAT_CONVERSATION_ID, conversations
+
+
+def _repair_stale_running_conversations(payload: dict[str, Any]) -> dict[str, Any]:
+    """Clear persisted running state when no in-memory worker owns it."""
+
+    conversations = payload.get("conversations")
+    if not isinstance(conversations, list):
+        return payload
+
+    changed = False
+    now = ""
+    for conversation in conversations:
+        if not isinstance(conversation, dict):
+            continue
+        conversation_id = str(conversation.get("conversation_id") or "").strip()
+        persisted_status = str(conversation.get("last_turn_status") or "").strip().lower()
+        if persisted_status not in {"running", "stopping"}:
+            continue
+        if conversation_id and _is_session_running(conversation_id):
+            continue
+        if not now:
+            now = _now_timestamp()
+        messages = normalize_chat_messages(conversation.get("messages") or [])
+        stop_message = _make_chat_message(
+            "assistant",
+            text_for(
+                get_web_language(),
+                zh="上一轮运行已被中断，当前会话已恢复为可继续状态。",
+                en="The previous turn was interrupted. This session is ready to continue.",
+            ),
+        )
+        conversation["messages"] = messages + [stop_message]
+        conversation["last_turn_status"] = "ready"
+        conversation["updated_at"] = stop_message["timestamp"]
+        changed = True
+    if changed:
+        payload["updated_at"] = now or _now_timestamp()
+        save_chat_state(PROJECT_ROOT, payload)
+    return payload
 
 
 def _normalize_conversation(raw: Any) -> dict[str, Any] | None:
@@ -406,9 +453,13 @@ def _sanitize_message_content(role: str, content: Any) -> str:
     text = re.sub(r"<state[^>]*>.*?</state>", "", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"<state[^>]*>.*$", "", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"<state(?:\s[^>\n]*)?$", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"</?invoke[^>]*>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"</?[^>\n]*DSML[^>]*>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>\n]*DSML[^>\n]*$", "", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"</?(?:think|thinking)[^>]*>", "", text, flags=re.IGNORECASE)
     text = re.sub(r"</?[\w:-]*tool_call[^>]*>", "", text, flags=re.IGNORECASE)
     text = re.sub(r"<[\w:-]*tool_call(?:\s[^>\n]*)?$", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<\s*$", "", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
@@ -1072,8 +1123,12 @@ def _sanitize_thought_text(text: Any) -> str:
     cleaned = re.sub(r"<state[^>]*>.*?</state>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
     cleaned = re.sub(r"<state[^>]*>.*$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
     cleaned = re.sub(r"<state(?:\s[^>\n]*)?$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"</?invoke[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"</?[^>\n]*DSML[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<[^>\n]*DSML[^>\n]*$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
     cleaned = re.sub(r"</?[\w:-]*tool_call[^>]*>", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"<[\w:-]*tool_call(?:\s[^>\n]*)?$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"<\s*$", "", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 

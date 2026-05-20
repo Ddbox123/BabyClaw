@@ -1311,6 +1311,65 @@ class TestToolMessageFlow:
         assert "step1" in payload["process_output"]
         assert "timeout stderr" in payload["raw_output"]
 
+    def test_spawn_agent_cancel_kills_process_and_returns_cancelled(self, monkeypatch):
+        class SlowPipe:
+            def readline(self):
+                import time
+
+                time.sleep(2.0)
+                return ""
+
+            def close(self):
+                return None
+
+        class CancellablePopen:
+            killed = False
+            kwargs = {}
+
+            def __init__(self, *_args, **_kwargs):
+                CancellablePopen.kwargs = dict(_kwargs)
+                self.stdout = SlowPipe()
+                self.stderr = SlowPipe()
+                self.returncode = None
+                self.pid = 43210
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                self.returncode = -9
+                return self.returncode
+
+            def kill(self):
+                CancellablePopen.killed = True
+                self.returncode = -9
+
+        taskkill_calls = []
+
+        def fake_run(args, **kwargs):
+            taskkill_calls.append((list(args), dict(kwargs)))
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr("tools.agent_tools.subprocess.Popen", CancellablePopen)
+        monkeypatch.setattr("tools.agent_tools.os.name", "nt")
+        monkeypatch.setattr("tools.agent_tools.subprocess.run", fake_run)
+
+        result = spawn_agent_impl(
+            task_type="diagnose",
+            goal="分析为什么停不下来",
+            scope='{"log":"log_info/demo.jsonl"}',
+            timeout=30,
+            _cancel_checker=lambda: "操作者请求停止当前轮。",
+        )
+
+        payload = __import__("json").loads(result)
+        assert payload["status"] == "cancelled"
+        assert payload["stop_reason"] == "操作者请求停止当前轮。"
+        assert CancellablePopen.killed is False
+        assert CancellablePopen.kwargs["creationflags"] == __import__("subprocess").CREATE_NEW_PROCESS_GROUP
+        assert taskkill_calls
+        assert taskkill_calls[0][0] == ["taskkill", "/PID", "43210", "/T", "/F"]
+
     def test_spawn_agent_streams_live_stdout_before_final_marker(self, monkeypatch):
         class FakePipe:
             def __init__(self, lines):
@@ -1547,6 +1606,99 @@ class TestToolMessageFlow:
         finish_kwargs = captured["finish"][0][1]
         assert finish_kwargs["summary"] == "已定位根因"
         assert "attention snapshot" in finish_kwargs["thought"]
+
+    def test_maybe_delegate_passes_turn_stop_checker_to_spawn_tool(self):
+        captured = {}
+
+        class DummyUI:
+            def add_log(self, *_args, **_kwargs):
+                return None
+
+            def add_content(self, *_args, **_kwargs):
+                return None
+
+            def add_delegation_evidence(self, *_args, **_kwargs):
+                return None
+
+            def start_subagent_activity(self, *_args, **_kwargs):
+                return None
+
+            def finish_subagent_activity(self, *_args, **_kwargs):
+                return None
+
+            def add_subagent_process(self, *_args, **_kwargs):
+                return None
+
+            def stream_subagent_thought(self, *_args, **_kwargs):
+                return None
+
+        class DummySession:
+            def get_attention_snapshot(self):
+                return {
+                    "recent_blockers": [
+                        {"kind": "duplicate_read", "summary": "core/infrastructure/tool_executor.py 第 1-80 行本轮已读过。"}
+                    ],
+                    "modified_paths": [],
+                    "delegation_history": [],
+                    "delegation_failures": [],
+                    "last_validation_summary": "",
+                    "last_validation_passed": False,
+                    "diagnostic_drift": True,
+                }
+
+            def has_recent_delegation(self, *_args, **_kwargs):
+                return False
+
+            def record_delegation_start(self, *_args, **_kwargs):
+                return None
+
+            def record_delegation_result(self, *_args, **_kwargs):
+                return None
+
+            def record_delegation_failure(self, *_args, **_kwargs):
+                return None
+
+            def note_scope_completion(self, *_args, **_kwargs):
+                return None
+
+            def _normalize_scope_signature(self, scope):
+                return str(scope)
+
+        def fake_spawn_execute(_tool_name, tool_args):
+            captured.update(tool_args)
+            checker = tool_args.get("_cancel_checker")
+            assert callable(checker)
+            assert checker() == "操作者请求停止当前轮。"
+            return (
+                json.dumps(
+                    {
+                        "status": "cancelled",
+                        "summary": "子 Agent 已随停止请求终止。",
+                        "stop_reason": checker(),
+                    },
+                    ensure_ascii=False,
+                ),
+                None,
+            )
+
+        governor = DelegationGovernor(
+            spawn_execute=fake_spawn_execute,
+            sync_runtime_state_memory=lambda: None,
+            ui_getter=lambda: DummyUI(),
+            session_getter=lambda: DummySession(),
+            turn_stop_checker=lambda: "操作者请求停止当前轮。",
+        )
+
+        outcome = governor.maybe_delegate(
+            goal="继续完成同一个用户目标：继续吧",
+            iteration=2,
+            total_tool_calls=4,
+            messages=[],
+        )
+
+        assert captured["_cancel_checker"]() == "操作者请求停止当前轮。"
+        assert outcome["delegated"] is True
+        assert outcome["useful"] is False
 
     def test_apply_delegation_result_surfaces_timeout_instead_of_parse_failure(self, monkeypatch):
         captured = {"finish": []}
@@ -2929,6 +3081,9 @@ class TestRuntimeStateMemoryFlow:
             def note_diagnostic_observation(self, text):
                 events["observation"] = text
 
+            def note_scope_completion(self, reason=""):
+                events["scope_completion"] = reason
+
         governor = DelegationGovernor(
             spawn_execute=lambda *_args, **_kwargs: ("{}", None),
             sync_runtime_state_memory=lambda: None,
@@ -2966,6 +3121,8 @@ class TestRuntimeStateMemoryFlow:
         assert isinstance(messages[-1], SystemMessage)
         assert "委派证据" in messages[-1].content
         assert events["finished"]
+        assert "observation" not in events
+        assert events["scope_completion"]
 
     def test_apply_delegation_result_marks_fast_path_ui_hint(self):
         events = {"finished": []}
@@ -2988,6 +3145,9 @@ class TestRuntimeStateMemoryFlow:
                 return None
 
             def note_diagnostic_observation(self, _text):
+                return None
+
+            def note_scope_completion(self, _reason=""):
                 return None
 
         governor = DelegationGovernor(
@@ -3020,6 +3180,60 @@ class TestRuntimeStateMemoryFlow:
 
         assert events["finished"]
         assert events["finished"][0]["mode_hint"] == "快速日志诊断，未启动真实子 agent"
+
+    def test_build_delegation_request_blocks_completed_same_goal_even_when_scope_changes(self, monkeypatch):
+        agent = SelfEvolvingAgent.__new__(SelfEvolvingAgent)
+        goal = "分析当前轮为什么出现：core/infrastructure/tool_executor.py 第 561-640 行本轮已读过。"
+
+        class DummySession:
+            def get_attention_snapshot(self):
+                return {
+                    "recent_blockers": [
+                        {"kind": "duplicate_read", "summary": "core/infrastructure/tool_executor.py 第 561-640 行本轮已读过。"},
+                        {"kind": "observation", "summary": "子 agent 已返回: 已定位重复读取来自续读链断裂。"},
+                    ],
+                    "modified_paths": [],
+                    "delegation_history": [
+                        {
+                            "task_type": "diagnose",
+                            "goal": goal,
+                            "scope_signature": "recent_blockers=['duplicate_read']",
+                            "status": "completed",
+                            "summary": "已定位重复读取来自续读链断裂。",
+                            "confidence": "high",
+                        }
+                    ],
+                    "delegation_findings": [
+                        {
+                            "task_type": "diagnose",
+                            "goal": goal,
+                            "status": "completed",
+                            "summary": "已定位重复读取来自续读链断裂。",
+                            "confidence": "high",
+                        }
+                    ],
+                    "delegation_failures": [],
+                    "delegation_evidence_digest": "已定位重复读取来自续读链断裂。",
+                    "last_validation_summary": "",
+                    "last_validation_passed": False,
+                    "diagnostic_drift": True,
+                }
+
+            def has_recent_delegation(self, task_type, delegation_goal, scope):
+                return delegation_goal == goal
+
+            def _normalize_scope_signature(self, scope):
+                return str(scope)
+
+        monkeypatch.setattr(agent_module, "get_session_state", lambda: DummySession())
+
+        payload = agent._build_delegation_request(
+            goal="继续完成同一个用户目标：继续吧\n上一内部回合仍未完成用户目标（第 1 轮）。",
+            iteration=3,
+            total_tool_calls=8,
+        )
+
+        assert payload is None
 
     def test_apply_delegation_result_rejects_think_only_summary(self):
         events = {"logs": [], "finished": []}

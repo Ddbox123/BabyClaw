@@ -187,6 +187,32 @@ def test_delegation_state_is_rendered_and_deduplicated():
     assert snapshot["delegation_evidence_digest"]
 
 
+def test_completed_delegation_goal_blocks_scope_changed_retry():
+    session = reset_session_state()
+    goal = "分析当前轮为什么出现：core/infrastructure/tool_executor.py 第 561-640 行本轮已读过。"
+
+    session.record_delegation_start(
+        "diagnose",
+        goal,
+        {"recent_blockers": ["重复读取 A"]},
+    )
+    session.record_delegation_result(
+        "diagnose",
+        goal,
+        {"recent_blockers": ["重复读取 A"]},
+        "已定位重复读取来自续读链断裂，主 agent 应收束。",
+        findings=["offset=525 后未续读 offset=565"],
+        confidence="high",
+        recommended_next_action="主 agent 直接收束",
+    )
+
+    assert session.has_recent_delegation(
+        "diagnose",
+        goal,
+        {"recent_blockers": ["重复读取 A", "子 agent 已返回: 已定位重复读取"]},
+    ) is True
+
+
 def test_feedback_loop_and_scope_freeze_exposed_in_snapshot():
     session = reset_session_state()
     session.note_feedback_loop(loop_type="lint", target="agent.py", result="ruff lint 通过")

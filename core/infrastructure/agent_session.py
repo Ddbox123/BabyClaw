@@ -613,6 +613,12 @@ class AgentSessionState:
                 if (
                     item.get("task_type") == task_type
                     and item.get("goal") == goal_key
+                    and item.get("status") == "completed"
+                ):
+                    return True
+                if (
+                    item.get("task_type") == task_type
+                    and item.get("goal") == goal_key
                     and item.get("scope_signature") == scope_key
                     and item.get("status") == "completed"
                 ):
@@ -668,6 +674,11 @@ class AgentSessionState:
             if len(self.delegation_findings) > 8:
                 self.delegation_findings = self.delegation_findings[-8:]
             self.delegation_evidence_digest = digest[:600]
+            self.diagnostic_observation_count += 1
+            if self.diagnostic_phase in {"reproduce", "idle"}:
+                self.diagnostic_phase = "observe"
+            if self.convergence_state in {"open", "narrowing"}:
+                self.convergence_state = "narrowing"
 
     def record_delegation_failure(self, task_type: str, goal: str, scope: Any, reason: str):
         scope_key = self._normalize_scope_signature(scope)

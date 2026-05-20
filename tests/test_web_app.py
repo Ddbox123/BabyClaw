@@ -1038,6 +1038,52 @@ def test_session_detail_hides_partial_state_live_answer(tmp_path, monkeypatch):
     ]
 
 
+def test_session_detail_hides_dsml_and_lone_angle_live_answer(tmp_path, monkeypatch):
+    _seed_chat_state(tmp_path, task_status="reading")
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+
+    session_service._set_session_running("session-live", True)
+    session_service._set_session_live_output(
+        "session-live",
+        content="<state>\n{}\n</｜｜DSML｜｜parameter>\n</invoke>\n</｜｜DSML｜｜tool_calls>\n<",
+        thought="</invoke>\n<",
+        tool_calls=[{"name": "spawn_agent_tool", "status": "running"}],
+    )
+    try:
+        response = client.get("/api/sessions/session-live")
+    finally:
+        session_service._clear_session_live_output("session-live")
+        session_service._set_session_running("session-live", False)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["messages"][-1]["streaming"] is True
+    assert payload["messages"][-1]["content"] == ""
+    assert "thought" not in payload["messages"][-1]
+    assert payload["messages"][-1]["toolCalls"] == [
+        {"name": "spawn_agent_tool", "status": "running"}
+    ]
+
+
+def test_session_detail_recovers_stale_running_state(tmp_path, monkeypatch):
+    _seed_chat_state(tmp_path, task_status="reading")
+    state = load_chat_state(tmp_path)
+    state["conversations"][0]["last_turn_status"] = "running"
+    save_chat_state(tmp_path, state)
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+    session_service._set_session_running("session-live", False)
+
+    response = client.get("/api/sessions/session-live")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["currentPhase"] == "ready"
+    assert payload["messages"][-1]["role"] == "assistant"
+    assert "已被中断" in payload["messages"][-1]["content"]
+    persisted = load_chat_state(tmp_path)
+    assert persisted["conversations"][0]["last_turn_status"] == "ready"
+
+
 def test_submit_session_message_allows_follow_up_when_previous_turn_finished(tmp_path, monkeypatch):
     _seed_chat_state(tmp_path, task_status="reading")
     monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)

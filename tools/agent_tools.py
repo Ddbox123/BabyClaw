@@ -12,6 +12,7 @@ import json
 import os
 import queue
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -39,6 +40,43 @@ def _emit_stream_event(stream: str, text: str) -> None:
         callback({"stream": stream, "text": text})
     except Exception:
         return
+
+
+def _subagent_process_group_kwargs() -> Dict[str, Any]:
+    """Start subagents in a killable process group where the platform supports it."""
+
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    return {"start_new_session": True}
+
+
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    """Best-effort termination for the subagent and anything it spawned."""
+
+    pid = getattr(process, "pid", None)
+    if os.name == "nt" and pid:
+        try:
+            result = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if getattr(result, "returncode", 1) == 0:
+                return
+        except Exception:
+            pass
+    elif pid:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            return
+        except Exception:
+            pass
+
+    try:
+        process.kill()
+    except Exception:
+        pass
 
 
 def _get_recursion_depth() -> int:
@@ -424,6 +462,7 @@ def spawn_agent(
     constraints: Any = None,
     deliverables: Any = None,
     context_pack: Any = None,
+    _cancel_checker: Optional[Callable[[], str]] = None,
 ) -> str:
     """启动子 Agent 执行指定任务并返回结构化结果。"""
     normalized_constraints = _normalize_constraints(constraints)
@@ -528,6 +567,7 @@ def spawn_agent(
             bufsize=1,
             cwd=str(agent_path.parent),
             env=env,
+            **_subagent_process_group_kwargs(),
         )
     except Exception as e:
         return json.dumps(
@@ -567,12 +607,21 @@ def spawn_agent(
     finished_streams = set()
     deadline = time.monotonic() + max(int(timeout), 1)
     timed_out = False
+    cancelled_reason = ""
 
     while len(finished_streams) < 2:
+        if callable(_cancel_checker):
+            try:
+                cancelled_reason = str(_cancel_checker() or "").strip()
+            except Exception:
+                cancelled_reason = ""
+            if cancelled_reason:
+                _terminate_process_tree(process)
+                break
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             timed_out = True
-            process.kill()
+            _terminate_process_tree(process)
             break
         try:
             stream_name, chunk = output_queue.get(timeout=min(0.2, max(remaining, 0.01)))
@@ -603,6 +652,32 @@ def spawn_agent(
             stderr_parts.append(chunk)
             _emit_stream_event("stderr", chunk.rstrip("\r\n"))
 
+    if cancelled_reason:
+        stdout = "".join(stdout_parts).strip()
+        stderr = "".join(stderr_parts).strip()
+        process_output = "".join(stdout_console_parts).strip()
+        raw_output = process_output
+        if stderr:
+            raw_output = (raw_output + f"\n\n[stderr]\n{stderr}").strip()
+        try:
+            process.wait(timeout=5)
+        except Exception:
+            _terminate_process_tree(process)
+        return json.dumps(
+            {
+                "status": "cancelled",
+                "task_type": task_type or "inspect",
+                "goal": goal or task[:100],
+                "summary": "子 Agent 已随停止请求终止。",
+                "message": "子 Agent 已随停止请求终止。",
+                "stop_reason": cancelled_reason,
+                "scope_touched": normalized_scope,
+                "raw_output": raw_output[:8000],
+                "process_output": process_output[:8000],
+            },
+            ensure_ascii=False,
+        )
+
     if timed_out:
         stdout = "".join(stdout_parts).strip()
         stderr = "".join(stderr_parts).strip()
@@ -627,7 +702,7 @@ def spawn_agent(
     try:
         returncode = process.wait(timeout=5)
     except Exception:
-        process.kill()
+        _terminate_process_tree(process)
         returncode = process.wait(timeout=5)
 
     payload = _extract_structured_result(

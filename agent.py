@@ -491,6 +491,7 @@ class SelfEvolvingAgent:
             sync_runtime_state_memory=self._sync_runtime_state_memory,
             ui_getter=get_ui,
             session_getter=get_session_state,
+            turn_stop_checker=self._current_turn_stop_reason,
         )
         self.delegation_governor = governor
         return governor

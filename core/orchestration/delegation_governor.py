@@ -31,6 +31,7 @@ SpawnExecuteFn = Callable[[str, dict], Tuple[Any, Optional[str]]]
 SyncStateMemoryFn = Callable[[], None]
 UIGetterFn = Callable[[], Any]
 SessionGetterFn = Callable[[], Any]
+TurnStopCheckerFn = Callable[[], str]
 
 
 class DelegationGovernor:
@@ -45,11 +46,13 @@ class DelegationGovernor:
         sync_runtime_state_memory: SyncStateMemoryFn,
         ui_getter: UIGetterFn = get_ui,
         session_getter: SessionGetterFn = get_session_state,
+        turn_stop_checker: Optional[TurnStopCheckerFn] = None,
     ) -> None:
         self._spawn_execute = spawn_execute
         self._sync_runtime_state_memory = sync_runtime_state_memory
         self._ui_getter = ui_getter
         self._session_getter = session_getter
+        self._turn_stop_checker = turn_stop_checker
 
     @staticmethod
     def contains_any(text: str, keywords: List[str]) -> bool:
@@ -790,7 +793,11 @@ class DelegationGovernor:
                 confidence=confidence,
                 recommended_next_action=recommended_next,
             )
-            session.note_diagnostic_observation(f"子 agent 已返回: {summary_effective}")
+            if should_stop_round:
+                session.note_scope_completion(
+                    recommended_next
+                    or "子 agent 已返回足够证据，主 agent 应直接收束。"
+                )
             ui.add_log(f"委派完成: {summary_effective}", "INFO")
             ui.add_content(f"[bold cyan]子 agent 证据[/bold cyan] {summary_effective}")
             ui.add_delegation_evidence(summary_effective, next_action=recommended_next, confidence=confidence)
@@ -931,18 +938,21 @@ class DelegationGovernor:
 
         set_subagent_stream_sink(_handle_subagent_stream)
         try:
+            tool_args = {
+                "task_type": payload.get("task_type", "inspect"),
+                "goal": payload.get("goal", ""),
+                "scope": json.dumps(payload.get("scope"), ensure_ascii=False),
+                "constraints": json.dumps(payload.get("constraints"), ensure_ascii=False),
+                "deliverables": json.dumps(payload.get("deliverables"), ensure_ascii=False),
+                "context_pack": payload.get("context_pack", ""),
+                "timeout": payload.get("timeout", 120),
+                "_internal_delegate": True,
+            }
+            if callable(self._turn_stop_checker):
+                tool_args["_cancel_checker"] = self._turn_stop_checker
             result, _ = self._spawn_execute(
                 "spawn_agent_tool",
-                {
-                    "task_type": payload.get("task_type", "inspect"),
-                    "goal": payload.get("goal", ""),
-                    "scope": json.dumps(payload.get("scope"), ensure_ascii=False),
-                    "constraints": json.dumps(payload.get("constraints"), ensure_ascii=False),
-                    "deliverables": json.dumps(payload.get("deliverables"), ensure_ascii=False),
-                    "context_pack": payload.get("context_pack", ""),
-                    "timeout": payload.get("timeout", 120),
-                    "_internal_delegate": True,
-                },
+                tool_args,
             )
         finally:
             set_subagent_stream_sink(None)
