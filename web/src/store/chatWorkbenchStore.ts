@@ -10,6 +10,7 @@ type ChatWorkbenchState = {
   sessionWorkspaces: Record<string, SessionWorkspace>;
   setActiveSession: (sessionId: string) => void;
   hydrateSession: (sessionId: string, previewTabs: string[], activePreviewPath?: string) => void;
+  removeSession: (sessionId: string, nextActiveSessionId?: string | null) => void;
   openPreviewTab: (sessionId: string, path: string) => void;
   closePreviewTab: (sessionId: string, path: string) => void;
   setActiveTab: (sessionId: string, tabId: string) => void;
@@ -33,6 +34,17 @@ export const useChatWorkbenchStore = create<ChatWorkbenchState>((set) => ({
             activeTab: "agent",
           },
         },
+      };
+    }),
+  removeSession: (sessionId, nextActiveSessionId) =>
+    set((state) => {
+      const { [sessionId]: _removed, ...sessionWorkspaces } = state.sessionWorkspaces;
+      return {
+        activeSessionId:
+          state.activeSessionId === sessionId
+            ? nextActiveSessionId ?? null
+            : state.activeSessionId,
+        sessionWorkspaces,
       };
     }),
   openPreviewTab: (sessionId, path) =>

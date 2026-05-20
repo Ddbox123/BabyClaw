@@ -495,6 +495,26 @@
   padding-right: 4px;
 }
 
+.newSessionButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 8px 12px;
+  border: 1px solid rgba(216, 167, 91, 0.22);
+  border-radius: 8px;
+  background: rgba(216, 167, 91, 0.14);
+  color: var(--accent-warm-2);
+  font: inherit;
+  cursor: pointer;
+}
+
+.newSessionButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
 .panelState {
   padding: 16px;
   border: 1px dashed var(--border-soft);
@@ -505,8 +525,12 @@
 }
 
 .sessionItem {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 8px;
   text-align: left;
-  padding: 14px;
+  padding: 12px;
   border-radius: 10px;
   border: 1px solid var(--border-soft);
   background: rgba(27, 31, 35, 0.82);
@@ -518,6 +542,16 @@
   box-shadow: inset 2px 0 0 var(--accent-warm);
 }
 
+.sessionItemMain {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
 .sessionItemTop {
   display: flex;
   align-items: flex-start;
@@ -527,6 +561,8 @@
 
 .sessionItemTitle {
   font-family: var(--font-display);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .sessionState {
@@ -552,6 +588,40 @@
 .sessionItemMeta {
   color: var(--fg-tertiary);
   font-size: 0.82rem;
+}
+
+.sessionDeleteButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: start;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(20, 23, 26, 0.72);
+  color: var(--fg-tertiary);
+  cursor: pointer;
+}
+
+.sessionDeleteButton:hover:not(:disabled) {
+  color: #e79b9b;
+  border-color: rgba(192, 94, 94, 0.32);
+  background: rgba(192, 94, 94, 0.12);
+}
+
+.sessionDeleteButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.sessionItemError {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #e79b9b;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .treeDir {

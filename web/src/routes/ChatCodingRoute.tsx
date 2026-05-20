@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Search, X } from "lucide-react";
+import { Plus, Search, Trash2, X } from "lucide-react";
 import {
   lazy,
   Suspense,
@@ -218,6 +218,7 @@ export function ChatCodingRoute() {
   const sessionWorkspaces = useChatWorkbenchStore((state) => state.sessionWorkspaces);
   const setActiveSession = useChatWorkbenchStore((state) => state.setActiveSession);
   const hydrateSession = useChatWorkbenchStore((state) => state.hydrateSession);
+  const removeSessionWorkspace = useChatWorkbenchStore((state) => state.removeSession);
   const openPreviewTab = useChatWorkbenchStore((state) => state.openPreviewTab);
   const closePreviewTab = useChatWorkbenchStore((state) => state.closePreviewTab);
   const setActiveTab = useChatWorkbenchStore((state) => state.setActiveTab);
@@ -347,6 +348,65 @@ export function ChatCodingRoute() {
       void queryClient.invalidateQueries({ queryKey: queryKeys.session(variables.sessionId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
       void queryClient.invalidateQueries({ queryKey: queryKeys.runtimeSummary() });
+    },
+  });
+
+  const createSessionMutation = useMutation({
+    mutationFn: async () =>
+      fetchJson<SessionDetail>("/api/sessions", {
+        method: "POST",
+      }),
+    onSuccess: (nextDetail) => {
+      setActiveSession(nextDetail.id);
+      setSessionFilter("");
+      setSessionComposerErrors((current) => ({
+        ...current,
+        [nextDetail.id]: "",
+      }));
+      queryClient.setQueryData(queryKeys.session(nextDetail.id), nextDetail);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.runtimeSummary() });
+    },
+    onError: (error) => {
+      setSessionComposerErrors((current) => ({
+        ...current,
+        __sessions__: describeError(error, t("createSessionFailed")),
+      }));
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
+    },
+  });
+
+  const deleteSessionMutation = useMutation({
+    mutationFn: async ({ sessionId }: { sessionId: string }) =>
+      fetchJson<SessionDetail>(`/api/sessions/${sessionId}`, {
+        method: "DELETE",
+      }),
+    onSuccess: (nextDetail, variables) => {
+      removeSessionWorkspace(variables.sessionId, nextDetail.id);
+      setActiveSession(nextDetail.id);
+      setSessionDrafts((current) => {
+        const { [variables.sessionId]: _removed, ...remaining } = current;
+        return remaining;
+      });
+      setSessionComposerErrors((current) => {
+        const { [variables.sessionId]: _removed, ...remaining } = current;
+        return {
+          ...remaining,
+          [nextDetail.id]: "",
+        };
+      });
+      queryClient.removeQueries({ queryKey: queryKeys.session(variables.sessionId), exact: true });
+      queryClient.setQueryData(queryKeys.session(nextDetail.id), nextDetail);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.runtimeSummary() });
+    },
+    onError: (error, variables) => {
+      setSessionComposerErrors((current) => ({
+        ...current,
+        [variables.sessionId]: describeError(error, t("deleteSessionFailed")),
+      }));
+      void queryClient.invalidateQueries({ queryKey: queryKeys.session(variables.sessionId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sessions() });
     },
   });
 
@@ -738,6 +798,26 @@ export function ChatCodingRoute() {
     });
   }
 
+  function handleCreateSession() {
+    setSessionComposerErrors((current) => ({
+      ...current,
+      __sessions__: "",
+    }));
+    createSessionMutation.mutate();
+  }
+
+  function handleDeleteSession(session: SessionSummary) {
+    if (isBusyPhase(session.currentPhase || session.status)) {
+      return;
+    }
+    setSessionComposerErrors((current) => ({
+      ...current,
+      [session.id]: "",
+      __sessions__: "",
+    }));
+    deleteSessionMutation.mutate({ sessionId: session.id });
+  }
+
   function handleResizeStart(side: ResizableSide, event: PointerEvent<HTMLDivElement>) {
     if (event.button !== 0) {
       return;
@@ -1101,6 +1181,18 @@ export function ChatCodingRoute() {
 
         {rightPanel === "sessions" ? (
           <div className={styles.panelBody}>
+            <button
+              type="button"
+              className={styles.newSessionButton}
+              onClick={handleCreateSession}
+              disabled={createSessionMutation.isPending}
+            >
+              <Plus size={15} />
+              <span>{createSessionMutation.isPending ? t("creatingSession") : t("newSession")}</span>
+            </button>
+            {sessionComposerErrors.__sessions__ ? (
+              <div className={styles.panelState}>{sessionComposerErrors.__sessions__}</div>
+            ) : null}
             {sessionsQuery.isError ? (
               <div className={styles.panelState}>{describeError(sessionsQuery.error, t("loadFailed"))}</div>
             ) : sessionsQuery.isPending && !sessionsQuery.data ? (
@@ -1110,27 +1202,49 @@ export function ChatCodingRoute() {
                 {sessionFilter.trim() ? t("noSessionMatches") : t("noSessionsYet")}
               </div>
             ) : (
-              filteredSessions.map((session) => (
-                <button
-                  key={session.id}
-                  type="button"
-                  className={
-                    activeSessionId === session.id
-                      ? `${styles.sessionItem} ${styles.sessionItemActive}`
-                      : styles.sessionItem
-                  }
-                  onClick={() => setActiveSession(session.id)}
-                >
-                  <div className={styles.sessionItemTop}>
-                    <span className={styles.sessionItemTitle}>{session.title}</span>
-                    <span className={styles.sessionState}>{statusLabel(session.status)}</span>
+              filteredSessions.map((session) => {
+                const deletePending =
+                  deleteSessionMutation.isPending &&
+                  deleteSessionMutation.variables?.sessionId === session.id;
+                const deleteDisabled = deletePending || isBusyPhase(session.currentPhase || session.status);
+                const itemError = sessionComposerErrors[session.id] ?? "";
+                return (
+                  <div
+                    key={session.id}
+                    className={
+                      activeSessionId === session.id
+                        ? `${styles.sessionItem} ${styles.sessionItemActive}`
+                        : styles.sessionItem
+                    }
+                  >
+                    <button
+                      type="button"
+                      className={styles.sessionItemMain}
+                      onClick={() => setActiveSession(session.id)}
+                    >
+                      <div className={styles.sessionItemTop}>
+                        <span className={styles.sessionItemTitle}>{session.title}</span>
+                        <span className={styles.sessionState}>{statusLabel(session.status)}</span>
+                      </div>
+                      <p className={styles.sessionItemSummary} title={session.taskSummary}>
+                        {session.taskSummary}
+                      </p>
+                      <p className={styles.sessionItemMeta}>{formatTime(session.updatedAt || session.lastActive)}</p>
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.sessionDeleteButton}
+                      onClick={() => handleDeleteSession(session)}
+                      disabled={deleteDisabled}
+                      title={deleteDisabled ? t("deleteSessionBusy") : t("deleteSession")}
+                      aria-label={`${t("deleteSession")} ${session.title}`}
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                    {itemError ? <p className={styles.sessionItemError}>{itemError}</p> : null}
                   </div>
-                  <p className={styles.sessionItemSummary} title={session.taskSummary}>
-                    {session.taskSummary}
-                  </p>
-                  <p className={styles.sessionItemMeta}>{formatTime(session.updatedAt || session.lastActive)}</p>
-                </button>
-              ))
+                );
+              })
             )}
           </div>
         ) : (

@@ -32,4 +32,21 @@ describe("chatWorkbenchStore", () => {
       activeTab: "config/settings.py",
     });
   });
+
+  it("removes a deleted session workspace and moves active focus", () => {
+    const store = useChatWorkbenchStore.getState();
+
+    store.setActiveSession("session-live");
+    store.openPreviewTab("session-live", "config/settings.py");
+    store.openPreviewTab("session-next", "core/web/services/session_service.py");
+
+    useChatWorkbenchStore.getState().removeSession("session-live", "session-next");
+
+    expect(useChatWorkbenchStore.getState().activeSessionId).toBe("session-next");
+    expect(useChatWorkbenchStore.getState().sessionWorkspaces["session-live"]).toBeUndefined();
+    expect(useChatWorkbenchStore.getState().sessionWorkspaces["session-next"]).toEqual({
+      openTabs: ["core/web/services/session_service.py"],
+      activeTab: "core/web/services/session_service.py",
+    });
+  });
 });

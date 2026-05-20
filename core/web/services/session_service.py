@@ -24,6 +24,7 @@ from core.evaluation.chat_segmenter import ChatTurnRecord, has_conclusion_signal
 from core.logging.logger import debug as _debug_logger
 from core.logging.unified_logger import logger as unified_logger
 from core.ui.chat_state import (
+    CHAT_STATE_VERSION,
     DEFAULT_CHAT_CONVERSATION_ID,
     DEFAULT_CHAT_CONVERSATION_TITLE,
     load_chat_state,
@@ -194,6 +195,117 @@ def get_active_session_detail() -> dict | None:
         if item["id"] == target_id:
             return _build_session_detail(item)
     return _build_session_detail(conversations[0])
+
+
+def create_chat_session() -> dict:
+    """Create a new empty chat session and make it active."""
+
+    lang = get_web_language()
+    with _CHAT_STATE_LOCK:
+        payload = load_chat_state(PROJECT_ROOT)
+        conversations = payload.get("conversations")
+        if not isinstance(conversations, list):
+            conversations = []
+        existing_ids = {
+            str(item.get("conversation_id") or "").strip()
+            for item in conversations
+            if isinstance(item, dict)
+        }
+        now = _now_timestamp()
+        session_id = _new_conversation_id(existing_ids)
+        conversation = _make_empty_conversation(
+            session_id,
+            title=text_for(lang, zh="新会话", en="New session"),
+            timestamp=now,
+        )
+        conversations.append(conversation)
+        payload["version"] = int(payload.get("version") or CHAT_STATE_VERSION)
+        payload["active_conversation_id"] = session_id
+        payload["updated_at"] = now
+        payload["conversations"] = conversations
+        save_chat_state(PROJECT_ROOT, payload)
+    return get_session_detail(session_id) or {}
+
+
+def delete_chat_session(session_id: str) -> dict:
+    """Delete one chat session and return the next active session detail."""
+
+    lang = get_web_language()
+    conversation_id = str(session_id or "").strip()
+    if not conversation_id:
+        raise SessionNotFoundError(text_for(lang, zh="未找到当前会话。", en="Session not found."))
+
+    next_active_id = ""
+    with _CHAT_STATE_LOCK:
+        payload = load_chat_state(PROJECT_ROOT)
+        payload = _repair_stale_running_conversations(payload)
+        conversations = payload.get("conversations")
+        if not isinstance(conversations, list):
+            conversations = []
+
+        target_index = -1
+        target_conversation: dict[str, Any] | None = None
+        for index, item in enumerate(conversations):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("conversation_id") or "").strip() == conversation_id:
+                target_index = index
+                target_conversation = item
+                break
+        if target_index < 0 or target_conversation is None:
+            raise SessionNotFoundError(text_for(lang, zh="未找到当前会话。", en="Session not found."))
+
+        normalized_target = _normalize_conversation(target_conversation) or {}
+        if _is_session_busy_for_delete(conversation_id, normalized_target):
+            raise SessionBusyError(
+                text_for(
+                    lang,
+                    zh="当前会话仍在运行或停止中，请先等待这一轮收束后再删除。",
+                    en="This session is still running or stopping. Wait for the current turn to close before deleting it.",
+                )
+            )
+
+        remaining = [
+            item
+            for index, item in enumerate(conversations)
+            if index != target_index and isinstance(item, dict)
+        ]
+        normalized_remaining = [
+            item
+            for item in (_normalize_conversation(raw) for raw in remaining)
+            if item is not None
+        ]
+        current_active_id = str(payload.get("active_conversation_id") or "").strip()
+        if any(item["id"] == current_active_id for item in normalized_remaining) and current_active_id != conversation_id:
+            next_active_id = current_active_id
+        elif normalized_remaining:
+            latest = max(
+                normalized_remaining,
+                key=lambda item: _timestamp_sort_key(item.get("updatedAt") or ""),
+            )
+            next_active_id = latest["id"]
+        else:
+            now = _now_timestamp()
+            next_active_id = _new_conversation_id({conversation_id})
+            remaining = [
+                _make_empty_conversation(
+                    next_active_id,
+                    title=text_for(lang, zh="新会话", en="New session"),
+                    timestamp=now,
+                )
+            ]
+
+        now = _now_timestamp()
+        payload["version"] = int(payload.get("version") or CHAT_STATE_VERSION)
+        payload["active_conversation_id"] = next_active_id
+        payload["updated_at"] = now
+        payload["conversations"] = remaining
+        save_chat_state(PROJECT_ROOT, payload)
+
+    _set_session_running(conversation_id, False)
+    _clear_session_turn_control(conversation_id)
+    _clear_session_live_output(conversation_id)
+    return get_session_detail(next_active_id) or {}
 
 
 def request_stop_session_turn(session_id: str) -> dict:
@@ -716,6 +828,33 @@ def _find_conversation_entry(payload: dict[str, Any], session_id: str) -> dict[s
         if str(item.get("conversation_id") or "").strip() == session_id:
             return item
     return None
+
+
+def _new_conversation_id(existing_ids: set[str] | None = None) -> str:
+    existing = set(existing_ids or set())
+    base = f"session-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    candidate = base
+    suffix = 2
+    while candidate in existing:
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _make_empty_conversation(session_id: str, *, title: str, timestamp: str) -> dict[str, Any]:
+    return {
+        "conversation_id": str(session_id or "").strip(),
+        "title": str(title or "").strip() or DEFAULT_CHAT_CONVERSATION_TITLE,
+        "updated_at": str(timestamp or "").strip() or _now_timestamp(),
+        "last_turn_status": "ready",
+        "active_task": None,
+        "messages": [],
+    }
+
+
+def _is_session_busy_for_delete(conversation_id: str, conversation: dict[str, Any]) -> bool:
+    phase = _conversation_phase(conversation_id, conversation)
+    return phase in {"running", "stopping"}
 
 
 def _conversation_phase(conversation_id: str, conversation: dict[str, Any]) -> str:

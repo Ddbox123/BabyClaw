@@ -10,6 +10,8 @@ from core.web.services.session_service import (
     SessionBusyError,
     SessionNotFoundError,
     SessionValidationError,
+    create_chat_session,
+    delete_chat_session,
     get_session_detail,
     list_sessions,
     request_stop_session_turn,
@@ -30,12 +32,27 @@ def sessions() -> list[dict]:
     return list_sessions()
 
 
+@router.post("/sessions", status_code=status.HTTP_201_CREATED)
+def session_create() -> dict:
+    return create_chat_session()
+
+
 @router.get("/sessions/{session_id}")
 def session_detail(session_id: str) -> dict:
     detail = get_session_detail(session_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return detail
+
+
+@router.delete("/sessions/{session_id}")
+def session_delete(session_id: str) -> dict:
+    try:
+        return delete_chat_session(session_id)
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SessionBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/sessions/{session_id}/events")

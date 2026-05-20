@@ -652,6 +652,108 @@ def test_session_detail_exists(tmp_path, monkeypatch):
     assert payload["currentPhase"] == "ready"
 
 
+def test_create_session_persists_new_active_empty_conversation(tmp_path, monkeypatch):
+    _seed_chat_state(tmp_path)
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+
+    response = client.post("/api/sessions")
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["id"].startswith("session-")
+    assert payload["title"] == "新会话"
+    assert payload["messages"] == []
+    assert payload["currentPhase"] == "ready"
+
+    state = load_chat_state(tmp_path)
+    assert state["active_conversation_id"] == payload["id"]
+    assert [item["conversation_id"] for item in state["conversations"]] == [
+        "session-live",
+        payload["id"],
+    ]
+
+
+def test_delete_session_switches_to_latest_remaining_session(tmp_path, monkeypatch):
+    save_chat_state(
+        tmp_path,
+        {
+            "version": 1,
+            "active_conversation_id": "session-live",
+            "updated_at": "2026-05-18T12:00:00",
+            "conversations": [
+                {
+                    "conversation_id": "session-live",
+                    "title": "当前会话",
+                    "updated_at": "2026-05-18T12:00:00",
+                    "last_turn_status": "ready",
+                    "messages": [{"role": "user", "content": "删除我", "timestamp": "2026-05-18T12:00:00"}],
+                },
+                {
+                    "conversation_id": "session-older",
+                    "title": "旧会话",
+                    "updated_at": "2026-05-18T10:00:00",
+                    "last_turn_status": "ready",
+                    "messages": [{"role": "user", "content": "旧", "timestamp": "2026-05-18T10:00:00"}],
+                },
+                {
+                    "conversation_id": "session-newer",
+                    "title": "新会话",
+                    "updated_at": "2026-05-18T11:00:00",
+                    "last_turn_status": "ready",
+                    "messages": [{"role": "user", "content": "新", "timestamp": "2026-05-18T11:00:00"}],
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+
+    response = client.delete("/api/sessions/session-live")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] == "session-newer"
+
+    state = load_chat_state(tmp_path)
+    assert state["active_conversation_id"] == "session-newer"
+    assert [item["conversation_id"] for item in state["conversations"]] == [
+        "session-older",
+        "session-newer",
+    ]
+
+
+def test_delete_last_session_creates_replacement(tmp_path, monkeypatch):
+    _seed_chat_state(tmp_path)
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+
+    response = client.delete("/api/sessions/session-live")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"].startswith("session-")
+    assert payload["id"] != "session-live"
+    assert payload["messages"] == []
+
+    state = load_chat_state(tmp_path)
+    assert state["active_conversation_id"] == payload["id"]
+    assert [item["conversation_id"] for item in state["conversations"]] == [payload["id"]]
+
+
+def test_delete_session_rejects_running_turn(tmp_path, monkeypatch):
+    _seed_chat_state(tmp_path)
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+
+    session_service._set_session_running("session-live", True)
+    try:
+        response = client.delete("/api/sessions/session-live")
+    finally:
+        session_service._set_session_running("session-live", False)
+
+    assert response.status_code == 409
+    assert "运行" in response.json()["detail"]
+    state = load_chat_state(tmp_path)
+    assert [item["conversation_id"] for item in state["conversations"]] == ["session-live"]
+
+
 def test_session_detail_uses_live_phase_while_turn_is_running(tmp_path, monkeypatch):
     _seed_chat_state(tmp_path, task_status="reading")
     monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
