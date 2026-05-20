@@ -24,6 +24,11 @@ from .routes.sessions import router as sessions_router
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WEB_DIST = PROJECT_ROOT / "web" / "dist"
+INDEX_CACHE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
 
 
 def _looks_like_static_asset_request(full_path: str) -> bool:
@@ -120,7 +125,7 @@ def create_app() -> FastAPI:
     @app.get("/", include_in_schema=False)
     def index():
         if WEB_DIST.exists():
-            return FileResponse(WEB_DIST / "index.html")
+            return FileResponse(WEB_DIST / "index.html", headers=INDEX_CACHE_HEADERS)
         return JSONResponse(
             {
                 "message": "Web frontend has not been built yet.",
@@ -144,7 +149,7 @@ def create_app() -> FastAPI:
                 return FileResponse(candidate)
             if _looks_like_static_asset_request(full_path):
                 return JSONResponse({"detail": "Not Found"}, status_code=404)
-            return FileResponse(WEB_DIST / "index.html")
+            return FileResponse(WEB_DIST / "index.html", headers=INDEX_CACHE_HEADERS)
         return JSONResponse(
             {
                 "message": "Web frontend has not been built yet.",

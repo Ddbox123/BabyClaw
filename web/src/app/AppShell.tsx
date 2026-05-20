@@ -133,6 +133,7 @@ export function AppShell() {
   const runtimeControllerState = deriveRuntimeControllerState(runtimeQuery.data);
   const currentTime = clockFormatter.format(clockNow);
   const fullCurrentTime = fullClockFormatter.format(clockNow);
+  const buildId = __VIBELUTION_BUILD_ID__;
 
   const frontendStateLabel = {
     connected: t("systemFrontend_connected"),
@@ -502,7 +503,7 @@ export function AppShell() {
       label: t("systemFrontend"),
       value: frontendStateLabel,
       tone: frontendSystemTone(frontendState),
-      note: t("systemFrontendHint"),
+      note: `${t("systemFrontendHint")} · ${t("frontendBuild")} ${buildId}`,
       states: [
         {
           label: t("systemFrontend_connected"),
