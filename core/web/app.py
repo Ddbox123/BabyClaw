@@ -8,10 +8,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
+from .control import WebControlGuardMiddleware, control_token_payload, ensure_control_source, trusted_control_origins
 from .routes.config import router as config_router
 from .routes.evolution import router as evolution_router
 from .routes.files import router as files_router
@@ -96,22 +97,21 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://127.0.0.1:5173",
-            "http://localhost:5173",
-            "http://127.0.0.1:8000",
-            "http://localhost:8000",
-            f"http://127.0.0.1:{_default_workbench_port()}",
-            f"http://localhost:{_default_workbench_port()}",
-        ],
+        allow_origins=sorted(trusted_control_origins()),
         allow_credentials=True,
         allow_methods=["*"],
-        allow_headers=["*"],
+        allow_headers=["*", "X-Vibelution-Control-Token"],
     )
+    app.add_middleware(WebControlGuardMiddleware)
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/control-token")
+    def control_token(request: Request) -> dict[str, str]:
+        ensure_control_source(request)
+        return control_token_payload()
 
     app.include_router(runtime_router, prefix="/api")
     app.include_router(sessions_router, prefix="/api")
@@ -123,7 +123,8 @@ def create_app() -> FastAPI:
     app.include_router(pet_router, prefix="/api")
 
     @app.get("/", include_in_schema=False)
-    def index():
+    def index(request: Request):
+        ensure_control_source(request)
         if WEB_DIST.exists():
             return FileResponse(WEB_DIST / "index.html", headers=INDEX_CACHE_HEADERS)
         return JSONResponse(
@@ -135,7 +136,8 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/{full_path:path}", include_in_schema=False)
-    def spa_fallback(full_path: str):
+    def spa_fallback(full_path: str, request: Request):
+        ensure_control_source(request)
         if full_path.startswith("api/"):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
         if WEB_DIST.exists():

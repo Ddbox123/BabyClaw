@@ -1,3 +1,5 @@
+import { getControlToken } from "../api/client";
+
 export type BrowserTelemetryEventInput = {
   phase: string;
   eventCode: string;
@@ -65,32 +67,26 @@ export function collectBrowserPageSnapshot(): Record<string, unknown> {
 
 export function postBrowserTelemetry(
   payload: BrowserTelemetryEventInput,
-  options?: { preferBeacon?: boolean },
+  _options?: { preferBeacon?: boolean },
 ) {
   if (typeof window === "undefined") {
     return;
   }
 
   const body = JSON.stringify(payload);
-  if (options?.preferBeacon && typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
-    try {
-      const blob = new Blob([body], { type: "application/json" });
-      if (navigator.sendBeacon(TELEMETRY_ENDPOINT, blob)) {
-        return;
-      }
-    } catch {
-      // Fall back to fetch below.
-    }
-  }
-
-  void fetch(TELEMETRY_ENDPOINT, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    },
-    body,
-    credentials: "same-origin",
-    keepalive: true,
-  }).catch(() => {});
+  void getControlToken()
+    .then((control) =>
+      fetch(TELEMETRY_ENDPOINT, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          [control.header]: control.token,
+        },
+        body,
+        credentials: "same-origin",
+        keepalive: true,
+      }),
+    )
+    .catch(() => {});
 }

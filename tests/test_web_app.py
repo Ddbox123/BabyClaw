@@ -22,6 +22,7 @@ from core.ui.chat_state import load_chat_state, save_chat_state
 from fastapi.testclient import TestClient
 
 from core.web.app import create_app
+from core.web.control import CONTROL_TOKEN_HEADER, get_control_token
 from core.web.services import (
     chat_review_service,
     config_service,
@@ -38,7 +39,7 @@ from core.web.services import (
 from tests.test_gym_runner import RunnerFakeAdapter
 
 
-client = TestClient(create_app())
+client = TestClient(create_app(), headers={CONTROL_TOKEN_HEADER: get_control_token()})
 
 
 @pytest.fixture(autouse=True)
@@ -65,6 +66,57 @@ def _read_first_sse_event(response):
                 }
     raise AssertionError("Expected at least one SSE event")
 
+
+def test_web_control_token_endpoint_is_local_and_required_for_mutations():
+    guarded_client = TestClient(create_app())
+
+    token_response = guarded_client.get("/api/control-token")
+    assert token_response.status_code == 200
+    token_payload = token_response.json()
+    assert token_payload["header"] == CONTROL_TOKEN_HEADER
+    assert token_payload["controlToken"]
+
+    read_response = guarded_client.get("/api/health")
+    assert read_response.status_code == 200
+
+    rejected_response = guarded_client.post("/api/runtime/shutdown")
+    assert rejected_response.status_code == 403
+    assert "control token" in rejected_response.json()["detail"]
+
+    accepted_client = TestClient(create_app(), headers={CONTROL_TOKEN_HEADER: token_payload["controlToken"]})
+    accepted_response = accepted_client.post(
+        "/api/runtime/browser-telemetry",
+        json={"phase": "page", "eventCode": "probe", "message": "accepted"},
+    )
+    assert accepted_response.status_code == 202
+
+
+def test_web_control_guard_rejects_untrusted_origin_even_with_token():
+    guarded_client = TestClient(create_app())
+
+    response = guarded_client.post(
+        "/api/runtime/browser-telemetry",
+        headers={
+            CONTROL_TOKEN_HEADER: get_control_token(),
+            "Origin": "https://example.invalid",
+        },
+        json={"phase": "page", "eventCode": "probe", "message": "blocked"},
+    )
+
+    assert response.status_code == 403
+    assert "origin" in response.json()["detail"].lower()
+
+
+def test_web_control_token_endpoint_rejects_untrusted_origin():
+    guarded_client = TestClient(create_app())
+
+    response = guarded_client.get(
+        "/api/control-token",
+        headers={"Origin": "https://example.invalid"},
+    )
+
+    assert response.status_code == 403
+    assert "origin" in response.json()["detail"].lower()
 
 def _seed_runtime_scene_bundle(project_root: Path, scene_id: str = "scene-1", status: str = "stopped") -> Path:
     scene_dir = project_root / "logs" / "runtime_scenes" / f"20260518T120000Z__{scene_id}"
