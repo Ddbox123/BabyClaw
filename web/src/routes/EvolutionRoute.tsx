@@ -24,6 +24,7 @@ import {
   EvolutionActiveRunStreamEvent,
   EvolutionActionState,
   ConfigSummary,
+  EvolutionOverview,
   EvolutionRunActionResponse,
   EvolutionWorkbench,
   EvolutionProposalBulkDeleteResponse,
@@ -207,6 +208,13 @@ export function EvolutionRoute({ forcedTrack, forcedView }: EvolutionRouteProps)
   const workbenchQuery = useQuery({
     queryKey: queryKeys.evolutionWorkbench(),
     queryFn: () => fetchJson<EvolutionWorkbench>("/api/evolution/workbench"),
+    refetchInterval: 8_000,
+    refetchIntervalInBackground: true,
+    enabled: supervisedTrackQueriesEnabled,
+  });
+  const overviewQuery = useQuery({
+    queryKey: queryKeys.evolutionOverview(),
+    queryFn: () => fetchJson<EvolutionOverview>("/api/evolution/overview"),
     refetchInterval: 8_000,
     refetchIntervalInBackground: true,
     enabled: supervisedTrackQueriesEnabled,
@@ -489,8 +497,9 @@ export function EvolutionRoute({ forcedTrack, forcedView }: EvolutionRouteProps)
   const runs = runsQuery.data ?? EMPTY_RUNS;
   const libraryItems = libraryQuery.data?.items ?? EMPTY_LIBRARY_ENTRIES;
   const pendingItems = libraryQuery.data?.pending ?? EMPTY_LIBRARY_ENTRIES;
+  const overview = overviewQuery.data;
   const workbenchControl = workbenchQuery.data;
-  const workbenchState = workbenchControl?.savedState;
+  const workbenchState = overview?.workbench ?? workbenchControl?.savedState;
   const activeRunSnapshot = activeRunQuery.data;
   const latestSelfRunSnapshot = selfLatestRunQuery.data;
   const latestRun = runs[0] ?? null;
@@ -512,8 +521,16 @@ export function EvolutionRoute({ forcedTrack, forcedView }: EvolutionRouteProps)
   const routeSubtitle =
     activeTrack === "self" ? t("selfEvolutionSubtitle") : t("supervisedEvolutionSubtitle");
   const currentIntakeMode =
-    configQuery.data?.intakeMode === "auto" ? "auto" : "manual_review";
+    overview?.intakeMode === "auto"
+      ? "auto"
+      : configQuery.data?.intakeMode === "auto"
+        ? "auto"
+        : "manual_review";
   const nextIntakeMode = currentIntakeMode === "auto" ? "manual_review" : "auto";
+  const overviewCurrentStatus = overview?.currentStatus ?? null;
+  const overviewRecentRuns = overview?.recentRuns ?? [];
+  const overviewRecentLibrary = overview?.recentLibrary ?? [];
+  const overviewLatestRunId = overviewCurrentStatus?.latestRunId || overviewRecentRuns[0]?.id || latestRun?.id || "";
   const monitoredRun = activeRunSnapshot
     ?? (liveActiveRun && ["done", "failed", "cancelled"].includes(String(liveActiveRun.status || "").toLowerCase())
       ? liveActiveRun
@@ -1251,31 +1268,31 @@ export function EvolutionRoute({ forcedTrack, forcedView }: EvolutionRouteProps)
       {activeTrack === "supervised" && evolutionView === "live" ? (
         <div className={styles.overviewGrid}>
           <section className={`${styles.surface} ${styles.launchSurface} ${styles.dashboardLaunch}`}>
-              <div className={styles.surfaceHeaderCompact}>
-                <div>
-                  <p className={styles.eyebrow}>{t("supervisedControl")}</p>
-                  <h2 className={styles.sectionTitle}>{t("launchSupervisedRun")}</h2>
-                </div>
-                <span className={styles.secondaryPill}>
-                  {sourceKindLabel(sourceKind)}
-                </span>
+            <div className={styles.surfaceHeaderCompact}>
+              <div>
+                <p className={styles.eyebrow}>{t("supervisedControl")}</p>
+                <h2 className={styles.sectionTitle}>{t("launchSupervisedRun")}</h2>
               </div>
-              <p className={styles.noticeText}>{t("launchSupervisedRunHint")}</p>
+              <span className={styles.secondaryPill}>
+                {sourceKindLabel(sourceKind)}
+              </span>
+            </div>
+            <p className={styles.noticeText}>{t("launchSupervisedRunHint")}</p>
 
-              <div className={styles.metricStrip}>
-                <article className={styles.stripItem}>
-                  <span>{t("availableDatasets")}</span>
-                  <strong>{workbenchState?.availableDatasets ?? 0}</strong>
-                </article>
-                <article className={styles.stripItem}>
-                  <span>{t("runnableDatasets")}</span>
-                  <strong>{workbenchState?.runnableDatasets ?? 0}</strong>
-                </article>
-                <article className={styles.stripItem}>
-                  <span>{t("blockedDatasets")}</span>
-                  <strong>{workbenchState?.blockedDatasets ?? 0}</strong>
-                </article>
-              </div>
+            <div className={styles.metricStrip}>
+              <article className={styles.stripItem}>
+                <span>{t("availableDatasets")}</span>
+                <strong>{workbenchState?.availableDatasets ?? 0}</strong>
+              </article>
+              <article className={styles.stripItem}>
+                <span>{t("runnableDatasets")}</span>
+                <strong>{workbenchState?.runnableDatasets ?? 0}</strong>
+              </article>
+              <article className={styles.stripItem}>
+                <span>{t("blockedDatasets")}</span>
+                <strong>{workbenchState?.blockedDatasets ?? 0}</strong>
+              </article>
+            </div>
 
               <div className={styles.segmented}>
                 {(["dataset", "bundle"] as const).map((value) => (
@@ -1518,7 +1535,7 @@ export function EvolutionRoute({ forcedTrack, forcedView }: EvolutionRouteProps)
                   <div className={styles.metricStrip}>
                     <article className={styles.stripItem}>
                       <span>{t("latestRun")}</span>
-                      <strong>{latestRun?.id ?? "--"}</strong>
+                      <strong>{overviewLatestRunId || "--"}</strong>
                     </article>
                     <article className={styles.stripItem}>
                       <span>{t("pendingCandidates")}</span>
@@ -1532,7 +1549,7 @@ export function EvolutionRoute({ forcedTrack, forcedView }: EvolutionRouteProps)
                   <div className={styles.relatedList}>
                     <article className={styles.relatedRow}>
                       <strong>{t("latestScore")}</strong>
-                      <span>{latestRun ? clampScore(latestRun.candidateScore) : "--"}</span>
+                      <span>{overviewRecentRuns[0] ? clampScore(overviewRecentRuns[0].score) : latestRun ? clampScore(latestRun.candidateScore) : "--"}</span>
                     </article>
                     <article className={styles.relatedRow}>
                       <strong>{t("selectedDataset")}</strong>
@@ -1543,8 +1560,8 @@ export function EvolutionRoute({ forcedTrack, forcedView }: EvolutionRouteProps)
                     <button
                       type="button"
                       className={styles.inlineAction}
-                      disabled={!latestRun}
-                      onClick={() => openRun(latestRun?.id ?? null)}
+                      disabled={!overviewLatestRunId}
+                      onClick={() => openRun(overviewLatestRunId || null)}
                     >
                       <Activity size={15} />
                       {t("openLatestRuns")}
@@ -1650,6 +1667,22 @@ export function EvolutionRoute({ forcedTrack, forcedView }: EvolutionRouteProps)
               <div className={styles.listStack}>
                 <article className={styles.listRow}>
                   <div className={styles.metaRow}>
+                    <span>{t("status")}</span>
+                    <span>{overviewCurrentStatus ? statusLabel(overviewCurrentStatus.state) : "--"}</span>
+                  </div>
+                  <div className={styles.metaRow}>
+                    <span>{t("decision")}</span>
+                    <span>{overviewCurrentStatus ? decisionLabel(overviewCurrentStatus.decision) : "--"}</span>
+                  </div>
+                  <div className={styles.metaRow}>
+                    <span>{t("proposalStatus")}</span>
+                    <span>{overviewCurrentStatus?.outcomeSemantics.proposalStatusLabel || "--"}</span>
+                  </div>
+                  <div className={styles.metaRow}>
+                    <span>{t("runtimeLayer")}</span>
+                    <span>{overviewCurrentStatus?.outcomeSemantics.runtimeEffectLabel || "--"}</span>
+                  </div>
+                  <div className={styles.metaRow}>
                     <span>{t("datasetNameLabel")}</span>
                     <span>{workbenchState?.datasetName || "--"}</span>
                   </div>
@@ -1661,7 +1694,94 @@ export function EvolutionRoute({ forcedTrack, forcedView }: EvolutionRouteProps)
                     <span>{t("datasetLimitLabel")}</span>
                     <span>{workbenchState?.datasetLimit ?? "--"}</span>
                   </div>
+                  <div className={styles.metaRow}>
+                    <span>{t("nextRecommendedAction")}</span>
+                    <span>{overviewCurrentStatus?.nextAction || "--"}</span>
+                  </div>
+                  <div className={styles.metaRow}>
+                    <span>{t("activeAdvisoryBaselines")}</span>
+                    <span>{overviewCurrentStatus?.activeAdvisoryCount ?? 0}</span>
+                  </div>
+                  <div className={styles.metaRow}>
+                    <span>{t("recentLibraryAdditions")}</span>
+                    <span>{overviewRecentLibrary.length}</span>
+                  </div>
                 </article>
+                <div className={styles.detailSection}>
+                  <h3>{t("recentRunPerformance")}</h3>
+                  {overviewRecentRuns.length > 0 ? (
+                    <div className={styles.relatedList}>
+                      {overviewRecentRuns.slice(0, 3).map((run) => (
+                        <article key={run.id} className={styles.relatedRow}>
+                          <div className={styles.listRowTop}>
+                            <strong>{run.id}</strong>
+                            <span>{decisionLabel(run.decision)}</span>
+                          </div>
+                          <p>{run.summary}</p>
+                          <div className={styles.actionRow}>
+                            <span>{statusLabel(run.status)}</span>
+                            <span>{clampScore(run.score)}</span>
+                            <button
+                              type="button"
+                              className={styles.inlineAction}
+                              onClick={() => openRun(run.id)}
+                            >
+                              <ArrowUpRight size={15} />
+                              {t("openSourceRun")}
+                            </button>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  ) : (
+                    <p>{t("noRunsRecordedHint")}</p>
+                  )}
+                </div>
+                <div className={styles.detailSection}>
+                  <h3>{t("recentLibraryAdditions")}</h3>
+                  {overviewRecentLibrary.length > 0 ? (
+                    <div className={styles.relatedList}>
+                      {overviewRecentLibrary.slice(0, 3).map((item) => (
+                        <article key={`${item.sourceRun}-${item.id}`} className={styles.relatedRow}>
+                          <div className={styles.listRowTop}>
+                            <strong>{item.title}</strong>
+                            <span>{statusLabel(item.source)}</span>
+                          </div>
+                          <div className={styles.metaRow}>
+                            <span>{t("sourceRun")}</span>
+                            <span>{item.sourceRun}</span>
+                          </div>
+                          <div className={styles.actionRow}>
+                            <button
+                              type="button"
+                              className={styles.inlineAction}
+                              onClick={() => openRun(item.sourceRun)}
+                            >
+                              <ArrowUpRight size={15} />
+                              {t("openSourceRun")}
+                            </button>
+                            <button
+                              type="button"
+                              className={styles.inlineAction}
+                              onClick={() => {
+                                const targetPending = item.source === "proposed";
+                                setLibraryView(targetPending ? "pending" : "items");
+                                setSelectedPendingItemId(targetPending ? item.id : null);
+                                setSelectedLibraryItemId(targetPending ? null : item.id);
+                                goToSupervisedView("library");
+                              }}
+                            >
+                              <LibraryBig size={15} />
+                              {t("openProposal")}
+                            </button>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  ) : (
+                    <p>{t("emptyLibraryItems")}</p>
+                  )}
+                </div>
                 <div className={styles.actionGridCompact}>
                   <button
                     type="button"
@@ -1675,8 +1795,8 @@ export function EvolutionRoute({ forcedTrack, forcedView }: EvolutionRouteProps)
                   <button
                     type="button"
                     className={styles.actionButton}
-                    disabled={!latestRun}
-                    onClick={() => openRun(latestRun?.id ?? null)}
+                    disabled={!overviewLatestRunId}
+                    onClick={() => openRun(overviewLatestRunId || null)}
                   >
                     <ArrowUpRight size={16} />
                     <span>{t("openLatestRuns")}</span>
