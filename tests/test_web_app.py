@@ -1013,6 +1013,31 @@ def test_session_detail_includes_live_thought_draft(tmp_path, monkeypatch):
     assert payload["messages"][-1]["mentalSnapshot"]["mood"] == "专注"
 
 
+def test_session_detail_hides_partial_state_live_answer(tmp_path, monkeypatch):
+    _seed_chat_state(tmp_path, task_status="reading")
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+
+    session_service._set_session_running("session-live", True)
+    session_service._set_session_live_output(
+        "session-live",
+        content="<state",
+        tool_calls=[{"name": "read_file_tool", "status": "running"}],
+    )
+    try:
+        response = client.get("/api/sessions/session-live")
+    finally:
+        session_service._clear_session_live_output("session-live")
+        session_service._set_session_running("session-live", False)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["messages"][-1]["streaming"] is True
+    assert payload["messages"][-1]["content"] == ""
+    assert payload["messages"][-1]["toolCalls"] == [
+        {"name": "read_file_tool", "status": "running"}
+    ]
+
+
 def test_submit_session_message_allows_follow_up_when_previous_turn_finished(tmp_path, monkeypatch):
     _seed_chat_state(tmp_path, task_status="reading")
     monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
@@ -1229,6 +1254,95 @@ def test_submit_session_continue_preserves_unfinished_task_goal(tmp_path, monkey
     assert active_task["goal"] == "做一个 BDD 调试测试工具规划并汇报"
     assert active_task["title"] == "做一个 BDD 调试测试工具规划并汇报"
     assert active_task["last_user_message"] == "继续"
+
+
+def test_submit_session_continue_recovers_goal_when_active_task_is_continue(tmp_path, monkeypatch):
+    (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tests" / "prompt_debugger.py").write_text("pass\n", encoding="utf-8")
+    _seed_chat_state(
+        tmp_path,
+        task_status="reading",
+        active_task={
+            "task_id": "polluted-continue",
+            "kind": "coding",
+            "status": "reading",
+            "title": "继续",
+            "goal": "继续",
+            "read_files": ["tests/prompt_debugger.py"],
+            "latest_summary": "<state",
+            "updated_at": "2026-05-20T17:54:06",
+        },
+    )
+    state = load_chat_state(tmp_path)
+    state["conversations"][0]["messages"] = [
+        {
+            "role": "user",
+            "content": "做一个测试工具吧,能够更快速的进行BDD调试,先规划一下,然后向我汇报",
+            "timestamp": "2026-05-20T17:50:00",
+        },
+        {
+            "role": "assistant",
+            "content": "已达到 Web Chat 任务级持续上限（1 轮），本次先暂停，避免后台无限运行。",
+            "timestamp": "2026-05-20T17:51:00",
+        },
+        {
+            "role": "user",
+            "content": "继续",
+            "timestamp": "2026-05-20T17:53:05",
+        },
+    ]
+    save_chat_state(tmp_path, state)
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        session_service,
+        "get_web_chat_config",
+        lambda: SimpleNamespace(max_continuation_turns=1),
+    )
+    prompts = []
+
+    class ResumeAgent:
+        def seed_chat_history(self, messages):
+            self.messages = list(messages)
+
+        def run_single_turn(self, initial_prompt=None):
+            prompts.append(initial_prompt)
+            return {
+                "status": "completed",
+                "summary": "<state",
+                "raw_output": "<state",
+                "outcome": "progress",
+                "next_action": "继续读取测试工具结构并形成规划。",
+                "read_files": ["tests/prompt_debugger.py"],
+                "tool_call_count": 1,
+                "tool_trace": [
+                    {"name": "read_file_tool", "args": {"file_path": "tests/prompt_debugger.py"}},
+                ],
+            }
+
+    monkeypatch.setattr(session_service, "create_chat_agent", lambda: ResumeAgent())
+    monkeypatch.setattr(
+        session_service,
+        "_schedule_session_turn",
+        lambda context: session_service._run_session_turn(context),
+    )
+
+    response = client.post(
+        "/api/sessions/session-live/messages",
+        json={"content": "继续"},
+    )
+
+    assert response.status_code == 202
+    assert prompts[0] == (
+        "继续完成上一任务：做一个测试工具吧,能够更快速的进行BDD调试,先规划一下,然后向我汇报"
+    )
+    payload = response.json()
+    assert "任务级持续上限" in payload["messages"][-1]["content"]
+    assert "<state" not in payload["messages"][-1]["content"]
+    state = load_chat_state(tmp_path)
+    active_task = state["conversations"][0]["active_task"]
+    assert active_task["goal"] == "做一个测试工具吧,能够更快速的进行BDD调试,先规划一下,然后向我汇报"
+    assert active_task["title"] == "做一个测试工具吧,能够更快速的进行BDD调试,先规划一下,然后向我汇报"
+    assert active_task["latest_summary"] != "<state"
 
 
 def test_session_detail_uses_ready_phase_for_resting_sessions(tmp_path, monkeypatch):

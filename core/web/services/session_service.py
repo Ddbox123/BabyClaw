@@ -405,8 +405,10 @@ def _sanitize_message_content(role: str, content: Any) -> str:
     )
     text = re.sub(r"<state[^>]*>.*?</state>", "", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"<state[^>]*>.*$", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<state(?:\s[^>\n]*)?$", "", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"</?(?:think|thinking)[^>]*>", "", text, flags=re.IGNORECASE)
     text = re.sub(r"</?[\w:-]*tool_call[^>]*>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[\w:-]*tool_call(?:\s[^>\n]*)?$", "", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
@@ -1067,9 +1069,11 @@ def _sanitize_thought_text(text: Any) -> str:
     cleaned = str(text or "")
     cleaned = re.sub(r"</?(?:think|thinking)[^>]*>", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"<(?:think|thinking)?/?[^>\n]*$", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"<state>.*?</state>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = re.sub(r"<state>\s*.*$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"<state[^>]*>.*?</state>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"<state[^>]*>.*$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"<state(?:\s[^>\n]*)?$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
     cleaned = re.sub(r"</?[\w:-]*tool_call[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<[\w:-]*tool_call(?:\s[^>\n]*)?$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 
@@ -1326,7 +1330,7 @@ def _set_session_live_output(
         if thought is not _UNSET:
             state.thought = _sanitize_thought_text(thought)
         if content is not _UNSET:
-            state.content = str(content or "").strip()
+            state.content = _sanitize_message_content("assistant", content)
         if mental_snapshot is not _UNSET:
             state.mental_snapshot = _normalize_mental_snapshot(mental_snapshot)
         if tool_calls is not _UNSET:
@@ -1563,6 +1567,7 @@ def _latest_unfinished_task_goal(session_id: str) -> str:
         active_task = _normalize_session_active_task(
             conversation.get("active_task") or conversation.get("activeTask")
         )
+        messages = normalize_chat_messages(conversation.get("messages") or [])
     if not isinstance(active_task, dict):
         return ""
     status = str(active_task.get("status") or "").strip().lower()
@@ -1570,8 +1575,30 @@ def _latest_unfinished_task_goal(session_id: str) -> str:
         return ""
     goal = trim_lines(active_task.get("goal") or active_task.get("title") or "", max_lines=2)
     if _is_continue_request(goal):
-        return ""
+        return _latest_meaningful_user_message(messages)
     return goal
+
+
+def _latest_meaningful_user_message(messages: list[dict[str, Any]]) -> str:
+    for item in reversed(messages):
+        if str(item.get("role") or "").strip().lower() != "user":
+            continue
+        content = trim_lines(item.get("content") or "", max_lines=4)
+        if _is_meaningful_task_goal(content):
+            return content
+    return ""
+
+
+def _is_meaningful_task_goal(text: Any) -> bool:
+    value = trim_lines(text or "", max_lines=4)
+    compact = re.sub(r"\s+", "", value).strip()
+    if not compact:
+        return False
+    if _is_continue_request(compact):
+        return False
+    if compact in {"1", "2", "3", "ok", "好的", "确认", "是", "否", "停止", "stop"}:
+        return False
+    return len(compact) >= 6
 
 
 def _is_session_turn_terminal(result: Any) -> bool:
@@ -1765,10 +1792,16 @@ def _build_session_active_task(
         if isinstance(existing_task, dict)
         else ""
     )
-    effective_goal = existing_goal if _is_continue_request(last_user_message) and existing_goal else last_user_message
+    history_goal = _latest_meaningful_user_message(messages)
+    if _is_continue_request(last_user_message):
+        effective_goal = existing_goal if existing_goal and not _is_continue_request(existing_goal) else history_goal
+    else:
+        effective_goal = last_user_message
+    if not effective_goal:
+        effective_goal = existing_goal if existing_goal and not _is_continue_request(existing_goal) else history_goal
     effective_title = (
-        existing_goal
-        if _is_continue_request(last_user_message) and existing_goal
+        effective_goal
+        if _is_continue_request(last_user_message) and effective_goal
         else (last_user_message or latest_summary)
     )
     metadata = dict(existing_metadata)
