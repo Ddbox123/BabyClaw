@@ -15,6 +15,7 @@ from .models import (
     AppConfig,
     LLMConfig,
     AgentConfig,
+    WebChatConfig,
     ContextCompressionConfig,
     ToolConfig,
     LogConfig,
@@ -568,6 +569,9 @@ class ConfigLoader:
             f"{prefix}AGENT_MODES_DEFAULT_HEADLESS_MODE": "agent.modes.default_headless_mode",
             f"{prefix}AGENT_MODES_EXPLICIT_EVOLUTION_REQUEST_BEHAVIOR": "agent.modes.explicit_evolution_request_behavior",
 
+            # === Web Chat 配置 ===
+            f"{prefix}WEB_CHAT_MAX_CONTINUATION_TURNS": "web_chat.max_continuation_turns",
+
             # === 上下文压缩配置 ===
             f"{prefix}COMPRESSION_ENABLED": "context_compression.enabled",
             f"{prefix}COMPRESSION_MAX_TOKEN_LIMIT": "context_compression.max_token_limit",
@@ -757,6 +761,7 @@ class ConfigLoader:
                         value = value
                 elif path.split(".")[-1] in ("max_output_tokens", "timeout", "connect_timeout",
                             "awake_interval", "max_iterations", "max_runtime",
+                            "max_continuation_turns",
                             "backup_interval", "auto_restart_threshold",
                             "min_turns", "max_turns",
                             "max_retries", "max_token_limit",
@@ -1067,6 +1072,11 @@ def get_agent_config() -> AgentConfig:
     return get_config().agent
 
 
+def get_web_chat_config() -> WebChatConfig:
+    """获取 Web Chat 配置"""
+    return get_config().web_chat
+
+
 def get_compression_config() -> ContextCompressionConfig:
     """获取压缩配置"""
     return get_config().context_compression
@@ -1199,6 +1209,7 @@ __all__ = [
     # 便捷配置访问函数
     "get_llm_config",
     "get_agent_config",
+    "get_web_chat_config",
     "get_compression_config",
     "get_tools_config",
     "get_log_config",

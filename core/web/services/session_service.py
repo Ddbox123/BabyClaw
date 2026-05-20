@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from config.settings import get_web_chat_config
 from core.chat.chat_result_contract import build_chat_coding_result_contract
 from core.chat.chat_result_formatter import format_chat_reply
 from core.chat.chat_task_types import trim_lines
@@ -724,7 +725,12 @@ def _run_session_turn(context: dict[str, Any]) -> None:
                 return
 
             user_message = str(context.get("user_message") or "").strip()
-            result = agent.run_single_turn(initial_prompt=user_message)
+            result = _run_session_continuation_loop(
+                agent,
+                session_id=session_id,
+                initial_prompt=user_message,
+                history_messages=history_messages,
+            )
         result = _attach_turn_capture_to_result(result, turn_capture)
         _persist_session_turn_result(session_id, result)
     except Exception as exc:
@@ -739,6 +745,44 @@ def create_chat_agent() -> Any:
     from agent import SelfEvolvingAgent
 
     return SelfEvolvingAgent(mode="chat")
+
+
+def _run_session_continuation_loop(
+    agent: Any,
+    *,
+    session_id: str,
+    initial_prompt: str,
+    history_messages: list[dict[str, Any]],
+) -> Any:
+    max_turns = _web_chat_max_continuation_turns()
+    prompt = str(initial_prompt or "").strip()
+    if _is_continue_request(prompt):
+        resume_goal = _latest_unfinished_task_goal(session_id)
+        if resume_goal:
+            prompt = f"继续完成上一任务：{resume_goal}"
+
+    result: Any = None
+    for turn_index in range(1, max_turns + 1):
+        stop_reason = _get_session_stop_reason(session_id)
+        if stop_reason:
+            return _build_stopped_turn_result(stop_reason)
+
+        result = agent.run_single_turn(initial_prompt=prompt)
+        if _is_session_turn_terminal(result):
+            return _annotate_continuation_result(result, turn_index, max_turns, reached_limit=False)
+
+        if turn_index >= max_turns:
+            return _build_continuation_limit_result(result, turn_index, max_turns)
+
+        prompt = _build_followup_prompt(
+            original_prompt=initial_prompt,
+            effective_prompt=prompt,
+            latest_result=result,
+            history_messages=history_messages,
+            turn_index=turn_index,
+        )
+
+    return _build_continuation_limit_result(result, max_turns, max_turns)
 
 
 def _persist_session_turn_result(session_id: str, result: Any) -> None:
@@ -1486,6 +1530,163 @@ def _build_stopped_turn_result(reason: str) -> dict[str, Any]:
     }
 
 
+def _web_chat_max_continuation_turns() -> int:
+    try:
+        value = int(getattr(get_web_chat_config(), "max_continuation_turns", 4) or 4)
+    except Exception:
+        value = 4
+    return max(1, value)
+
+
+def _is_continue_request(text: Any) -> bool:
+    normalized = re.sub(r"\s+", "", str(text or "").strip().lower())
+    return normalized in {
+        "继续",
+        "接着",
+        "继续做",
+        "继续执行",
+        "继续推进",
+        "接着做",
+        "继续上一轮",
+        "继续上一个任务",
+        "continue",
+        "goon",
+    }
+
+
+def _latest_unfinished_task_goal(session_id: str) -> str:
+    with _CHAT_STATE_LOCK:
+        payload = load_chat_state(PROJECT_ROOT)
+        conversation = _find_conversation_entry(payload, session_id)
+        if conversation is None:
+            return ""
+        active_task = _normalize_session_active_task(
+            conversation.get("active_task") or conversation.get("activeTask")
+        )
+    if not isinstance(active_task, dict):
+        return ""
+    status = str(active_task.get("status") or "").strip().lower()
+    if status in {"done", "idle"}:
+        return ""
+    goal = trim_lines(active_task.get("goal") or active_task.get("title") or "", max_lines=2)
+    if _is_continue_request(goal):
+        return ""
+    return goal
+
+
+def _is_session_turn_terminal(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return True
+    if bool(result.get("stop_requested")):
+        return True
+
+    status = str(result.get("status") or "").strip().lower()
+    contract = build_chat_coding_result_contract(result)
+    outcome = str(contract.get("outcome") or "").strip().lower()
+    visible = _visible_reply_candidate(result)
+    tool_count = int(result.get("tool_call_count") or 0)
+    tool_trace = list(result.get("tool_trace") or [])
+
+    if status in {"failed", "timeout", "stopped"}:
+        return True
+    explicit_outcome = str(result.get("outcome") or result.get("task_outcome") or "").strip().lower()
+
+    if outcome in {"done", "blocked", "needs_input"}:
+        return True
+    if explicit_outcome == "progress":
+        return False
+    if not visible and (tool_count > 0 or tool_trace):
+        return False
+    if not visible:
+        return False
+    return True
+
+
+def _visible_reply_candidate(result: dict[str, Any]) -> str:
+    return _sanitize_message_content(
+        "assistant",
+        result.get("raw_output") or result.get("summary") or result.get("error") or result.get("message") or "",
+    )
+
+
+def _annotate_continuation_result(
+    result: Any,
+    turn_count: int,
+    max_turns: int,
+    *,
+    reached_limit: bool,
+) -> Any:
+    if not isinstance(result, dict):
+        return result
+    metadata = dict(result.get("metadata") or {}) if isinstance(result.get("metadata"), dict) else {}
+    metadata.update(
+        {
+            "continuation_turn_count": turn_count,
+            "max_continuation_turns": max_turns,
+            "continuation_limit_reached": reached_limit,
+        }
+    )
+    result["metadata"] = metadata
+    return result
+
+
+def _build_continuation_limit_result(result: Any, turn_count: int, max_turns: int) -> dict[str, Any]:
+    base = dict(result or {}) if isinstance(result, dict) else {}
+    contract = build_chat_coding_result_contract(base)
+    visible = _visible_reply_candidate(base) if base else ""
+    latest = trim_lines(visible, max_lines=4)
+    raw_next_action = contract.get("next_action") or base.get("recommended_next_action") or ""
+    next_action = trim_lines(raw_next_action or "发送“继续”以继续同一任务。", max_lines=2)
+    summary_lines = [
+        f"已达到 Web Chat 任务级持续上限（{max_turns} 轮），本次先暂停，避免后台无限运行。",
+    ]
+    if latest and "本轮没有产生可见回复" not in latest:
+        summary_lines.append(f"当前进展：{latest}")
+    if next_action and raw_next_action:
+        summary_lines.append(f"下一步：{next_action}；也可以发送“继续”以继续同一任务。")
+    else:
+        summary_lines.append("下一步：发送“继续”以继续同一任务。")
+
+    base.update(
+        {
+            "status": "completed",
+            "summary": "\n".join(summary_lines),
+            "raw_output": "\n".join(summary_lines),
+            "outcome": "progress",
+            "recommended_next_action": next_action or "发送“继续”以继续同一任务。",
+        }
+    )
+    return _annotate_continuation_result(base, turn_count, max_turns, reached_limit=True)
+
+
+def _build_followup_prompt(
+    *,
+    original_prompt: str,
+    effective_prompt: str,
+    latest_result: Any,
+    history_messages: list[dict[str, Any]],
+    turn_index: int,
+) -> str:
+    next_action = ""
+    if isinstance(latest_result, dict):
+        contract = build_chat_coding_result_contract(latest_result)
+        next_action = trim_lines(
+            contract.get("next_action") or latest_result.get("recommended_next_action") or "",
+            max_lines=2,
+        )
+    goal = str(effective_prompt or original_prompt or "").strip()
+    if _is_continue_request(goal):
+        goal = _latest_user_message(history_messages) or str(original_prompt or "").strip()
+    lines = [
+        f"继续完成同一个用户目标：{goal}",
+        f"上一内部回合仍未完成用户目标（第 {turn_index} 轮）。",
+        "不要只输出 <state>；如果目标已完成，请给出可见汇报并标记 outcome=done。",
+    ]
+    if next_action:
+        lines.append(f"优先执行上一轮下一步：{next_action}")
+    return "\n".join(lines)
+
+
 def _build_session_active_task(
     session_id: str,
     result: Any,
@@ -1559,6 +1760,17 @@ def _build_session_active_task(
     existing_turn_count = (
         _coerce_nonnegative_int(existing_task.get("turn_count") or 0) if isinstance(existing_task, dict) else 0
     )
+    existing_goal = (
+        trim_lines(existing_task.get("goal") or existing_task.get("title") or "", max_lines=2)
+        if isinstance(existing_task, dict)
+        else ""
+    )
+    effective_goal = existing_goal if _is_continue_request(last_user_message) and existing_goal else last_user_message
+    effective_title = (
+        existing_goal
+        if _is_continue_request(last_user_message) and existing_goal
+        else (last_user_message or latest_summary)
+    )
     metadata = dict(existing_metadata)
     metadata.update(
         {
@@ -1579,8 +1791,8 @@ def _build_session_active_task(
         else f"{session_id}-coding-task",
         "kind": "coding",
         "status": task_status,
-        "title": trim_lines(last_user_message or latest_summary, max_lines=2),
-        "goal": trim_lines(last_user_message, max_lines=2),
+        "title": trim_lines(effective_title, max_lines=2),
+        "goal": trim_lines(effective_goal, max_lines=2),
         "read_files": read_files,
         "changed_files": changed_files,
         "verification_status": verification_status,

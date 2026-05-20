@@ -83,6 +83,13 @@ def test_safe_remote_profile_applies_remote_guardrails():
     assert config.agent.max_iterations == 60
 
 
+def test_web_chat_continuation_limit_is_configurable():
+    config = make_config(web_chat__max_continuation_turns=2)
+
+    assert config.web_chat.max_continuation_turns == 2
+    assert config.model_dump_simple()["web_chat"]["max_continuation_turns"] == 2
+
+
 def test_debug_profile_enables_debug_tracing():
     config = make_config(runtime__profile="debug")
 

@@ -511,6 +511,17 @@ class AgentConfig(BaseModel):
         return value
 
 
+class WebChatConfig(BaseModel):
+    """Web Chat 任务级持续执行配置。"""
+    model_config = ConfigDict(extra="ignore")
+
+    max_continuation_turns: int = Field(
+        default=4,
+        ge=1,
+        description="一次 Web Chat 用户消息最多连续推进多少个 single_turn",
+    )
+
+
 # ============================================================================
 # 上下文压缩配置
 # ============================================================================
@@ -1574,6 +1585,7 @@ class AppConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     avatar: AvatarConfig = Field(default_factory=AvatarConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    web_chat: WebChatConfig = Field(default_factory=WebChatConfig)
     context_compression: ContextCompressionConfig = Field(
         default_factory=ContextCompressionConfig
     )
@@ -1637,6 +1649,9 @@ class AppConfig(BaseModel):
                 "name": self.agent.name,
                 "awake_interval": self.agent.awake_interval,
                 "max_iterations": self.agent.max_iterations,
+            },
+            "web_chat": {
+                "max_continuation_turns": self.web_chat.max_continuation_turns,
             },
             "compression": {
                 "enabled": self.context_compression.enabled,

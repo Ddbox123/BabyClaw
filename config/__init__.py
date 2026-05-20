@@ -44,6 +44,7 @@ from .models import (
     ToolsShellConfig,
     ToolsWebConfig,
     UIConfig,
+    WebChatConfig,
     resolve_api_key,
 )
 from .providers import (
@@ -108,6 +109,7 @@ __all__ = [
     "ToolsShellConfig",
     "ToolsWebConfig",
     "UIConfig",
+    "WebChatConfig",
     "MODEL_PRESETS",
     "denormalize_config_dict",
     "get_config",

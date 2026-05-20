@@ -282,6 +282,9 @@ default_shell_mode = "chat"
 default_headless_mode = "self_evolution"
 explicit_evolution_request_behavior = "route_to_workbench"
 
+[web_chat]
+max_continuation_turns = 4
+
 [context_compression]
 enabled = true
 max_token_limit = 32768
