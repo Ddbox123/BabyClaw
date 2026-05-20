@@ -14,6 +14,8 @@ from core.infrastructure.workspace_manager import get_workspace
 class EvolutionGovernor:
     """Enforce mutation boundaries during active evolution transactions."""
 
+    _RISKY_PATH_PREFIXES = ("core/", "tools/", "config/", "workspace/prompts/")
+    _RISKY_PATHS = {"agent.py", "reset.py"}
     _FILE_PATH_TOOLS = {
         "write_file_tool",
         "create_file",
@@ -35,11 +37,18 @@ class EvolutionGovernor:
         tool_args: dict,
         active_txn_id: str | None,
     ) -> str | None:
-        if not active_txn_id:
-            return None
         targets = self._resolve_targets(tool_name, tool_args)
         if not targets:
             return None
+        if not active_txn_id:
+            risky = [path for path in targets if self._is_risky_target(path)]
+            if not risky:
+                return None
+            risky_display = ", ".join(self._to_project_relative(path) for path in risky)
+            return (
+                "[演化治理] 这个写入会修改高风险演化路径，必须先调用 "
+                f"`open_evolution_transaction_tool` 开启事务。目标: {risky_display}"
+            )
         allowed_roots = self._allowed_roots()
         denied = [path for path in targets if not self._is_under_allowed_roots(path, allowed_roots)]
         if not denied:
@@ -223,6 +232,11 @@ class EvolutionGovernor:
         if candidate.is_absolute():
             return candidate.resolve()
         return (get_workspace().project_root / candidate).resolve()
+
+    @classmethod
+    def _is_risky_target(cls, path: Path) -> bool:
+        relative = cls._to_project_relative(path)
+        return relative in cls._RISKY_PATHS or relative.startswith(cls._RISKY_PATH_PREFIXES)
 
     @staticmethod
     def _to_project_relative(path: Path) -> str:

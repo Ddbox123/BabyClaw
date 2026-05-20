@@ -4,9 +4,7 @@ agent.py 协议层回归测试
 """
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
-from pathlib import Path
-import subprocess
+from unittest.mock import MagicMock
 import json
 
 import pytest
@@ -1631,9 +1629,14 @@ class TestLocalProviderBootstrap:
         config = Settings(
             None,
             **{
-                "llm.profiles.primary.provider_id": "remote_main",
-                "llm.providers.remote_main.kind": "local",
-                "llm.providers.remote_main.api_key": "",
+                "llm.profiles.primary.model": "",
+                "llm.profiles.primary.api_key_env": "",
+                "llm.profiles.primary.provider.kind": "local",
+                "llm.profiles.primary.provider.api_key": "",
+                "llm.profiles.primary.provider.api_key_env": "",
+                "llm.profiles.primary.provider.base_url": "http://localhost:11434/v1",
+                "llm.profiles.primary.provider.compat_mode": "openai",
+                "llm.profiles.primary.provider.requires_api_key": False,
             },
         )
         agent = SelfEvolvingAgent(config=config.config)
@@ -1707,10 +1710,14 @@ class TestResolvedApiKeyUsage:
         config = Settings(
             None,
             **{
-                "llm.profiles.primary.provider_id": "default",
-                "llm.providers.default.kind": "minimax",
-                "llm.providers.default.api_key": "",
-                "llm.providers.default.base_url": "https://api.minimaxi.com/v1",
+                "llm.profiles.primary.model": "",
+                "llm.profiles.primary.api_key_env": "",
+                "llm.profiles.primary.provider.kind": "minimax",
+                "llm.profiles.primary.provider.api_key": "",
+                "llm.profiles.primary.provider.api_key_env": "MINIMAX_API_KEY",
+                "llm.profiles.primary.provider.base_url": "https://api.minimaxi.com/v1",
+                "llm.profiles.primary.provider.compat_mode": "openai",
+                "llm.profiles.primary.provider.requires_api_key": True,
             },
         )
         agent = SelfEvolvingAgent(config=config.config)

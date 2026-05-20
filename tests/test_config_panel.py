@@ -683,6 +683,7 @@ def test_build_effective_config_rejects_reasoning_chat_without_supported_state_f
     profile["contract"] = "reasoning_chat"
     profile["tool_calling_mode"] = "auto"
     profile["reasoning_state_field"] = ""
+    profile["strict_compatibility"] = True
 
     with pytest.raises(ValueError, match="reasoning_state_field"):
         build_effective_config(public_config)
@@ -697,6 +698,7 @@ def test_build_effective_config_accepts_reasoning_chat_with_reasoning_content():
     profile["contract"] = "reasoning_chat"
     profile["tool_calling_mode"] = "auto"
     profile["reasoning_state_field"] = "reasoning_content"
+    profile["strict_compatibility"] = True
 
     config = build_effective_config(public_config)
 

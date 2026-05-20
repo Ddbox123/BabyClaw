@@ -721,6 +721,43 @@ class TestToolExecutorErrorHandling:
         assert action is None
         assert "[演化治理]" in str(result)
 
+    def test_risky_write_without_active_txn_is_blocked_before_tool_runs(self, executor, monkeypatch, tmp_path):
+        project_root = tmp_path / "project"
+        project_root.mkdir(parents=True, exist_ok=True)
+
+        class _FakeWorkspace:
+            def __init__(self, root: Path):
+                self.project_root = root
+
+            def get_prompt_path(self, name: str) -> Path:
+                return self.project_root / "workspace" / "prompts" / name
+
+        evolution = SimpleNamespace(
+            allowed_target_dirs=["workspace/prompts/"],
+            audit_log_path="workspace/evolution/audit.jsonl",
+        )
+        monkeypatch.setattr(governor_module, "get_config", lambda: SimpleNamespace(evolution=evolution))
+        monkeypatch.setattr(governor_module, "get_workspace", lambda: _FakeWorkspace(project_root))
+        governor_module._governor = None
+
+        called = {"value": False}
+
+        def fake_write(file_path, content):
+            called["value"] = True
+            return "should not run"
+
+        executor.register_tool("write_file_tool", fake_write, timeout=5)
+        reset_session_state()
+
+        result, action = executor.execute(
+            "write_file_tool",
+            {"file_path": "core/runtime.py", "content": "x"},
+        )
+
+        assert action is None
+        assert called["value"] is False
+        assert "open_evolution_transaction_tool" in str(result)
+
 
 class TestToolExecutorConvenience:
     """便捷功能测试"""
