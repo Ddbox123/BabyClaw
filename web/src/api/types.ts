@@ -16,6 +16,36 @@ export type LogRoot = {
   id: string;
   path: string;
   exists: boolean;
+  summary: {
+    health: string;
+    fileCount: number;
+    directoryCount: number;
+    sizeBytes: number;
+    lastModifiedAt: string;
+    latestPath: string;
+    userGuide: string;
+    agentGuide: string;
+  };
+};
+
+export type LogDiagnostics = {
+  severity: "error" | "warning" | "info" | string;
+  lineCount: number;
+  nonEmptyLineCount: number;
+  errorCount: number;
+  warningCount: number;
+  firstSignalLine: number | null;
+  firstSignalPreview: string;
+  lastSignalLine: number | null;
+  lastSignalPreview: string;
+  structuredEventCount: number;
+  topEventTypes: Array<{
+    type: string;
+    count: number;
+  }>;
+  userSummary: string;
+  agentHint: string;
+  suggestedNextStep: string;
 };
 
 export type RuntimeSceneListItem = {
@@ -101,6 +131,7 @@ export type LogFileContent = FileContent & {
   rootId: string;
   rootPath: string;
   relativePath: string;
+  diagnostics: LogDiagnostics;
 };
 
 export type LogDeleteResponse = {

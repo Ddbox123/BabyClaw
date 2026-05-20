@@ -9,6 +9,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from core.web.services.log_diagnostics import analyze_log_content
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 LAUNCHER_STATE_PATH = PROJECT_ROOT / ".runtime" / "launcher" / "state.json"
@@ -137,6 +139,7 @@ def read_runtime_scene_file(scene_id: str, relative_path: str) -> dict:
         "language": LANGUAGE_BY_SUFFIX.get(file_path.suffix.lower(), "text"),
         "content": content,
         "truncated": truncated,
+        "diagnostics": _analyze_runtime_scene_content(scene_id, relative, content),
     }
 
 
@@ -234,6 +237,21 @@ def _scene_dirs() -> list[Path]:
     if not runtime_scene_root.exists() or not runtime_scene_root.is_dir():
         return []
     return sorted([path for path in runtime_scene_root.iterdir() if path.is_dir()], reverse=True)
+
+
+def _analyze_runtime_scene_content(scene_id: str, relative_path: str, content: str) -> dict[str, Any]:
+    return analyze_log_content(
+        anchor=f"runtime_scenes/{scene_id}/{relative_path}",
+        content=content,
+        normal_summary="这份原始日志未发现明显错误或警告，可作为运行现场的补充证据。",
+        empty_summary="这份原始日志为空，暂时不能作为诊断证据。",
+        error_summary_prefix="这份原始日志发现 ",
+        warning_summary_prefix="这份原始日志发现 ",
+        error_next_step="打开错误筛选，围绕第 {line} 行对照左侧统一时间线和 rawRefs。",
+        warning_next_step="打开警告筛选，把第 {line} 行附近的重试/超时与 timeline 事件对齐。",
+        structured_next_step="按结构化事件类型回到统一时间线，确认这份原始日志对应的组件阶段。",
+        fallback_next_step="如当前问题仍未解释，继续查看同一运行现场的其它 raw 日志。",
+    )
 
 
 def _load_scene_manifest(scene_dir: Path) -> dict:

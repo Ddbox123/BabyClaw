@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
+
+from core.web.services.log_diagnostics import analyze_log_content
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 MAX_TREE_DEPTH = 6
 MAX_TEXT_CHARS = 200_000
+MAX_ROOT_SUMMARY_ITEMS = 20_000
 
 LOG_ROOTS = (
     {"id": "runtime_scenes", "path": "logs/runtime_scenes"},
@@ -21,8 +26,10 @@ LANGUAGE_BY_SUFFIX = {
     ".html": "html",
     ".js": "javascript",
     ".json": "json",
+    ".jsonl": "json",
     ".log": "text",
     ".md": "markdown",
+    ".ps1": "powershell",
     ".py": "python",
     ".text": "text",
     ".toml": "toml",
@@ -31,6 +38,25 @@ LANGUAGE_BY_SUFFIX = {
     ".txt": "text",
     ".yaml": "yaml",
     ".yml": "yaml",
+}
+
+ROOT_GUIDES = {
+    "runtime_scenes": {
+        "userGuide": "优先按一次运行查看统一时间线，再打开关联原始日志。",
+        "agentGuide": "先读 runtime scene timeline；需要上下文时再追 rawRefs 指向的原始日志。",
+    },
+    "runtime_logs": {
+        "userGuide": "适合检查当前后端、launcher 和运行器即时输出。",
+        "agentGuide": "排查启动、关闭、端口、后台服务问题时优先读取这里；不要在此根下直接处理 runtime_scenes。",
+    },
+    "workspace_logs": {
+        "userGuide": "适合回看工作区内生成的转录、轮次和辅助运行记录。",
+        "agentGuide": "用于追踪工作流产物、转录和工具辅助脚本输出，通常作为 conversation log 的补充证据。",
+    },
+    "conversation_logs": {
+        "userGuide": "适合回看 agent 会话、工具调用、子 agent 输出和轮次结论。",
+        "agentGuide": "排查 agent 漂移、重复工具、停止/继续、委派和验证行为时优先读取 conversation_*.jsonl 与 debug_*.log。",
+    },
 }
 
 
@@ -45,6 +71,7 @@ def list_log_roots() -> list[dict]:
                 "id": root["id"],
                 "path": root["path"],
                 "exists": root_path.exists() and root_path.is_dir(),
+                "summary": _summarize_log_root(root["id"], root_path),
             }
         )
     return roots
@@ -97,6 +124,7 @@ def read_log_file(root_id: str, relative_path: str) -> dict:
         "language": LANGUAGE_BY_SUFFIX.get(file_path.suffix.lower(), "text"),
         "content": content,
         "truncated": truncated,
+        "diagnostics": _analyze_log_content(root_meta["id"], relative_path, content),
     }
 
 
@@ -178,8 +206,95 @@ def _root_meta(root_id: str) -> dict:
                 "id": root["id"],
                 "path": root["path"],
                 "exists": root_path.exists() and root_path.is_dir(),
+                "summary": _summarize_log_root(root_id, root_path),
             }
     raise ValueError(f"Unknown log root: {root_id}")
+
+
+def _summarize_log_root(root_id: str, root_path: Path) -> dict:
+    guide = ROOT_GUIDES.get(root_id, {})
+    if not root_path.exists() or not root_path.is_dir():
+        return {
+            "health": "missing",
+            "fileCount": 0,
+            "directoryCount": 0,
+            "sizeBytes": 0,
+            "lastModifiedAt": "",
+            "latestPath": "",
+            "userGuide": guide.get("userGuide", ""),
+            "agentGuide": guide.get("agentGuide", ""),
+        }
+
+    file_count = 0
+    directory_count = 0
+    size_bytes = 0
+    latest_path = ""
+    latest_mtime = 0.0
+    scanned = 0
+    for child in _iter_log_children(root_id, root_path):
+        if scanned >= MAX_ROOT_SUMMARY_ITEMS:
+            break
+        scanned += 1
+        try:
+            stat = child.stat()
+        except OSError:
+            continue
+        if child.is_dir():
+            directory_count += 1
+            continue
+        if not child.is_file():
+            continue
+        file_count += 1
+        size_bytes += int(stat.st_size)
+        if stat.st_mtime >= latest_mtime:
+            latest_mtime = stat.st_mtime
+            latest_path = child.relative_to(root_path).as_posix()
+
+    return {
+        "health": "empty" if file_count == 0 and directory_count == 0 else "active",
+        "fileCount": file_count,
+        "directoryCount": directory_count,
+        "sizeBytes": size_bytes,
+        "lastModifiedAt": _format_mtime(latest_mtime),
+        "latestPath": latest_path,
+        "userGuide": guide.get("userGuide", ""),
+        "agentGuide": guide.get("agentGuide", ""),
+    }
+
+
+def _analyze_log_content(root_id: str, relative_path: str, content: str) -> dict[str, Any]:
+    return analyze_log_content(
+        anchor=f"{root_id}/{relative_path}",
+        content=content,
+        normal_summary="未发现明显错误或警告，可先把它作为正常路径或补充证据。",
+        empty_summary="当前日志为空，暂时不能作为诊断证据。",
+        error_summary_prefix="发现 ",
+        warning_summary_prefix="发现 ",
+        error_next_step="打开错误筛选，围绕第 {line} 行向前找触发动作、向后找失败结果。",
+        warning_next_step="打开警告筛选，确认第 {line} 行附近是否出现重试、超时或被阻断动作。",
+        structured_next_step="按结构化事件类型查看会话阶段，再与相邻 debug/runtime 日志交叉验证。",
+        fallback_next_step="如当前问题仍未解释，切到相邻日志分组查找同一时间段的运行现场或会话记录。",
+    )
+
+
+def _iter_log_children(root_id: str, root_path: Path):
+    stack = sorted(root_path.iterdir(), key=_sort_key, reverse=True)
+    while stack:
+        child = stack.pop()
+        if _should_skip_child(root_id, child, root_path):
+            continue
+        yield child
+        if child.is_dir():
+            try:
+                stack.extend(sorted(child.iterdir(), key=_sort_key, reverse=True))
+            except OSError:
+                continue
+
+
+def _format_mtime(value: float) -> str:
+    if value <= 0:
+        return ""
+    return datetime.fromtimestamp(value, UTC).isoformat().replace("+00:00", "Z")
 
 
 def _resolve_log_root(root_id: str) -> Path:
@@ -220,7 +335,7 @@ def _should_skip_child(root_id: str, child: Path, root_path: Path) -> bool:
         relative = child.relative_to(root_path).as_posix()
     except ValueError:
         return False
-    return relative == "runtime_scenes"
+    return relative == "runtime_scenes" or relative.startswith("runtime_scenes/")
 
 
 def _assert_allowed_runtime_log_path(root_id: str, relative_path: str) -> None:

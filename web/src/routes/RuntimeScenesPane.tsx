@@ -15,6 +15,7 @@ import {
 import { fetchJson } from "../api/client";
 import { queryKeys } from "../api/queryKeys";
 import {
+  LogDiagnostics,
   LogFileContent,
   LogRoot,
   RuntimeSceneDeleteResponse,
@@ -107,6 +108,84 @@ function describeError(error: unknown, fallback: string) {
     return `${fallback}: ${error.message}`;
   }
   return fallback;
+}
+
+function severityLabel(severity: string, lang: "zh" | "en") {
+  if (severity === "error") {
+    return lang === "zh" ? "有错误" : "Errors";
+  }
+  if (severity === "warning") {
+    return lang === "zh" ? "有警告" : "Warnings";
+  }
+  return lang === "zh" ? "未见明显异常" : "No obvious issues";
+}
+
+function severityClassName(severity: string) {
+  if (severity === "error") {
+    return `${styles.diagnosticPill} ${styles.diagnosticPillError}`;
+  }
+  if (severity === "warning") {
+    return `${styles.diagnosticPill} ${styles.diagnosticPillWarning}`;
+  }
+  return `${styles.diagnosticPill} ${styles.diagnosticPillInfo}`;
+}
+
+function renderDiagnosticsPanel(diagnostics: LogDiagnostics, lang: "zh" | "en") {
+  const firstSignalLabel =
+    diagnostics.firstSignalLine === null || diagnostics.firstSignalLine === undefined
+      ? lang === "zh"
+        ? "无"
+        : "None"
+      : `${lang === "zh" ? "第" : "Line "}${diagnostics.firstSignalLine}${lang === "zh" ? " 行" : ""}`;
+  return (
+    <section className={styles.diagnosticsPanel}>
+      <div className={styles.diagnosticsHeader}>
+        <div>
+          <p className={styles.sidebarEyebrow}>{lang === "zh" ? "原始日志摘要" : "Raw Log Summary"}</p>
+          <h2 className={styles.sidebarTitle}>
+            {lang === "zh" ? "先看信号，再对照时间线" : "Inspect signals, then compare timeline"}
+          </h2>
+        </div>
+        <span className={severityClassName(diagnostics.severity)}>
+          {severityLabel(diagnostics.severity, lang)}
+        </span>
+      </div>
+      <p className={styles.diagnosticsSummary}>{diagnostics.userSummary}</p>
+      <div className={styles.diagnosticMetricGrid}>
+        <span>
+          <strong>{diagnostics.errorCount}</strong>
+          {lang === "zh" ? " 错误" : " errors"}
+        </span>
+        <span>
+          <strong>{diagnostics.warningCount}</strong>
+          {lang === "zh" ? " 警告" : " warnings"}
+        </span>
+        <span>
+          <strong>{diagnostics.lineCount}</strong>
+          {lang === "zh" ? " 行" : " lines"}
+        </span>
+        <span>
+          <strong>{diagnostics.structuredEventCount}</strong>
+          {lang === "zh" ? " 结构事件" : " structured"}
+        </span>
+      </div>
+      <div className={styles.diagnosticHintGrid}>
+        <article>
+          <span>{lang === "zh" ? "首个信号" : "First signal"}</span>
+          <strong>{firstSignalLabel}</strong>
+          {diagnostics.firstSignalPreview ? <p>{diagnostics.firstSignalPreview}</p> : null}
+        </article>
+        <article>
+          <span>{lang === "zh" ? "建议动作" : "Suggested next step"}</span>
+          <p>{diagnostics.suggestedNextStep}</p>
+        </article>
+        <article>
+          <span>{lang === "zh" ? "Agent 排查锚点" : "Agent investigation anchor"}</span>
+          <code>{diagnostics.agentHint}</code>
+        </article>
+      </div>
+    </section>
+  );
 }
 
 function formatTimestamp(value: string, lang: "zh" | "en") {
@@ -906,14 +985,17 @@ export function RuntimeScenesPane({ activeRoot, lang, t, statusLabel }: RuntimeS
                   ) : sceneContentQuery.isPending && !sceneContentQuery.data ? (
                     <div className={styles.panelState}>{t("loadingFilePreview")}</div>
                   ) : sceneContentQuery.data ? (
-                    <FilePreview
-                      file={sceneContentQuery.data}
-                      changed={false}
-                      sourceLabel={activeRoot.path}
-                      headerActions={null}
-                      highlightAsLog
-                      severityFilter={severityFilter}
-                    />
+                    <div className={styles.logPreviewStack}>
+                      {renderDiagnosticsPanel(sceneContentQuery.data.diagnostics, lang)}
+                      <FilePreview
+                        file={sceneContentQuery.data}
+                        changed={false}
+                        sourceLabel={activeRoot.path}
+                        headerActions={null}
+                        highlightAsLog
+                        severityFilter={severityFilter}
+                      />
+                    </div>
                   ) : (
                     <div className={styles.panelState}>{t("runtimeSceneNoRawLogs")}</div>
                   )}

@@ -90,6 +90,17 @@
   overflow-wrap: anywhere;
 }
 
+.rootButtonGuide,
+.rootButtonStats {
+  color: var(--fg-secondary);
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.rootButtonStats {
+  color: var(--fg-tertiary);
+}
+
 .rootState {
   color: #8fd0b5;
   font-size: 0.78rem;
@@ -326,6 +337,126 @@
   overflow: hidden;
   padding: 18px 20px;
   background: rgba(27, 31, 35, 0.92);
+}
+
+.logPreviewStack {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 14px;
+  min-height: 0;
+  height: 100%;
+}
+
+.diagnosticsPanel {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: rgba(21, 24, 27, 0.86);
+}
+
+.diagnosticsHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.diagnosticsSummary {
+  margin: 0;
+  color: var(--fg-primary);
+  line-height: 1.5;
+}
+
+.diagnosticPill {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-soft);
+  font-size: 0.8rem;
+}
+
+.diagnosticPillError {
+  color: #f0a6a6;
+  border-color: rgba(192, 94, 94, 0.24);
+  background: rgba(192, 94, 94, 0.14);
+}
+
+.diagnosticPillWarning {
+  color: #e4bd7b;
+  border-color: rgba(216, 167, 91, 0.24);
+  background: rgba(216, 167, 91, 0.12);
+}
+
+.diagnosticPillInfo {
+  color: #8fd0b5;
+  border-color: rgba(124, 155, 150, 0.24);
+  background: rgba(124, 155, 150, 0.12);
+}
+
+.diagnosticMetricGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.diagnosticMetricGrid span,
+.diagnosticHintGrid article {
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(27, 31, 35, 0.72);
+}
+
+.diagnosticMetricGrid span {
+  padding: 10px;
+  color: var(--fg-secondary);
+  font-size: 0.82rem;
+}
+
+.diagnosticMetricGrid strong {
+  color: var(--fg-primary);
+}
+
+.diagnosticHintGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1.2fr);
+  gap: 10px;
+}
+
+.diagnosticHintGrid article {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  padding: 12px;
+  min-width: 0;
+}
+
+.diagnosticHintGrid span {
+  color: var(--fg-tertiary);
+  font-size: 0.78rem;
+}
+
+.diagnosticHintGrid strong,
+.diagnosticHintGrid p,
+.diagnosticHintGrid code {
+  margin: 0;
+  color: var(--fg-secondary);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.diagnosticHintGrid code {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+
+.eventTypeList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .resizeHandle {

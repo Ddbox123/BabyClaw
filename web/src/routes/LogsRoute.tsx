@@ -26,7 +26,14 @@ import {
 
 import { fetchJson } from "../api/client";
 import { queryKeys } from "../api/queryKeys";
-import { FileTreeNode, LogDeleteResponse, LogFileContent, LogRoot, LogTreeResponse } from "../api/types";
+import {
+  FileTreeNode,
+  LogDeleteResponse,
+  LogDiagnostics,
+  LogFileContent,
+  LogRoot,
+  LogTreeResponse,
+} from "../api/types";
 import { FilePreview } from "../components/preview/FilePreview";
 import { useAppI18n } from "../i18n/useAppI18n";
 import { type LogSeverityFilter } from "../logs/logSeverity";
@@ -234,6 +241,125 @@ function describeError(error: unknown, fallback: string) {
     return `${fallback}: ${error.message}`;
   }
   return fallback;
+}
+
+function formatBytes(size: number) {
+  if (!Number.isFinite(size) || size <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB"];
+  let value = size;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+function formatTimestamp(value: string, lang: "zh" | "en") {
+  const text = String(value || "").trim();
+  if (!text) {
+    return lang === "zh" ? "未记录" : "Not recorded";
+  }
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) {
+    return text;
+  }
+  return new Intl.DateTimeFormat(lang === "zh" ? "zh-CN" : "en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(parsed);
+}
+
+function severityLabel(severity: string, lang: "zh" | "en") {
+  if (severity === "error") {
+    return lang === "zh" ? "有错误" : "Errors";
+  }
+  if (severity === "warning") {
+    return lang === "zh" ? "有警告" : "Warnings";
+  }
+  return lang === "zh" ? "未见明显异常" : "No obvious issues";
+}
+
+function severityClassName(severity: string) {
+  if (severity === "error") {
+    return `${styles.diagnosticPill} ${styles.diagnosticPillError}`;
+  }
+  if (severity === "warning") {
+    return `${styles.diagnosticPill} ${styles.diagnosticPillWarning}`;
+  }
+  return `${styles.diagnosticPill} ${styles.diagnosticPillInfo}`;
+}
+
+function renderDiagnosticsPanel(diagnostics: LogDiagnostics, lang: "zh" | "en") {
+  const firstSignalLabel =
+    diagnostics.firstSignalLine === null || diagnostics.firstSignalLine === undefined
+      ? lang === "zh"
+        ? "无"
+        : "None"
+      : `${lang === "zh" ? "第" : "Line "}${diagnostics.firstSignalLine}${lang === "zh" ? " 行" : ""}`;
+  return (
+    <section className={styles.diagnosticsPanel}>
+      <div className={styles.diagnosticsHeader}>
+        <div>
+          <p className={styles.sidebarEyebrow}>{lang === "zh" ? "诊断摘要" : "Diagnostic Summary"}</p>
+          <h2 className={styles.sidebarTitle}>
+            {lang === "zh" ? "先看这里，再读原文" : "Start here, then inspect raw log"}
+          </h2>
+        </div>
+        <span className={severityClassName(diagnostics.severity)}>
+          {severityLabel(diagnostics.severity, lang)}
+        </span>
+      </div>
+      <p className={styles.diagnosticsSummary}>{diagnostics.userSummary}</p>
+      <div className={styles.diagnosticMetricGrid}>
+        <span>
+          <strong>{diagnostics.errorCount}</strong>
+          {lang === "zh" ? " 错误" : " errors"}
+        </span>
+        <span>
+          <strong>{diagnostics.warningCount}</strong>
+          {lang === "zh" ? " 警告" : " warnings"}
+        </span>
+        <span>
+          <strong>{diagnostics.lineCount}</strong>
+          {lang === "zh" ? " 行" : " lines"}
+        </span>
+        <span>
+          <strong>{diagnostics.structuredEventCount}</strong>
+          {lang === "zh" ? " 结构事件" : " structured"}
+        </span>
+      </div>
+      <div className={styles.diagnosticHintGrid}>
+        <article>
+          <span>{lang === "zh" ? "首个信号" : "First signal"}</span>
+          <strong>{firstSignalLabel}</strong>
+          {diagnostics.firstSignalPreview ? <p>{diagnostics.firstSignalPreview}</p> : null}
+        </article>
+        <article>
+          <span>{lang === "zh" ? "建议动作" : "Suggested next step"}</span>
+          <p>{diagnostics.suggestedNextStep}</p>
+        </article>
+        <article>
+          <span>{lang === "zh" ? "Agent 排查锚点" : "Agent investigation anchor"}</span>
+          <code>{diagnostics.agentHint}</code>
+        </article>
+      </div>
+      {diagnostics.topEventTypes.length > 0 ? (
+        <div className={styles.eventTypeList}>
+          {diagnostics.topEventTypes.map((item) => (
+            <span key={`${item.type}:${item.count}`} className={styles.metaPill}>
+              {item.type} × {item.count}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
 }
 
 async function copyText(text: string) {
@@ -882,14 +1008,17 @@ export function LogsRoute() {
               ) : contentQuery.isPending && !contentQuery.data ? (
                 <div className={styles.emptySurface}>{t("loadingFilePreview")}</div>
               ) : contentQuery.data ? (
-                <FilePreview
-                  file={contentQuery.data}
-                  changed={false}
-                  sourceLabel={activeRoot.path}
-                  headerActions={previewActions}
-                  highlightAsLog
-                  severityFilter={severityFilter}
-                />
+                <div className={styles.logPreviewStack}>
+                  {renderDiagnosticsPanel(contentQuery.data.diagnostics, lang)}
+                  <FilePreview
+                    file={contentQuery.data}
+                    changed={false}
+                    sourceLabel={activeRoot.path}
+                    headerActions={previewActions}
+                    highlightAsLog
+                    severityFilter={severityFilter}
+                  />
+                </div>
               ) : (
                 <div className={styles.emptySurface}>{t("loadingFilePreview")}</div>
               )}
@@ -917,8 +1046,19 @@ export function LogsRoute() {
                 >
                   <span className={styles.rootButtonLabel}>{labelKey ? t(labelKey) : root.path}</span>
                   <span className={styles.rootButtonPath}>{root.path}</span>
+                  <span className={styles.rootButtonGuide}>{root.summary.userGuide}</span>
+                  <span className={styles.rootButtonStats}>
+                    {root.summary.fileCount} {lang === "zh" ? "个文件" : "files"} · {formatBytes(root.summary.sizeBytes)}
+                  </span>
+                  <span className={styles.rootButtonPath}>
+                    {root.summary.latestPath
+                      ? `${lang === "zh" ? "最近" : "Latest"}: ${root.summary.latestPath}`
+                      : lang === "zh"
+                        ? "暂无最近文件"
+                        : "No latest file"}
+                  </span>
                   <span className={root.exists ? styles.rootState : `${styles.rootState} ${styles.rootStateMissing}`}>
-                    {root.exists ? t("present") : t("missing")}
+                    {root.exists ? `${t("present")} · ${formatTimestamp(root.summary.lastModifiedAt, lang)}` : t("missing")}
                   </span>
                 </button>
               );
