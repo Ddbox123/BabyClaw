@@ -1202,6 +1202,7 @@ export function ChatCodingRoute() {
                 messages={detail.messages}
                 taskSummary={detail.taskSummary}
                 defaultFileContext={detail.defaultFileContext}
+                showHeader={false}
                 showSessionOverview={false}
                 stats={conversationStats}
                 composerValue={activeDraft}

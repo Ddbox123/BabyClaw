@@ -31,6 +31,7 @@ type ConversationViewProps = {
   }>;
   headerActions?: ReactNode;
   supplementalContent?: ReactNode;
+  showHeader?: boolean;
   showSessionOverview?: boolean;
   autoScrollToLatest?: boolean;
   composerValue: string;
@@ -64,6 +65,7 @@ export function ConversationView({
   stats,
   headerActions,
   supplementalContent,
+  showHeader = true,
   showSessionOverview = true,
   autoScrollToLatest = true,
   composerValue,
@@ -292,16 +294,18 @@ export function ConversationView({
 
   return (
     <div className={styles.surface}>
-      <div className={styles.header}>
-        <div>
-          <p className={styles.eyebrow}>{eyebrowLabel ?? t("agentSession")}</p>
-          <h2 className={styles.title}>{title}</h2>
+      {showHeader ? (
+        <div className={styles.header}>
+          <div>
+            <p className={styles.eyebrow}>{eyebrowLabel ?? t("agentSession")}</p>
+            <h2 className={styles.title}>{title}</h2>
+          </div>
+          <div className={styles.headerControls}>
+            {headerActions}
+            <span className={styles.phase}>{statusLabel(phase)}</span>
+          </div>
         </div>
-        <div className={styles.headerControls}>
-          {headerActions}
-          <span className={styles.phase}>{statusLabel(phase)}</span>
-        </div>
-      </div>
+      ) : null}
 
       {showSessionOverview && resolvedSummaryItems.length > 0 ? (
         <div className={styles.summaryGrid}>
