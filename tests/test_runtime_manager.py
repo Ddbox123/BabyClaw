@@ -600,6 +600,7 @@ def test_evolution_store_delete_snapshot_clears_active_and_repoints_latest(tmp_p
         return runs_dir, index_path
 
     monkeypatch.setattr(evolution_store, "_kind_paths", fake_kind_paths)
+    runs_dir.mkdir(parents=True, exist_ok=True)
 
     old = {
         "runId": "old-run",
@@ -636,6 +637,7 @@ def test_evolution_store_delete_corrupt_index_only_run_clears_index(tmp_path, mo
         return runs_dir, index_path
 
     monkeypatch.setattr(evolution_store, "_kind_paths", fake_kind_paths)
+    runs_dir.mkdir(parents=True, exist_ok=True)
 
     evolution_store.save_run_index("supervised", active_run_id="missing-run", latest_run_id="missing-run")
 
