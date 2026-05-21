@@ -26,6 +26,7 @@ import {
   ConfigSummary,
   EvolutionOverview,
   EvolutionRunActionResponse,
+  EvolutionRunDeleteResponse,
   EvolutionWorkbench,
   EvolutionProposalBulkDeleteResponse,
   EvolutionProposalDeleteResponse,
@@ -345,6 +346,20 @@ export function EvolutionRoute({ forcedTrack, forcedView }: EvolutionRouteProps)
       await invalidateSupervisedEvolution();
     },
   });
+  const deleteRunMutation = useMutation({
+    onMutate: () => {
+      setActionFeedback("");
+    },
+    mutationFn: (runId: string) =>
+      fetchJson<EvolutionRunDeleteResponse>(`/api/evolution/runs/${runId}`, {
+        method: "DELETE",
+      }),
+    onSuccess: async (payload) => {
+      setActionFeedback(payload.summary || "");
+      setLiveActiveRun(null);
+      await invalidateSupervisedEvolution();
+    },
+  });
   const invalidateSelfEvolution = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: queryKeys.evolutionSelfOverview() }),
@@ -553,13 +568,16 @@ export function EvolutionRoute({ forcedTrack, forcedView }: EvolutionRouteProps)
   const pauseSupervisedAction = monitoredRun?.actionStates?.pause;
   const resumeSupervisedAction = monitoredRun?.actionStates?.resume;
   const terminateSupervisedAction = monitoredRun?.actionStates?.terminate;
+  const deleteSupervisedAction = monitoredRun?.actionStates?.delete;
   const canPauseSupervisedRun = Boolean(monitoredRun && pauseSupervisedAction?.enabled);
   const canResumeSupervisedRun = Boolean(monitoredRun && resumeSupervisedAction?.enabled);
   const canTerminateSupervisedRun = Boolean(monitoredRun && terminateSupervisedAction?.enabled);
+  const canDeleteSupervisedRun = Boolean(monitoredRun && deleteSupervisedAction?.enabled);
   const supervisedControlError =
     pauseRunMutation.error?.message
     ?? resumeRunMutation.error?.message
     ?? terminateRunMutation.error?.message
+    ?? deleteRunMutation.error?.message
     ?? startRunMutation.error?.message
     ?? "";
   const monitoredSelfRun = latestSelfRunSnapshot ?? liveSelfRun;
@@ -1450,6 +1468,16 @@ export function EvolutionRoute({ forcedTrack, forcedView }: EvolutionRouteProps)
                       {terminateRunMutation.isPending ? <LoaderCircle size={15} /> : <Square size={15} />}
                       {t("terminateSupervisedRun")}
                     </button>
+                    <button
+                      type="button"
+                      className={styles.inlineAction}
+                      disabled={!canDeleteSupervisedRun || deleteRunMutation.isPending}
+                      title={disabledReason(deleteSupervisedAction) || undefined}
+                      onClick={() => monitoredRun && deleteRunMutation.mutate(monitoredRun.runId)}
+                    >
+                      {deleteRunMutation.isPending ? <LoaderCircle size={15} /> : <Trash2 size={15} />}
+                      {t("deleteSupervisedRun")}
+                    </button>
                   </div>
 
                   {actionFeedback ? <p className={styles.feedbackText}>{actionFeedback}</p> : null}
@@ -1462,6 +1490,9 @@ export function EvolutionRoute({ forcedTrack, forcedView }: EvolutionRouteProps)
                   ) : null}
                   {!canTerminateSupervisedRun && disabledReason(terminateSupervisedAction) && runStopping ? (
                     <p className={styles.noticeText}>{disabledReason(terminateSupervisedAction)}</p>
+                  ) : null}
+                  {!canDeleteSupervisedRun && disabledReason(deleteSupervisedAction) ? (
+                    <p className={styles.noticeText}>{disabledReason(deleteSupervisedAction)}</p>
                   ) : null}
 
                   <div className={styles.monitorSummary}>

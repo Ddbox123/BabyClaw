@@ -575,6 +575,16 @@ export type EvolutionActiveRunStreamEvent = {
   terminal?: boolean;
 };
 
+export type EvolutionRunDeleteResponse = {
+  deleted: boolean;
+  runId: string;
+  clearedActive: boolean;
+  clearedLatest: boolean;
+  activeRunId: string;
+  latestRunId: string;
+  summary: string;
+};
+
 export type SelfEvolutionRunStreamEvent = {
   type: "self_evolution_run";
   runId: string;
