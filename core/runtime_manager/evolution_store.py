@@ -95,6 +95,18 @@ def _kind_paths(kind: str) -> tuple[Path, Path]:
     raise ValueError(f"Unsupported evolution store kind: {kind}")
 
 
+def _normalize_run_id(run_id: str) -> str:
+    normalized = str(run_id or "").strip()
+    if (
+        not normalized
+        or "/" in normalized
+        or "\\" in normalized
+        or normalized in {".", ".."}
+    ):
+        raise ValueError("Invalid evolution run id.")
+    return normalized
+
+
 def _default_index() -> dict[str, Any]:
     now = _now_iso()
     return {
@@ -130,9 +142,10 @@ def save_run_index(kind: str, *, active_run_id: str = "", latest_run_id: str = "
 
 
 def persist_run_snapshot(kind: str, snapshot: dict[str, Any], *, active_run_id: str = "") -> dict[str, Any]:
-    run_id = str(snapshot.get("runId") or "").strip()
-    if not run_id:
-        raise ValueError("Run snapshot is missing runId.")
+    try:
+        run_id = _normalize_run_id(str(snapshot.get("runId") or ""))
+    except ValueError as exc:
+        raise ValueError("Run snapshot is missing runId.") from exc
     runs_dir, _ = _kind_paths(kind)
     payload = json.loads(json.dumps(snapshot, ensure_ascii=False))
     _atomic_write_json(runs_dir / f"{run_id}.json", payload)
@@ -141,12 +154,64 @@ def persist_run_snapshot(kind: str, snapshot: dict[str, Any], *, active_run_id: 
 
 
 def load_run_snapshot(kind: str, run_id: str) -> dict[str, Any] | None:
-    normalized = str(run_id or "").strip()
-    if not normalized:
+    try:
+        normalized = _normalize_run_id(run_id)
+    except ValueError:
         return None
     runs_dir, _ = _kind_paths(kind)
     payload = _load_json(runs_dir / f"{normalized}.json")
     return payload or None
+
+
+def _run_sort_key(payload: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(payload.get("updatedAt") or ""),
+        str(payload.get("startedAt") or ""),
+        str(payload.get("runId") or ""),
+    )
+
+
+def delete_run_snapshot(kind: str, run_id: str) -> dict[str, Any]:
+    normalized = _normalize_run_id(run_id)
+    runs_dir, _ = _kind_paths(kind)
+    target = runs_dir / f"{normalized}.json"
+    index = load_run_index(kind)
+    active_run_id = str(index.get("activeRunId") or "").strip()
+    latest_run_id = str(index.get("latestRunId") or "").strip()
+    existed = target.exists()
+
+    try:
+        target.unlink(missing_ok=True)
+    except OSError:
+        if target.exists():
+            raise
+
+    cleared_active = active_run_id == normalized
+    cleared_latest = latest_run_id == normalized
+    next_active_id = "" if cleared_active else active_run_id
+    next_latest_id = latest_run_id
+
+    if cleared_latest:
+        candidates: list[dict[str, Any]] = []
+        for path in sorted(runs_dir.glob("*.json")):
+            if path.name == target.name:
+                continue
+            payload = _load_json(path)
+            if payload:
+                candidates.append(payload)
+        next_latest_id = str(max(candidates, key=_run_sort_key).get("runId") or "") if candidates else ""
+
+    if existed or cleared_active or cleared_latest:
+        save_run_index(kind, active_run_id=next_active_id, latest_run_id=next_latest_id)
+
+    return {
+        "deleted": existed,
+        "runId": normalized,
+        "clearedActive": cleared_active,
+        "clearedLatest": cleared_latest,
+        "activeRunId": next_active_id,
+        "latestRunId": next_latest_id,
+    }
 
 
 def load_active_run_snapshot(kind: str) -> dict[str, Any] | None:
@@ -171,14 +236,7 @@ def load_latest_run_snapshot(kind: str) -> dict[str, Any] | None:
             candidates.append(payload)
     if not candidates:
         return None
-    return max(
-        candidates,
-        key=lambda item: (
-            str(item.get("updatedAt") or ""),
-            str(item.get("startedAt") or ""),
-            str(item.get("runId") or ""),
-        ),
-    )
+    return max(candidates, key=_run_sort_key)
 
 
 def build_evolution_summary() -> dict[str, Any]:

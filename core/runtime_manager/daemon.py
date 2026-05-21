@@ -668,6 +668,16 @@ class RuntimeManagerDaemon:
             result_data={"runId": run_id, "snapshot": snapshot},
         )
 
+    def _handle_delete_supervised_run(self, *, command_id: str, args: dict[str, Any]) -> dict[str, Any]:
+        run_id = str(args.get("runId") or "").strip()
+        result = supervised_control_service._LOCAL_DELETE_SUPERVISED_RUN_SNAPSHOT(run_id)
+        return self._finish_command(
+            command_id,
+            ok=True,
+            message="Supervised run record deleted.",
+            result_data={"runId": run_id, "deleteResult": result},
+        )
+
 
 def run_daemon() -> None:
     RuntimeManagerDaemon().run_forever()

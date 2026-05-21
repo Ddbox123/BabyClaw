@@ -50,11 +50,13 @@ from core.web.services.self_evolution_control_service import (
     stream_self_evolution_run_events,
 )
 from core.web.services.supervised_control_service import (
+    SupervisedRunDeleteError,
     SupervisedRunActionError,
     SupervisedRunBusyError,
     SupervisedRunNotFoundError,
     SupervisedRunStateError,
     SupervisedRunValidationError,
+    delete_supervised_run_snapshot,
     execute_supervised_action,
     get_active_supervised_run,
     get_supervised_workbench,
@@ -259,6 +261,20 @@ def evolution_terminate_run(run_id: str) -> dict:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except SupervisedRunValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.delete("/evolution/runs/{run_id}")
+def evolution_delete_run(run_id: str) -> dict:
+    try:
+        return delete_supervised_run_snapshot(run_id)
+    except SupervisedRunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SupervisedRunStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SupervisedRunValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SupervisedRunDeleteError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/evolution/runs/{session_id}/actions")

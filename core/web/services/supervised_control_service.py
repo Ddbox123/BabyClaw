@@ -26,6 +26,7 @@ from core.evaluation import (
 )
 from core.runtime_manager.command_queue import submit_command, wait_for_result
 from core.runtime_manager.evolution_store import (
+    delete_run_snapshot as delete_manager_run_snapshot,
     load_active_run_snapshot as load_manager_active_run_snapshot,
     load_run_snapshot as load_manager_run_snapshot,
     persist_run_snapshot as persist_manager_run_snapshot,
@@ -70,6 +71,10 @@ class SupervisedRunStateError(RuntimeError):
     """Raised when a run control request is invalid for the current state."""
 
 
+class SupervisedRunDeleteError(RuntimeError):
+    """Raised when a supervised run snapshot cannot be deleted."""
+
+
 class _SupervisedRunInterrupted(RuntimeError):
     """Raised when the live run thread should exit without being marked failed."""
 
@@ -108,6 +113,8 @@ def _map_runtime_manager_error(message: str, error_type: str) -> Exception:
         return SupervisedRunStateError(message)
     if normalized == "SupervisedRunActionError":
         return SupervisedRunActionError(message)
+    if normalized == "SupervisedRunDeleteError":
+        return SupervisedRunDeleteError(message)
     return SupervisedRunValidationError(message)
 
 
@@ -471,6 +478,110 @@ def request_stop_supervised_run(run_id: str) -> dict[str, Any]:
     return get_supervised_run_snapshot(normalized)
 
 
+def delete_supervised_run_snapshot(run_id: str) -> dict[str, Any]:
+    """Delete one inactive supervised runtime-manager snapshot without touching audit records."""
+
+    lang = get_web_language()
+    normalized = str(run_id or "").strip()
+    if not normalized:
+        raise SupervisedRunValidationError(text_for(lang, zh="缺少监督 run id。", en="Missing supervised run id."))
+
+    with _RUN_STATE_LOCK:
+        state = _RUN_STATES.get(normalized)
+        if state is not None:
+            status = str(state.get("status") or "").strip().lower()
+            if status in {"running", "paused", "stopping"}:
+                raise SupervisedRunStateError(
+                    text_for(
+                        lang,
+                        zh="这条监督任务仍在执行或暂停中，请先终止后再删除记录。",
+                        en="This supervised run is still running or paused. Terminate it before deleting the record.",
+                    )
+                )
+            if status == "queued":
+                now = _now_timestamp()
+                state["stopRequested"] = True
+                state["stopRequestedAt"] = now
+                _cancel_run_locked(
+                    normalized,
+                    state,
+                    lang=lang,
+                    now=now,
+                    summary=text_for(
+                        lang,
+                        zh="已取消并删除这条排队中的监督任务。",
+                        en="The queued supervised run was cancelled and deleted.",
+                    ),
+                    reason=text_for(
+                        lang,
+                        zh="操作者删除了排队中的监督任务。",
+                        en="The operator deleted this queued supervised run.",
+                    ),
+                )
+            _RUN_STATES.pop(normalized, None)
+            _RUN_CONTROLLERS.pop(normalized, None)
+            _clear_active_run_locked(normalized)
+
+    return _delete_manager_supervised_run_snapshot(normalized, lang=lang)
+
+
+def _delete_manager_supervised_run_snapshot(run_id: str, *, lang: str) -> dict[str, Any]:
+    stored = load_manager_run_snapshot("supervised", run_id)
+    status = str((stored or {}).get("status") or "").strip().lower()
+    if status in {"running", "paused", "stopping"}:
+        raise SupervisedRunStateError(
+            text_for(
+                lang,
+                zh="这条监督任务仍在执行或暂停中，请先终止后再删除记录。",
+                en="This supervised run is still running or paused. Terminate it before deleting the record.",
+            )
+        )
+    if status == "queued":
+        # A queued run may only exist as an orphaned runtime-manager snapshot. Deleting it is the
+        # explicit cancel-and-clear path and does not touch supervised decision/proposal evidence.
+        pass
+    elif stored is None:
+        # Empty or corrupt snapshot files load as missing; deleting still clears stale index pointers.
+        pass
+    elif status not in {"done", "failed", "cancelled", "success", "waiting", ""}:
+        raise SupervisedRunStateError(
+            text_for(
+                lang,
+                zh="这条监督记录状态暂不支持直接删除。",
+                en="This supervised run state cannot be deleted directly.",
+            )
+        )
+
+    try:
+        result = delete_manager_run_snapshot("supervised", run_id)
+    except ValueError as exc:
+        raise SupervisedRunValidationError(text_for(lang, zh="监督 run id 无效。", en="Invalid supervised run id.")) from exc
+    except OSError as exc:
+        raise SupervisedRunDeleteError(str(exc)) from exc
+
+    changed_store = bool(result.get("deleted")) or bool(result.get("clearedActive")) or bool(result.get("clearedLatest"))
+    if not changed_store:
+        if stored is None:
+            raise SupervisedRunNotFoundError(text_for(lang, zh="未找到监督记录。", en="Supervised run not found."))
+        raise SupervisedRunDeleteError(
+            text_for(lang, zh="监督记录删除失败。", en="Failed to delete the supervised run record.")
+        )
+
+    return {
+        "deleted": changed_store,
+        "runId": str(result.get("runId") or run_id),
+        "clearedActive": bool(result.get("clearedActive")),
+        "clearedLatest": bool(result.get("clearedLatest")),
+        "activeRunId": str(result.get("activeRunId") or ""),
+        "latestRunId": str(result.get("latestRunId") or ""),
+        "summary": text_for(
+            lang,
+            zh="已清理这条监督运行记录。",
+            en="The supervised run record was cleared.",
+        ),
+    }
+
+
 def _cancel_file_only_supervised_run(run_id: str, *, lang: str) -> dict[str, Any]:
     stored = load_manager_run_snapshot("supervised", run_id)
     if stored is None:
@@ -609,6 +720,8 @@ def execute_supervised_action(session_id: str, action: str) -> dict[str, Any]:
 def _run_supervised_session(context: dict[str, Any]) -> None:
     run_id = context["runId"]
     try:
+        if not _supervised_run_should_execute(run_id):
+            return
         _checkpoint_supervised_run(
             run_id,
             {
@@ -616,6 +729,8 @@ def _run_supervised_session(context: dict[str, Any]) -> None:
                 "bundle_name": context["bundleName"],
             },
         )
+        if not _supervised_run_should_execute(run_id):
+            return
         result = run_workbench_session(
             bundle_name=context["bundleName"],
             keep_worktree=bool(context["keepWorktree"]),
@@ -669,6 +784,15 @@ def _run_supervised_session(context: dict[str, Any]) -> None:
         _clear_active_run_locked(run_id)
         _RUN_CONTROLLERS.pop(run_id, None)
     _publish_run_snapshot(run_id, terminal=True)
+
+
+def _supervised_run_should_execute(run_id: str) -> bool:
+    with _RUN_STATE_LOCK:
+        state = _RUN_STATES.get(run_id)
+        if state is None or run_id not in _RUN_CONTROLLERS:
+            return False
+        status = str(state.get("status") or "").strip().lower()
+        return status not in {"done", "failed", "cancelled"} and not bool(state.get("stopRequested"))
 
 
 def _handle_progress_event(run_id: str, event: dict[str, Any]) -> None:
@@ -1043,10 +1167,26 @@ def _supervised_action_states(payload: dict[str, Any], *, lang: str) -> dict[str
             text_for(lang, zh="终止请求已经发出，等待这一轮收口。", en="A stop request has already been sent. Wait for this run to close.")
         )
 
+    if status in {"queued", "done", "failed", "cancelled"}:
+        delete_state = enabled_state()
+    elif status in {"running", "paused", "stopping"}:
+        delete_state = disabled_state(
+            text_for(
+                lang,
+                zh="这条监督任务仍在执行或暂停中，请先终止后再删除记录。",
+                en="This supervised run is still running or paused. Terminate it before deleting the record.",
+            )
+        )
+    else:
+        delete_state = disabled_state(
+            text_for(lang, zh="这条监督记录状态暂不支持直接删除。", en="This supervised run state cannot be deleted directly.")
+        )
+
     return {
         "pause": pause_state,
         "resume": resume_state,
         "terminate": terminate_state,
+        "delete": delete_state,
     }
 
 
@@ -1538,6 +1678,7 @@ _LOCAL_GET_SUPERVISED_RUN_SNAPSHOT = get_supervised_run_snapshot
 _LOCAL_REQUEST_PAUSE_SUPERVISED_RUN = request_pause_supervised_run
 _LOCAL_REQUEST_RESUME_SUPERVISED_RUN = request_resume_supervised_run
 _LOCAL_REQUEST_STOP_SUPERVISED_RUN = request_stop_supervised_run
+_LOCAL_DELETE_SUPERVISED_RUN_SNAPSHOT = delete_supervised_run_snapshot
 _LOCAL_STREAM_ACTIVE_SUPERVISED_RUN_EVENTS = stream_active_supervised_run_events
 
 
@@ -1604,6 +1745,9 @@ def _submit_supervised_runtime_manager_command(command_type: str, *, run_id: str
     snapshot = result.get("snapshot") if isinstance(result.get("snapshot"), dict) else None
     if snapshot is not None:
         return snapshot
+    delete_result = result.get("deleteResult") if isinstance(result.get("deleteResult"), dict) else None
+    if delete_result is not None:
+        return delete_result
     target_run_id = str(result.get("runId") or run_id or "").strip()
     loaded = load_manager_run_snapshot("supervised", target_run_id) if target_run_id else None
     if loaded is not None:
@@ -1666,6 +1810,12 @@ def request_stop_supervised_run(run_id: str) -> dict[str, Any]:
     if _runtime_manager_live_control_enabled():
         return _submit_supervised_runtime_manager_command("stop_supervised_run", run_id=run_id)
     return _LOCAL_REQUEST_STOP_SUPERVISED_RUN(run_id)
+
+
+def delete_supervised_run_snapshot(run_id: str) -> dict[str, Any]:
+    if _runtime_manager_live_control_enabled():
+        return _submit_supervised_runtime_manager_command("delete_supervised_run", run_id=run_id)
+    return _LOCAL_DELETE_SUPERVISED_RUN_SNAPSHOT(run_id)
 
 
 def stream_active_supervised_run_events(initial_snapshot: dict[str, Any] | None = None):
