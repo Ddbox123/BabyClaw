@@ -591,6 +591,63 @@ def test_evolution_store_atomic_write_retries_permission_error(tmp_path, monkeyp
     assert sleep_calls == [0.05, 0.1, 0.15000000000000002]
 
 
+def test_evolution_store_delete_snapshot_clears_active_and_repoints_latest(tmp_path, monkeypatch):
+    runs_dir = tmp_path / "supervised" / "runs"
+    index_path = tmp_path / "supervised" / "index.json"
+
+    def fake_kind_paths(kind: str):
+        assert kind == "supervised"
+        return runs_dir, index_path
+
+    monkeypatch.setattr(evolution_store, "_kind_paths", fake_kind_paths)
+
+    old = {
+        "runId": "old-run",
+        "status": "cancelled",
+        "startedAt": "2026-05-18T11:00:00Z",
+        "updatedAt": "2026-05-18T11:00:00Z",
+    }
+    active = {
+        "runId": "active-run",
+        "status": "queued",
+        "startedAt": "2026-05-18T12:00:00Z",
+        "updatedAt": "2026-05-18T12:00:00Z",
+    }
+    evolution_store.persist_run_snapshot("supervised", old, active_run_id="")
+    evolution_store.persist_run_snapshot("supervised", active, active_run_id="active-run")
+
+    result = evolution_store.delete_run_snapshot("supervised", "active-run")
+
+    assert result["deleted"] is True
+    assert result["clearedActive"] is True
+    assert result["clearedLatest"] is True
+    assert result["activeRunId"] == ""
+    assert result["latestRunId"] == "old-run"
+    assert evolution_store.load_run_snapshot("supervised", "active-run") is None
+    assert evolution_store.load_latest_run_snapshot("supervised")["runId"] == "old-run"
+
+
+def test_evolution_store_delete_corrupt_index_only_run_clears_index(tmp_path, monkeypatch):
+    runs_dir = tmp_path / "supervised" / "runs"
+    index_path = tmp_path / "supervised" / "index.json"
+
+    def fake_kind_paths(kind: str):
+        assert kind == "supervised"
+        return runs_dir, index_path
+
+    monkeypatch.setattr(evolution_store, "_kind_paths", fake_kind_paths)
+
+    evolution_store.save_run_index("supervised", active_run_id="missing-run", latest_run_id="missing-run")
+
+    result = evolution_store.delete_run_snapshot("supervised", "missing-run")
+
+    assert result["deleted"] is False
+    assert result["clearedActive"] is True
+    assert result["clearedLatest"] is True
+    assert result["activeRunId"] == ""
+    assert result["latestRunId"] == ""
+
+
 def test_clear_pid_keeps_newer_owner(tmp_path, monkeypatch):
     pid_path = tmp_path / "daemon.pid"
     monkeypatch.setattr(state_store, "PID_PATH", pid_path)

@@ -3721,6 +3721,81 @@ def test_supervised_run_control_routes_pause_resume_and_terminate(tmp_path, monk
     _reset_supervised_live_state()
 
 
+def test_supervised_run_delete_route_clears_queued_run_and_unlocks_start(tmp_path, monkeypatch):
+    bundle_path = tmp_path / "workspace" / "evaluation" / "bundles" / "manual_bundle.json"
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    bundle_path.write_text(json.dumps({"bundle_name": "manual_bundle", "cases": [{"case_id": "case_1"}]}), encoding="utf-8")
+    _reset_supervised_live_state()
+    monkeypatch.setattr(supervised_control_service, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        supervised_control_service._RUN_EXECUTOR,
+        "submit",
+        lambda fn, *args, **kwargs: object(),
+    )
+
+    start_response = client.post(
+        "/api/evolution/runs",
+        json={
+            "sourceKind": "bundle",
+            "bundleName": "manual_bundle",
+            "keepWorktree": False,
+        },
+    )
+    run_id = start_response.json()["runId"]
+
+    delete_response = client.delete(f"/api/evolution/runs/{run_id}")
+    active_after_delete = client.get("/api/evolution/active-run")
+    restart_response = client.post(
+        "/api/evolution/runs",
+        json={
+            "sourceKind": "bundle",
+            "bundleName": "manual_bundle",
+            "keepWorktree": False,
+        },
+    )
+
+    assert start_response.status_code == 202
+    assert delete_response.status_code == 200, delete_response.json()
+    assert delete_response.json()["deleted"] is True
+    assert delete_response.json()["clearedActive"] is True
+    assert active_after_delete.status_code == 200
+    assert active_after_delete.json() is None
+    assert restart_response.status_code == 202
+    assert restart_response.json()["runId"] != run_id
+
+    _reset_supervised_live_state()
+
+
+def test_supervised_run_delete_route_rejects_running_run():
+    _reset_supervised_live_state()
+    context = {
+        "runId": "web-supervised-running-delete",
+        "lang": "en",
+        "sourceKind": "bundle",
+        "datasetName": "",
+        "datasetLimit": None,
+        "bundleName": "manual_bundle",
+        "keepWorktree": False,
+        "startedAt": "2026-05-18T12:00:00Z",
+    }
+    state = supervised_control_service._initial_run_state(context)
+    state["status"] = "running"
+    state["currentPhase"] = "running"
+    state["runtimeStatus"] = "running"
+    with supervised_control_service._RUN_STATE_LOCK:
+        supervised_control_service._RUN_STATES[context["runId"]] = state
+        supervised_control_service._RUN_CONTROLLERS[context["runId"]] = supervised_control_service._SupervisedRunController()
+        supervised_control_service._ACTIVE_RUN_ID = context["runId"]
+    supervised_control_service.persist_manager_run_snapshot("supervised", state, active_run_id=context["runId"])
+
+    response = client.delete(f"/api/evolution/runs/{context['runId']}")
+
+    assert response.status_code == 409
+    assert "Terminate" in response.json()["detail"] or "终止" in response.json()["detail"]
+
+    _reset_supervised_live_state()
+
+
 def test_supervised_run_action_route_executes_and_respects_active_lock(tmp_path, monkeypatch):
     pending_result = run_gym_collection_episode(
         collection_id="foundation_local_stability",
