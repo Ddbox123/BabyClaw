@@ -4,7 +4,7 @@ export const dictionary = {
   zh: {
     appTitle: "Vibelution 工作台",
     brandSubtle: "本地 agent 工作台",
-    navChat: "对话 / 编码",
+    navChat: "对话",
     navEvolution: "进化",
     navSupervisedEvolution: "监督进化",
     navSelfEvolution: "自进化",
@@ -600,7 +600,7 @@ export const dictionary = {
   en: {
     appTitle: "Vibelution Workbench",
     brandSubtle: "local agent workbench",
-    navChat: "Chat / Coding",
+    navChat: "Chat",
     navEvolution: "Evolution",
     navSupervisedEvolution: "Supervised",
     navSelfEvolution: "Self",
