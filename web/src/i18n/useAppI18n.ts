@@ -68,6 +68,7 @@ const decisionKeyMap: Record<string, TranslationKey> = {
   HOLD: "decision_hold",
   ROLLBACK: "decision_rollback",
   REJECT: "decision_reject",
+  INCONCLUSIVE: "decision_inconclusive",
 };
 
 const riskKeyMap: Record<string, TranslationKey> = {

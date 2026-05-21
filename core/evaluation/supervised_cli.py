@@ -104,7 +104,9 @@ def run_supervised_cli_from_args(*, args: Any, project_root: Path) -> int:
         keep_worktree=bool(getattr(args, "keep_worktree", False)),
     )
     print(json.dumps(asdict(decision), ensure_ascii=False, indent=2))
-    return 0 if decision.decision in {"PROMOTE", "HOLD"} else 1
+    if bool(getattr(args, "fail_on_regression", False)) and decision.decision in {"ROLLBACK", "REJECT"}:
+        return 1
+    return 0
 
 
 def _to_jsonable(value: Any) -> Any:

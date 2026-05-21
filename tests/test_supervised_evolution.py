@@ -517,6 +517,63 @@ def test_run_supervised_evolution_session_rolls_back_when_candidate_regresses(tm
     assert proposal["status"] == "rolled_back"
 
 
+def test_run_supervised_evolution_session_is_inconclusive_when_baseline_and_candidate_share_boundary_issue(
+    tmp_path: Path,
+):
+    bundle_dir = tmp_path / "workspace" / "evaluation" / "bundles"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    bundle_path = bundle_dir / f"{DEFAULT_BUNDLE_NAME}.json"
+    bundle_path.write_text(
+        """
+{
+  "benchmark": "dry",
+  "bundle_name": "supervised_evolution_dry_run_v1",
+  "cases": [
+    {
+      "case_id": "probe",
+      "scenario": "transaction",
+      "mode": "single_turn",
+      "baseline_prompt": "baseline",
+      "candidate_prompt": "candidate"
+    }
+  ]
+}
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    def failed_unclosed_transaction(worktree_name: str):
+        result = _fake_result("failed", "事务探针未关账", worktree_name)
+        result.evolution_summary["transaction"]["closed"] = False
+        result.evolution_summary["transaction"]["status"] = None
+        return result
+
+    def fake_runner(**kwargs):
+        if kwargs["prompt"] == "baseline":
+            return failed_unclosed_transaction("baseline")
+        return failed_unclosed_transaction("candidate")
+
+    decision = run_supervised_evolution_session(
+        bundle_name=DEFAULT_BUNDLE_NAME,
+        project_root=tmp_path,
+        harness_runner=fake_runner,
+    )
+
+    assert decision.decision == "INCONCLUSIVE"
+    assert decision.score_delta == 0.0
+    assert decision.case_summaries[0].decision_signal == "tie"
+    assert decision.gates[0].name == "legality"
+    assert decision.gates[0].status == "fail"
+    assert decision.gates[0].metrics["baseline_transaction_issues"] == 1
+    assert decision.gates[0].metrics["candidate_transaction_issues"] == 1
+    assert decision.policy_action["action"] == "INCONCLUSIVE"
+    assert decision.policy_action["proposal_paths"] == []
+    rollback_pool = tmp_path / "workspace" / "supervised_evolution" / "policy" / "candidate_rollbacks.jsonl"
+    observation_pool = tmp_path / "workspace" / "supervised_evolution" / "policy" / "candidate_observation_pool.jsonl"
+    assert not rollback_pool.exists()
+    assert not observation_pool.exists()
+
+
 def test_run_supervised_evolution_session_holds_improvement_when_cost_is_too_high(tmp_path: Path):
     bundle_dir = tmp_path / "workspace" / "evaluation" / "bundles"
     bundle_dir.mkdir(parents=True, exist_ok=True)

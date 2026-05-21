@@ -730,6 +730,8 @@ def _review_payload(
 def _run_status(record) -> str:
     if record.decision in {"ROLLBACK", "REJECT"} or record.risk_level == "high":
         return "failed"
+    if record.decision == "INCONCLUSIVE":
+        return "waiting"
     if record.gym_proposal_status in {"proposed", "applied"}:
         return "waiting"
     return "success"
@@ -845,6 +847,12 @@ def _next_action(record, *, lang: str) -> str:
             zh="该提案已被更新的建议基线替代。",
             en="This proposal has been superseded by a newer advisory baseline.",
         )
+    if record.decision == "INCONCLUSIVE":
+        return text_for(
+            lang,
+            zh="这轮监督评测没有形成可用对比证据，建议修正评测或复跑。",
+            en="This supervised run did not produce usable comparison evidence. Fix the evaluation setup or rerun it.",
+        )
     if record.decision == "PROMOTE":
         return text_for(
             lang,
@@ -928,6 +936,7 @@ def _decision_label(decision: str, *, lang: str) -> str:
         "HOLD": text_for(lang, zh="暂不晋升", en="Hold"),
         "ROLLBACK": text_for(lang, zh="建议回滚", en="Rollback"),
         "REJECT": text_for(lang, zh="拒绝候选", en="Reject"),
+        "INCONCLUSIVE": text_for(lang, zh="评测无结论", en="Inconclusive"),
     }
     return mapping.get(normalized, normalized or text_for(lang, zh="暂无结论", en="No decision yet"))
 

@@ -334,6 +334,13 @@ def _evaluate_gates(
 
     baseline_commit_detected = sum(1 for item in baseline_metrics if item["commit_detected"])
     candidate_commit_detected = sum(1 for item in candidate_metrics if item["commit_detected"])
+    baseline_transaction_issues = sum(
+        1
+        for item in baseline_metrics
+        if not item["transaction_opened"]
+        or not item["transaction_closed"]
+        or item["transaction_status"] not in {"", "success"}
+    )
     candidate_transaction_issues = sum(
         1
         for item in candidate_metrics
@@ -359,11 +366,18 @@ def _evaluate_gates(
             "baseline_runs": len(baseline_runs),
             "candidate_commit_detected": candidate_commit_detected,
             "baseline_commit_detected": baseline_commit_detected,
+            "baseline_transaction_issues": baseline_transaction_issues,
             "candidate_transaction_issues": candidate_transaction_issues,
         },
     )
     gates.append(legality_gate)
     if legality_status == "fail":
+        if baseline_commit_detected or baseline_transaction_issues:
+            decision = "INCONCLUSIVE"
+            decision_reason = "baseline 与 candidate 都存在监督边界异常，当前评测无法证明候选退化"
+        else:
+            decision = "ROLLBACK"
+            decision_reason = legality_reason
         gates.append(
             DecisionGate(
                 name="safety",
@@ -388,7 +402,7 @@ def _evaluate_gates(
                 metrics={},
             )
         )
-        return gates, "ROLLBACK", legality_reason, score_delta
+        return gates, decision, decision_reason, score_delta
 
     candidate_failed = sum(1 for item in candidate_runs if item.status == "failed")
     candidate_timeouts = sum(1 for item in candidate_runs if item.status == "timeout")

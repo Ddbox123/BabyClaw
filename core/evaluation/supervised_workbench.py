@@ -91,6 +91,15 @@ def format_run_banner(bundle_name: str, keep_worktree: bool) -> str:
     return f"bundle={bundle_name}\nkeep_worktree={keep_worktree}"
 
 
+def decision_border_style(decision: str) -> str:
+    normalized = str(decision or "").strip().upper()
+    if normalized in {"PROMOTE", "HOLD"}:
+        return "green"
+    if normalized == "INCONCLUSIVE":
+        return "yellow"
+    return "red"
+
+
 def run_workbench_session(
     bundle_name: str,
     keep_worktree: bool,
@@ -115,7 +124,7 @@ def run_workbench_session(
     return SupervisedWorkbenchRunResult(
         decision=decision,
         decision_summary=format_decision_record_summary(decision),
-        result_border_style="green" if decision.decision in {"PROMOTE", "HOLD"} else "red",
+        result_border_style=decision_border_style(decision.decision),
         lineage_index_path=lineage_index_path,
         lineage_summary=(
             format_lineage_summary(lineage_index_path, decision.bundle_name) if lineage_index_path else None

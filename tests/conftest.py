@@ -108,6 +108,23 @@ def reset_singletons():
         pass
 
 
+@pytest.fixture(autouse=True)
+def isolate_runtime_manager_evolution_store(tmp_path, monkeypatch):
+    """Keep manager-owned evolution snapshots out of the real .runtime tree."""
+    from core.runtime_manager import evolution_store
+
+    runtime_manager_dir = tmp_path / ".runtime" / "runtime-manager"
+    evolution_dir = runtime_manager_dir / "evolution"
+    self_runs_dir = evolution_dir / "self" / "runs"
+    supervised_runs_dir = evolution_dir / "supervised" / "runs"
+
+    monkeypatch.setattr(evolution_store, "EVOLUTION_DIR", evolution_dir)
+    monkeypatch.setattr(evolution_store, "SELF_RUNS_DIR", self_runs_dir)
+    monkeypatch.setattr(evolution_store, "SUPERVISED_RUNS_DIR", supervised_runs_dir)
+    monkeypatch.setattr(evolution_store, "SELF_INDEX_PATH", evolution_dir / "self" / "index.json")
+    monkeypatch.setattr(evolution_store, "SUPERVISED_INDEX_PATH", evolution_dir / "supervised" / "index.json")
+
+
 # ============================================================================
 # 隔离工作空间
 # ============================================================================

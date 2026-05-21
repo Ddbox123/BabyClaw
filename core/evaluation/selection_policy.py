@@ -95,6 +95,41 @@ def _target_for_case(bundle_name: str, case_id: str) -> Dict[str, Any]:
     }
 
 
+def _run_has_boundary_issue(run: Any) -> bool:
+    summary = getattr(run, "evolution_summary", None)
+    if not isinstance(summary, dict):
+        return False
+    git_summary = summary.get("git") if isinstance(summary.get("git"), dict) else {}
+    if bool(git_summary.get("commit_detected")):
+        return True
+    transaction = summary.get("transaction") if isinstance(summary.get("transaction"), dict) else {}
+    if not bool(transaction.get("opened")) or not bool(transaction.get("closed")):
+        return True
+    return str(transaction.get("status") or "").strip() not in {"", "success"}
+
+
+def _run_has_restart_issue(run: Any) -> bool:
+    summary = getattr(run, "evolution_summary", None)
+    if not isinstance(summary, dict):
+        return False
+    restart = summary.get("restart") if isinstance(summary.get("restart"), dict) else {}
+    return bool(restart.get("expected")) and not bool(restart.get("reentered"))
+
+
+def _rollback_supported_for_case(decision: Any, case_summary: Any) -> bool:
+    if case_summary.decision_signal == "candidate_regressed":
+        return True
+    baseline = next((run for run in decision.baseline_runs if run.case_id == case_summary.case_id), None)
+    candidate = next((run for run in decision.candidate_runs if run.case_id == case_summary.case_id), None)
+    if candidate is None:
+        return False
+    candidate_boundary_issue = _run_has_boundary_issue(candidate)
+    baseline_boundary_issue = _run_has_boundary_issue(baseline)
+    if candidate_boundary_issue and not baseline_boundary_issue:
+        return True
+    return _run_has_restart_issue(candidate) and not _run_has_restart_issue(baseline)
+
+
 def _write_proposal(
     *,
     proposal_path: Path,
@@ -371,6 +406,8 @@ def execute_supervised_policy(
         summary = f"已将 {len(observation_cases)} 个 case 放入观察池"
     elif decision.decision == "ROLLBACK":
         for case_summary in decision.case_summaries:
+            if not _rollback_supported_for_case(decision, case_summary):
+                continue
             case_payload = bundle_cases.get(case_summary.case_id)
             candidate_prompt = str((case_payload or {}).get("candidate_prompt") or "").strip()
             proposal_id = (
@@ -416,6 +453,21 @@ def execute_supervised_policy(
         )
         touched_files.append(str(audit_path))
         summary = f"已记录 {len(rejected_cases)} 个回滚 case"
+    elif decision.decision == "INCONCLUSIVE":
+        audit_path = _audit_policy_action(
+            project_root,
+            {
+                "event": "supervised_policy_executed",
+                "action": decision.decision,
+                "session_id": decision.session_id,
+                "bundle_name": decision.bundle_name,
+                "cases": [],
+                "decision_path": decision.decision_path,
+                "reason": decision.reason,
+            },
+        )
+        touched_files.append(str(audit_path))
+        summary = "监督评测未能区分 baseline 与 candidate，未写入候选观察池或回滚池"
     else:
         for case_summary in decision.case_summaries:
             case_payload = bundle_cases.get(case_summary.case_id)

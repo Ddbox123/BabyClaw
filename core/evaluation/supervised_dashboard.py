@@ -281,6 +281,8 @@ def _assess_risk(payload: dict[str, Any], gates: list[Any]) -> tuple[str, list[s
     decision = str(payload.get("decision") or "").upper()
     if decision in {"ROLLBACK", "REJECT"}:
         reasons.append(f"decision={decision}")
+    if decision == "INCONCLUSIVE":
+        reasons.append("decision=INCONCLUSIVE")
     for gate in gates:
         if not isinstance(gate, dict):
             continue
@@ -301,7 +303,9 @@ def _assess_risk(payload: dict[str, Any], gates: list[Any]) -> tuple[str, list[s
     candidate_tools = int(candidate_summary.get("total_guarded_tools") or 0)
     if candidate_tools > baseline_tools + max(2, baseline_tools // 2):
         reasons.append("candidate guarded tools 成本明显升高")
-    if any("fail:" in item or item.startswith("decision=") for item in reasons):
+    if decision == "INCONCLUSIVE":
+        return "medium", reasons
+    if any("fail:" in item or item.startswith("decision=ROLLBACK") or item.startswith("decision=REJECT") for item in reasons):
         return "high", reasons
     if reasons:
         return "medium", reasons
@@ -439,6 +443,8 @@ def _render_case(case: dict[str, Any]) -> str:
 
 
 def _next_action(record: SupervisedDashboardRecord) -> str:
+    if record.decision == "INCONCLUSIVE":
+        return "这轮监督评测没有形成可用对比证据，先修正评测设置或用相同配置复跑。"
     if record.risk_level == "high":
         return "先检查失败 gate 和 Decision Record，不要继续 apply 或 activate。"
     if record.risk_level == "medium":

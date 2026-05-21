@@ -138,6 +138,27 @@ def test_run_workbench_session_wraps_decision_summary(monkeypatch):
     assert calls == [{"bundle_name": "demo_bundle", "keep_worktree": True}]
 
 
+def test_run_workbench_session_marks_inconclusive_as_warning(monkeypatch):
+    decision = SimpleNamespace(
+        decision="INCONCLUSIVE",
+        bundle_name="demo_bundle",
+        policy_action={},
+    )
+    monkeypatch.setattr(
+        "core.evaluation.supervised_evolution.run_supervised_evolution_session",
+        lambda **kwargs: decision,
+    )
+    monkeypatch.setattr(
+        "core.evaluation.supervised_evolution.format_decision_record_summary",
+        lambda item: f"summary:{item.decision}",
+    )
+
+    result = run_workbench_session("demo_bundle", keep_worktree=False)
+
+    assert result.decision_summary == "summary:INCONCLUSIVE"
+    assert result.result_border_style == "yellow"
+
+
 def test_run_workbench_session_forwards_progress_callback(monkeypatch):
     decision = SimpleNamespace(
         decision="HOLD",

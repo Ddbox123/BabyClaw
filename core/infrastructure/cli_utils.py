@@ -57,6 +57,11 @@ def parse_args():
     parser.add_argument('--list-datasets', action='store_true', help='列出监督进化可选数据集')
     parser.add_argument('--keep-worktree', action='store_true', help='监督进化运行后保留 harness worktree')
     parser.add_argument('--supervised-dashboard', action='store_true', help='生成监督进化进展页面')
+    parser.add_argument(
+        '--fail-on-regression',
+        action='store_true',
+        help='监督进化产出 ROLLBACK/REJECT 结论时使用非零退出码，供 CI 场景使用',
+    )
     return parser.parse_args()
 
 
