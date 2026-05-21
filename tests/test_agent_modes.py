@@ -88,6 +88,27 @@ def test_seed_chat_history_seeds_mental_conversation_context():
     assert agent._active_turn_goal == "__chat_session__"
 
 
+def test_seed_chat_history_skips_mental_context_when_turn_disables_mental_model():
+    agent = SelfEvolvingAgent.__new__(SelfEvolvingAgent)
+    agent.config = _make_config()
+    agent.mode = AgentMode.CHAT
+    agent.mode_policy = resolve_mode_policy("chat", agent.config)
+    agent._mental_model_enabled_override = False
+    captured = {}
+    agent.mental_model = SimpleNamespace(
+        seed_conversation_context=lambda messages: captured.setdefault("seeded", list(messages)),
+        clear_conversation_context=lambda: captured.setdefault("cleared", True),
+    )
+
+    agent.seed_chat_history([
+        {"role": "user", "content": "继续上一轮"},
+        {"role": "assistant", "content": "上一轮回答", "mental_snapshot": {"mood": "沉思"}},
+    ])
+
+    assert captured == {"cleared": True}
+    assert agent._active_turn_goal == "__chat_session__"
+
+
 def test_seed_chat_history_clears_mental_context_outside_chat_mode():
     agent = SelfEvolvingAgent.__new__(SelfEvolvingAgent)
     agent.config = _make_config()

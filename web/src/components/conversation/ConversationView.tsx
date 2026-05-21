@@ -40,11 +40,14 @@ type ConversationViewProps = {
   composerActionMode?: "send" | "stop";
   composerPending: boolean;
   composerError?: string;
+  mentalModelEnabled?: boolean;
+  mentalModelOptionDisabled?: boolean;
   submitLabel?: string;
   submitPendingLabel?: string;
   stopLabel?: string;
   stopPendingLabel?: string;
   onComposerChange: (value: string) => void;
+  onMentalModelEnabledChange?: (enabled: boolean) => void;
   onSubmit: () => void;
   onStop?: () => void;
 };
@@ -70,11 +73,14 @@ export function ConversationView({
   composerActionMode,
   composerPending,
   composerError,
+  mentalModelEnabled,
+  mentalModelOptionDisabled,
   submitLabel,
   submitPendingLabel,
   stopLabel,
   stopPendingLabel,
   onComposerChange,
+  onMentalModelEnabledChange,
   onSubmit,
   onStop,
 }: ConversationViewProps) {
@@ -86,6 +92,7 @@ export function ConversationView({
   const [isAtBottom, setIsAtBottom] = useState(true);
   const previousStreamingRef = useRef<Record<string, boolean>>({});
   const resolvedActionMode = composerActionMode ?? "send";
+  const showMentalModelOption = typeof mentalModelEnabled === "boolean" && Boolean(onMentalModelEnabledChange);
   const resolvedActionDisabled =
     composerActionDisabled
     ?? (resolvedActionMode === "stop" ? composerDisabled : composerDisabled || !composerValue.trim());
@@ -539,6 +546,24 @@ export function ConversationView({
       <div className={styles.composer}>
         <div className={styles.composerField}>
           {composerError ? <p className={styles.composerError}>{composerError}</p> : null}
+          {showMentalModelOption ? (
+            <div className={styles.composerOptions} aria-label={t("composerOptions")}>
+              <label className={styles.optionToggle}>
+                <input
+                  className={styles.optionCheckbox}
+                  type="checkbox"
+                  checked={Boolean(mentalModelEnabled)}
+                  disabled={Boolean(mentalModelOptionDisabled)}
+                  onChange={(event) => onMentalModelEnabledChange?.(event.target.checked)}
+                />
+                <span className={styles.optionSwitch} aria-hidden="true" />
+                <span className={styles.optionText}>{t("mentalModelForNextTurn")}</span>
+              </label>
+              <span className={styles.optionStatus}>
+                {mentalModelEnabled ? t("mentalModelOptionOn") : t("mentalModelOptionOff")}
+              </span>
+            </div>
+          ) : null}
           <textarea
             className={styles.input}
             value={composerValue}

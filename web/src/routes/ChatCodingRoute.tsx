@@ -52,6 +52,7 @@ const MIN_RIGHT_PANEL_WIDTH = 280;
 const MAX_RIGHT_PANEL_WIDTH = 560;
 const TARGET_CENTER_PANE_WIDTH = 420;
 const KEYBOARD_RESIZE_STEP = 24;
+const MENTAL_MODEL_TOGGLE_STORAGE_KEY = "vibelution.chat.mentalModelEnabled";
 
 type ResizableSide = "left" | "right";
 
@@ -207,6 +208,27 @@ function isBusyPhase(value: string | null | undefined) {
   return phase === "running" || phase === "stopping";
 }
 
+function readStoredMentalModelToggle(): boolean | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const raw = window.localStorage.getItem(MENTAL_MODEL_TOGGLE_STORAGE_KEY);
+  if (raw === "true") {
+    return true;
+  }
+  if (raw === "false") {
+    return false;
+  }
+  return null;
+}
+
+function writeStoredMentalModelToggle(enabled: boolean) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(MENTAL_MODEL_TOGGLE_STORAGE_KEY, enabled ? "true" : "false");
+}
+
 export function ChatCodingRoute() {
   const { lang, t, statusLabel } = useAppI18n();
   const queryClient = useQueryClient();
@@ -230,6 +252,12 @@ export function ChatCodingRoute() {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingSessionTitle, setEditingSessionTitle] = useState("");
   const [sessionStreamConnected, setSessionStreamConnected] = useState(false);
+  const [mentalModelEnabledForNextTurn, setMentalModelEnabledForNextTurn] = useState<boolean>(
+    () => readStoredMentalModelToggle() ?? true,
+  );
+  const [mentalModelToggleHydrated, setMentalModelToggleHydrated] = useState<boolean>(
+    () => readStoredMentalModelToggle() !== null,
+  );
   const layoutRef = useRef<HTMLDivElement | null>(null);
 
   const runtimeQuery = useQuery({
@@ -296,13 +324,23 @@ export function ChatCodingRoute() {
   });
 
   const submitTurnMutation = useMutation({
-    mutationFn: async ({ sessionId, content }: { sessionId: string; content: string }) =>
+    mutationFn: async (
+      {
+        sessionId,
+        content,
+        mentalModelEnabled,
+      }: {
+        sessionId: string;
+        content: string;
+        mentalModelEnabled: boolean;
+      },
+    ) =>
       fetchJson<SessionDetail>(`/api/sessions/${sessionId}/messages`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content, mentalModelEnabled }),
       }),
     onSuccess: (nextDetail, variables) => {
       setSessionComposerErrors((current) => ({
@@ -718,6 +756,15 @@ export function ChatCodingRoute() {
     [detail?.changedFiles.length, detail?.readFiles.length, numberFormatter, t],
   );
   const mental = runtime?.mentalState;
+  useEffect(() => {
+    if (mentalModelToggleHydrated || !runtime) {
+      return;
+    }
+    const defaultEnabled = String(runtime.mentalState?.source ?? "").trim().toLowerCase() !== "disabled";
+    setMentalModelEnabledForNextTurn(defaultEnabled);
+    setMentalModelToggleHydrated(true);
+  }, [mentalModelToggleHydrated, runtime]);
+
   const mentalCognitiveStateValue = String(mental?.cognitiveState ?? "unknown").trim().toLowerCase() || "unknown";
   const mentalSourceValue = String(mental?.source ?? "unavailable").trim().toLowerCase() || "unavailable";
   const mentalCognitiveStateLabel = (() => {
@@ -807,6 +854,12 @@ export function ChatCodingRoute() {
     }));
   }
 
+  function handleMentalModelEnabledChange(enabled: boolean) {
+    setMentalModelEnabledForNextTurn(enabled);
+    setMentalModelToggleHydrated(true);
+    writeStoredMentalModelToggle(enabled);
+  }
+
   function handleSubmitTurn() {
     if (!activeSessionId) {
       return;
@@ -818,6 +871,7 @@ export function ChatCodingRoute() {
     submitTurnMutation.mutate({
       sessionId: activeSessionId,
       content,
+      mentalModelEnabled: mentalModelEnabledForNextTurn,
     });
   }
 
@@ -1157,9 +1211,12 @@ export function ChatCodingRoute() {
                 composerActionMode={composerStopMode ? "stop" : "send"}
                 composerPending={composerPending}
                 composerError={activeComposerError}
+                mentalModelEnabled={mentalModelEnabledForNextTurn}
+                mentalModelOptionDisabled={!activeSessionId}
                 stopLabel={t("stop")}
                 stopPendingLabel={t("stopPending")}
                 onComposerChange={handleComposerChange}
+                onMentalModelEnabledChange={handleMentalModelEnabledChange}
                 onSubmit={handleSubmitTurn}
                 onStop={handleStopTurn}
               />

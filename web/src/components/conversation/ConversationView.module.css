@@ -318,6 +318,93 @@
   gap: 8px;
 }
 
+.composerOptions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 28px;
+  padding: 0 2px;
+  color: var(--fg-secondary);
+  font-size: 0.82rem;
+}
+
+.optionToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.optionToggle:has(.optionCheckbox:disabled) {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.optionCheckbox {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.optionSwitch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(216, 167, 91, 0.22);
+  background: rgba(124, 132, 142, 0.18);
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.optionSwitch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--fg-secondary);
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+.optionCheckbox:checked + .optionSwitch {
+  border-color: rgba(216, 167, 91, 0.42);
+  background: rgba(216, 167, 91, 0.24);
+}
+
+.optionCheckbox:checked + .optionSwitch::after {
+  transform: translateX(16px);
+  background: var(--accent-warm-2);
+}
+
+.optionCheckbox:focus-visible + .optionSwitch {
+  outline: 2px solid rgba(216, 167, 91, 0.4);
+  outline-offset: 2px;
+}
+
+.optionText,
+.optionStatus {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.optionText {
+  color: var(--fg-primary);
+}
+
+.optionStatus {
+  flex: 0 0 auto;
+  color: var(--fg-tertiary);
+}
+
 .composerError {
   margin: 0;
   color: #f0a6a6;

@@ -26,6 +26,7 @@ router = APIRouter(tags=["sessions"])
 
 class SessionMessagePayload(BaseModel):
     content: str = ""
+    mentalModelEnabled: bool | None = None
 
 
 class SessionUpdatePayload(BaseModel):
@@ -88,7 +89,11 @@ def session_events(session_id: str) -> StreamingResponse:
 @router.post("/sessions/{session_id}/messages", status_code=status.HTTP_202_ACCEPTED)
 def session_submit_message(session_id: str, payload: SessionMessagePayload) -> dict:
     try:
-        return submit_session_message(session_id, payload.content)
+        return submit_session_message(
+            session_id,
+            payload.content,
+            mental_model_enabled=payload.mentalModelEnabled,
+        )
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except SessionBusyError as exc:

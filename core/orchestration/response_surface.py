@@ -8,6 +8,12 @@ from typing import Any, Callable, Dict, Sequence
 from core.mental_model_flags import is_mental_model_enabled
 
 
+def _resolve_mental_model_enabled(override: bool | None = None) -> bool:
+    if override is not None:
+        return bool(override)
+    return is_mental_model_enabled()
+
+
 def _read_nested_int(data: Dict[str, Any], *keys: str) -> int:
     for key in keys:
         value = data.get(key)
@@ -49,8 +55,9 @@ class ResponseSurfaceController:
         messages: Sequence[Any],
         mental_model: Any,
         effective_max_token_limit: int,
+        mental_model_enabled: bool | None = None,
     ) -> str:
-        if not is_mental_model_enabled():
+        if not _resolve_mental_model_enabled(mental_model_enabled):
             return ""
         should_sense = has_tool_calls or consecutive_failures >= 2 or iteration == 1
         if not should_sense:
@@ -82,12 +89,13 @@ class ResponseSurfaceController:
         processed: Any,
         record_language_drift: Callable[[str], None],
         record_inference_activity: Callable[[str], None],
+        mental_model_enabled: bool | None = None,
     ) -> Dict[str, str]:
         raw_content_clean = processed.raw_content_clean
         record_language_drift(raw_content_clean)
         record_inference_activity(raw_content_clean)
 
-        if not is_mental_model_enabled():
+        if not _resolve_mental_model_enabled(mental_model_enabled):
             return {}
 
         state_info = processed.state_info or {}

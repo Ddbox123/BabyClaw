@@ -292,7 +292,12 @@ def make_memory_section(ctx: BuildContext) -> SystemPromptSection:
         # ── 元认知干预 ──
         intervention = ""
         try:
+            from core.mental_model_flags import is_mental_model_enabled
+
+            if not is_mental_model_enabled():
+                raise RuntimeError("mental model disabled for this turn")
             from core.infrastructure.mental_model import get_mental_model
+
             mm = get_mental_model()
             intervention = mm.get_intervention_for_prompt()
         except Exception:

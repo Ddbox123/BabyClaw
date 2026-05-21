@@ -1774,6 +1774,68 @@ def test_submit_session_message_omits_mental_snapshot_when_disabled(tmp_path, mo
     assert "mentalSnapshot" not in payload["messages"][-1]
 
 
+def test_submit_session_message_uses_per_turn_mental_model_override(tmp_path, monkeypatch):
+    _seed_chat_state(tmp_path, task_status="done")
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(session_service, "is_mental_model_enabled", lambda: True)
+
+    created_agents = []
+
+    class DummyAgent:
+        def __init__(self):
+            self.override = None
+            self.seeded_history = None
+            created_agents.append(self)
+
+        def set_mental_model_enabled_override(self, enabled):
+            self.override = enabled
+
+        def seed_chat_history(self, messages):
+            self.seeded_history = list(messages)
+
+        def run_single_turn(self, initial_prompt=None):
+            return {
+                "status": "completed",
+                "summary": "已按本轮开关处理。",
+                "raw_output": "已按本轮开关处理。",
+                "mental_snapshot": {
+                    "mood": "专注",
+                    "feeling": "如果开关关闭，这里不应该落盘。",
+                    "whisper": "per-turn",
+                    "cognitiveState": "productive",
+                },
+                "tool_call_count": 0,
+                "tool_trace": [],
+            }
+
+    monkeypatch.setattr(session_service, "create_chat_agent", DummyAgent)
+    monkeypatch.setattr(
+        session_service,
+        "_schedule_session_turn",
+        lambda context: session_service._run_session_turn(context),
+    )
+
+    disabled_response = client.post(
+        "/api/sessions/session-live/messages",
+        json={"content": "这一轮不要打开心智模型", "mentalModelEnabled": False},
+    )
+
+    assert disabled_response.status_code == 202, disabled_response.json()
+    disabled_payload = disabled_response.json()
+    assert created_agents[-1].override is False
+    assert "mentalSnapshot" not in disabled_payload["messages"][-1]
+
+    enabled_response = client.post(
+        "/api/sessions/session-live/messages",
+        json={"content": "这一轮打开心智模型", "mentalModelEnabled": True},
+    )
+
+    assert enabled_response.status_code == 202, enabled_response.json()
+    enabled_payload = enabled_response.json()
+    assert created_agents[-1].override is True
+    assert enabled_payload["messages"][-1]["mentalSnapshot"]["mood"] == "专注"
+
+
 def test_submit_session_message_includes_stream_friendly_tool_and_mental_payloads(tmp_path, monkeypatch):
     _seed_chat_state(tmp_path, task_status="done")
     monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)

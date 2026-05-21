@@ -18,7 +18,7 @@ from core.chat.chat_result_contract import build_chat_coding_result_contract
 from core.chat.chat_result_formatter import format_chat_reply
 from core.chat.chat_task_types import trim_lines
 from core.infrastructure.event_bus import EventNames, get_event_bus
-from core.mental_model_flags import is_mental_model_enabled
+from core.mental_model_flags import is_mental_model_enabled, mental_model_enabled_override
 from core.evaluation.chat_dataset_capture import ChatDatasetCaptureService
 from core.evaluation.chat_segmenter import ChatTurnRecord, has_conclusion_signal, has_next_action_signal
 from core.logging.logger import debug as _debug_logger
@@ -409,7 +409,7 @@ def stream_session_events(session_id: str, initial_detail: dict[str, Any] | None
         _unregister_session_stream_subscriber(conversation_id, subscriber)
 
 
-def submit_session_message(session_id: str, content: str) -> dict:
+def submit_session_message(session_id: str, content: str, mental_model_enabled: bool | None = None) -> dict:
     """Persist a user message and start a single web chat turn."""
 
     lang = get_web_language()
@@ -453,6 +453,7 @@ def submit_session_message(session_id: str, content: str) -> dict:
         "session_id": conversation_id,
         "user_message": message,
         "history_messages": previous_messages,
+        "mental_model_enabled": mental_model_enabled,
     }
     try:
         _schedule_session_turn(context)
@@ -925,36 +926,53 @@ def _schedule_session_turn(context: dict[str, Any]) -> None:
 def _run_session_turn(context: dict[str, Any]) -> None:
     session_id = str(context.get("session_id") or "").strip()
     turn_capture = SessionTurnCapture(session_id=session_id)
+    mental_model_enabled = _normalize_optional_bool(context.get("mental_model_enabled"))
     try:
-        initial_stop_reason = _get_session_stop_reason(session_id)
-        if initial_stop_reason:
-            _persist_session_turn_result(session_id, _build_stopped_turn_result(initial_stop_reason))
-            return
-
-        with _capture_session_ui_stream(session_id, turn_capture):
-            agent = create_chat_agent()
-            restore = getattr(agent, "seed_chat_history", None)
-            stop_configurer = getattr(agent, "set_turn_interrupt_checker", None)
-            if callable(stop_configurer):
-                stop_configurer(lambda: _get_session_stop_reason(session_id))
-            history_messages = list(context.get("history_messages") or [])
-            if callable(restore) and history_messages:
-                restore(history_messages)
-
-            preflight_stop_reason = _get_session_stop_reason(session_id)
-            if preflight_stop_reason:
-                _persist_session_turn_result(session_id, _build_stopped_turn_result(preflight_stop_reason))
+        with mental_model_enabled_override(mental_model_enabled):
+            initial_stop_reason = _get_session_stop_reason(session_id)
+            if initial_stop_reason:
+                _persist_session_turn_result(
+                    session_id,
+                    _build_stopped_turn_result(initial_stop_reason),
+                    mental_model_enabled=mental_model_enabled,
+                )
                 return
 
-            user_message = str(context.get("user_message") or "").strip()
-            result = _run_session_continuation_loop(
-                agent,
-                session_id=session_id,
-                initial_prompt=user_message,
-                history_messages=history_messages,
+            with _capture_session_ui_stream(session_id, turn_capture, mental_model_enabled=mental_model_enabled):
+                agent = create_chat_agent()
+                mental_override_configurer = getattr(agent, "set_mental_model_enabled_override", None)
+                if callable(mental_override_configurer):
+                    mental_override_configurer(mental_model_enabled)
+                restore = getattr(agent, "seed_chat_history", None)
+                stop_configurer = getattr(agent, "set_turn_interrupt_checker", None)
+                if callable(stop_configurer):
+                    stop_configurer(lambda: _get_session_stop_reason(session_id))
+                history_messages = list(context.get("history_messages") or [])
+                if callable(restore) and history_messages:
+                    restore(history_messages)
+
+                preflight_stop_reason = _get_session_stop_reason(session_id)
+                if preflight_stop_reason:
+                    _persist_session_turn_result(
+                        session_id,
+                        _build_stopped_turn_result(preflight_stop_reason),
+                        mental_model_enabled=mental_model_enabled,
+                    )
+                    return
+
+                user_message = str(context.get("user_message") or "").strip()
+                result = _run_session_continuation_loop(
+                    agent,
+                    session_id=session_id,
+                    initial_prompt=user_message,
+                    history_messages=history_messages,
+                )
+            result = _attach_turn_capture_to_result(
+                result,
+                turn_capture,
+                mental_model_enabled=mental_model_enabled,
             )
-        result = _attach_turn_capture_to_result(result, turn_capture)
-        _persist_session_turn_result(session_id, result)
+            _persist_session_turn_result(session_id, result, mental_model_enabled=mental_model_enabled)
     except Exception as exc:
         _persist_session_turn_failure(session_id, context, exc)
     finally:
@@ -1007,7 +1025,12 @@ def _run_session_continuation_loop(
     return _build_continuation_limit_result(result, max_turns, max_turns)
 
 
-def _persist_session_turn_result(session_id: str, result: Any) -> None:
+def _persist_session_turn_result(
+    session_id: str,
+    result: Any,
+    *,
+    mental_model_enabled: bool | None = None,
+) -> None:
     lang = get_web_language()
     capture_messages: list[dict[str, Any]] | None = None
     runtime_stop_requested = _is_session_stop_requested(session_id)
@@ -1034,7 +1057,7 @@ def _persist_session_turn_result(session_id: str, result: Any) -> None:
             assistant_text,
             _extract_chat_tool_calls(result),
             thought=_extract_chat_thought(result, assistant_text),
-            mental_snapshot=_build_turn_mental_snapshot(result, lang),
+            mental_snapshot=_build_turn_mental_snapshot(result, lang, mental_model_enabled=mental_model_enabled),
         )
         if isinstance(result, dict):
             assistant_entry["toolCalls"] = _normalize_message_tool_calls(_extract_chat_tool_calls(result))
@@ -1375,6 +1398,29 @@ def _coerce_nonnegative_int(value: Any) -> int:
         return 0
 
 
+def _normalize_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return None
+    if normalized in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if normalized in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return None
+
+
+def _is_mental_model_enabled_for_turn(override: bool | None = None) -> bool:
+    if override is not None:
+        return bool(override)
+    return is_mental_model_enabled()
+
+
 def _has_meaningful_mental_snapshot(snapshot: dict[str, Any] | None) -> bool:
     if not isinstance(snapshot, dict):
         return False
@@ -1408,8 +1454,13 @@ def _live_mental_snapshot(state_info: dict[str, Any], lang: str) -> dict[str, An
     }
 
 
-def _build_turn_mental_snapshot(result: Any, lang: str) -> dict[str, Any] | None:
-    if not is_mental_model_enabled():
+def _build_turn_mental_snapshot(
+    result: Any,
+    lang: str,
+    *,
+    mental_model_enabled: bool | None = None,
+) -> dict[str, Any] | None:
+    if not _is_mental_model_enabled_for_turn(mental_model_enabled):
         return None
     state_snapshot = None
     if isinstance(result, dict):
@@ -1574,14 +1625,24 @@ def _clear_session_live_output(session_id: str) -> None:
         _SESSION_LIVE_OUTPUTS.pop(session_id, None)
 
 
-def _attach_turn_capture_to_result(result: Any, capture: SessionTurnCapture) -> Any:
+def _attach_turn_capture_to_result(
+    result: Any,
+    capture: SessionTurnCapture,
+    *,
+    mental_model_enabled: bool | None = None,
+) -> Any:
     if not isinstance(result, dict):
         return result
     if capture.thought and not result.get("thought") and not result.get("reasoning_content"):
         result["thought"] = capture.thought
     if capture.content and not result.get("raw_output") and not result.get("summary"):
         result["raw_output"] = capture.content
-    if capture.mental_state and not result.get("state_info") and not result.get("stateInfo"):
+    if (
+        _is_mental_model_enabled_for_turn(mental_model_enabled)
+        and capture.mental_state
+        and not result.get("state_info")
+        and not result.get("stateInfo")
+    ):
         result["state_info"] = dict(capture.mental_state)
     if capture.tool_calls and not result.get("tool_trace") and not result.get("tool_calls"):
         result["tool_trace"] = list(capture.tool_calls)
@@ -1589,7 +1650,12 @@ def _attach_turn_capture_to_result(result: Any, capture: SessionTurnCapture) -> 
 
 
 @contextmanager
-def _capture_session_ui_stream(session_id: str, capture: SessionTurnCapture):
+def _capture_session_ui_stream(
+    session_id: str,
+    capture: SessionTurnCapture,
+    *,
+    mental_model_enabled: bool | None = None,
+):
     from core.ui import get_ui
 
     with _SESSION_UI_CAPTURE_LOCK:
@@ -1633,9 +1699,9 @@ def _capture_session_ui_stream(session_id: str, capture: SessionTurnCapture):
         def set_pet_mental_state_proxy(mood: str = "", feeling: str = "", whisper: str = ""):
             if callable(original_set_pet_mental_state):
                 original_set_pet_mental_state(mood=mood, feeling=feeling, whisper=whisper)
-            capture.note_mental_state(mood=mood, feeling=feeling, whisper=whisper)
-            if not is_mental_model_enabled():
+            if not _is_mental_model_enabled_for_turn(mental_model_enabled):
                 return
+            capture.note_mental_state(mood=mood, feeling=feeling, whisper=whisper)
             snapshot = _live_mental_snapshot(capture.mental_state, get_web_language())
             if snapshot is not None:
                 _set_session_live_output(session_id, mental_snapshot=snapshot)

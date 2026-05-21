@@ -103,6 +103,7 @@ from core.orchestration.turn_outcome import TurnOutcomeController
 from core.orchestration.tool_lifecycle import ToolLifecycleBridge
 from core.orchestration.subagent_roles import extract_subagent_primary_goal
 from core.infrastructure.mental_model import get_mental_model
+from core.mental_model_flags import is_mental_model_enabled
 
 # 导入宠物系统
 from core.pet_system import get_pet_system
@@ -229,6 +230,7 @@ class SelfEvolvingAgent:
         self._single_turn_mode_active: bool = False
         self._last_turn_metadata: Dict[str, Any] = {}
         self._turn_interrupt_checker = None
+        self._mental_model_enabled_override: Optional[bool] = None
         self._chat_turn_records: List[ChatTurnRecord] = []
         self._active_supervised_case_id: str = ""
         self._pending_supervised_case_id: Optional[str] = None
@@ -237,6 +239,17 @@ class SelfEvolvingAgent:
             config=self.config,
         )
         self._load_previous_session_constraints()
+
+    def set_mental_model_enabled_override(self, enabled: Optional[bool]) -> None:
+        """Override mental-model activity for this agent instance."""
+
+        self._mental_model_enabled_override = None if enabled is None else bool(enabled)
+
+    def is_mental_model_enabled_for_turn(self) -> bool:
+        override = getattr(self, "_mental_model_enabled_override", None)
+        if override is not None:
+            return bool(override)
+        return is_mental_model_enabled()
 
     def _init_model_discovery(self):
         """模型动态发现，返回 effective_max_token_limit"""
@@ -664,9 +677,14 @@ class SelfEvolvingAgent:
             if callable(mental_clear):
                 mental_clear()
             return
-        mental_seed = getattr(getattr(self, "mental_model", None), "seed_conversation_context", None)
-        if callable(mental_seed):
-            mental_seed(list(messages or []))
+        if self.is_mental_model_enabled_for_turn():
+            mental_seed = getattr(getattr(self, "mental_model", None), "seed_conversation_context", None)
+            if callable(mental_seed):
+                mental_seed(list(messages or []))
+        else:
+            mental_clear = getattr(getattr(self, "mental_model", None), "clear_conversation_context", None)
+            if callable(mental_clear):
+                mental_clear()
         restored: List[Any] = [SystemMessage(content="")]
         for item in list(messages or []):
             if not isinstance(item, dict):
@@ -1094,6 +1112,7 @@ class SelfEvolvingAgent:
                     messages=messages,
                     mental_model=self.mental_model,
                     effective_max_token_limit=self._effective_max_token_limit,
+                    mental_model_enabled=self.is_mental_model_enabled_for_turn(),
                 )
 
 # <state> 注入：剥离模型输出中的回显，防止雪球效应
@@ -1103,6 +1122,7 @@ class SelfEvolvingAgent:
                     processed=processed,
                     record_language_drift=self._record_language_drift,
                     record_inference_activity=self._record_inference_activity,
+                    mental_model_enabled=self.is_mental_model_enabled_for_turn(),
                 )
                 # 进展标记
                 round_state.note_progress()
