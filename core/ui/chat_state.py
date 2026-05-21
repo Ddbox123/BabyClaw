@@ -8,6 +8,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.orchestration.output_boundary import (
+    sanitize_assistant_thought_text,
+    sanitize_assistant_visible_text,
+)
+
 
 CHAT_STATE_VERSION = 1
 DEFAULT_CHAT_CONVERSATION_ID = "default"
@@ -45,8 +50,14 @@ def normalize_chat_message(item: Any) -> dict[str, Any] | None:
     role = str(item.get("role") or "").strip().lower()
     if role not in {"user", "assistant"}:
         return None
-    content = str(item.get("content") or "").strip()
-    thought = str(item.get("thought") or "").strip()
+    raw_content = str(item.get("content") or "").strip()
+    raw_thought = str(item.get("thought") or "").strip()
+    if role == "assistant":
+        content = sanitize_assistant_visible_text(raw_content)
+        thought = sanitize_assistant_thought_text(raw_thought)
+    else:
+        content = raw_content
+        thought = raw_thought
     mental_snapshot = item.get("mental_snapshot")
     if mental_snapshot is None:
         mental_snapshot = item.get("mentalSnapshot")

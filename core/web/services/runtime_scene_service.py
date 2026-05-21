@@ -17,14 +17,18 @@ LAUNCHER_STATE_PATH = PROJECT_ROOT / ".runtime" / "launcher" / "state.json"
 MAX_TEXT_CHARS = 200_000
 BROWSER_TELEMETRY_RAW_PATH = "raw/browser.telemetry.log"
 BROWSER_TELEMETRY_COMPONENT = "browser_page"
+BACKEND_API_RAW_PATH = "raw/backend.api.log"
+BACKEND_COMPONENT = "backend"
 MAX_TELEMETRY_TEXT_CHARS = 4_000
 MAX_TELEMETRY_FIELD_TEXT_CHARS = 1_200
 MAX_TELEMETRY_FIELD_ITEMS = 24
 BROWSER_TELEMETRY_WRITE_LOCK = Lock()
+BACKEND_API_WRITE_LOCK = Lock()
 RAW_LABELS = {
     "raw/frontend.build.log": "Frontend build log",
     "raw/backend.stdout.log": "Backend stdout",
     "raw/backend.stderr.log": "Backend stderr",
+    BACKEND_API_RAW_PATH: "Backend API events",
     "raw/supervisor.log": "Supervisor log",
     "raw/browser.log": "Browser log",
     BROWSER_TELEMETRY_RAW_PATH: "Browser telemetry",
@@ -190,6 +194,80 @@ def record_browser_telemetry(payload: dict[str, Any]) -> dict[str, Any]:
         }
         _append_scene_event(scene_dir, BROWSER_TELEMETRY_COMPONENT, event_payload)
         _update_browser_manifest(scene_dir, manifest, timestamp, event_code, level, message, fields)
+
+    return {
+        "accepted": True,
+        "runtimeSceneId": scene_id,
+        "recordedAt": timestamp,
+    }
+
+
+def record_backend_api_event(payload: dict[str, Any]) -> dict[str, Any]:
+    """Append one backend API request event into the active runtime scene bundle."""
+
+    scene_dir = _resolve_current_runtime_scene_dir()
+    if scene_dir is None:
+        return {
+            "accepted": False,
+            "reason": "no_runtime_scene",
+        }
+
+    timestamp = datetime.now(UTC).isoformat()
+    method = _truncate_text(str(payload.get("method") or "").upper(), 16)
+    path = _truncate_text(str(payload.get("path") or ""), 240)
+    status_code = _coerce_int(payload.get("status_code"), default=0)
+    duration_ms = _coerce_float(payload.get("duration_ms"), default=0.0)
+    path_template = _truncate_text(str(payload.get("path_template") or path), 240)
+    level = "error" if status_code >= 500 else "warning" if status_code >= 400 else "info"
+    outcome = "failed" if status_code >= 500 else "client_error" if status_code >= 400 else "succeeded"
+    event_code = _sanitize_token(payload.get("event_code"), default="backend.api.request")
+    message = _truncate_text(
+        str(payload.get("message") or f"{method or 'API'} {path_template or path} -> {status_code or '?'}"),
+        320,
+    )
+    fields = _normalize_telemetry_fields(
+        {
+            "method": method,
+            "path": path,
+            "pathTemplate": path_template,
+            "statusCode": status_code,
+            "durationMs": round(duration_ms, 2),
+            "query": _truncate_text(str(payload.get("query") or ""), 240),
+            "client": _truncate_text(str(payload.get("client") or ""), 160),
+            "exceptionType": _truncate_text(str(payload.get("exception_type") or ""), 120),
+            "exceptionMessage": _truncate_text(str(payload.get("exception_message") or ""), 320),
+        }
+    )
+
+    raw_line = f"[{timestamp}] {event_code} [{level}] {message}"
+    if fields:
+        raw_line = f"{raw_line} :: {json.dumps(fields, ensure_ascii=False, separators=(',', ':'))}"
+
+    with BACKEND_API_WRITE_LOCK:
+        manifest = _load_scene_manifest(scene_dir)
+        scene_id = _scene_id(scene_dir, manifest)
+        _append_scene_log_line(scene_dir, BACKEND_API_RAW_PATH, _truncate_text(raw_line, MAX_TELEMETRY_TEXT_CHARS))
+        event_payload = {
+            "schema_version": 1,
+            "runtime_scene_id": scene_id,
+            "ts": timestamp,
+            "seq": _next_scene_event_seq(scene_dir, BACKEND_COMPONENT),
+            "component": BACKEND_COMPONENT,
+            "phase": "api",
+            "event_code": event_code,
+            "level": level,
+            "outcome": outcome,
+            "message": message,
+            "fields": fields,
+            "raw_refs": [
+                {
+                    "path": BACKEND_API_RAW_PATH,
+                    "tail_lines": 80,
+                },
+            ],
+        }
+        _append_scene_event(scene_dir, BACKEND_COMPONENT, event_payload)
+        _update_backend_api_manifest(scene_dir, manifest, timestamp, level, fields)
 
     return {
         "accepted": True,
@@ -471,6 +549,35 @@ def _update_browser_manifest(
     _save_scene_manifest(scene_dir, manifest)
 
 
+def _update_backend_api_manifest(
+    scene_dir: Path,
+    manifest: dict[str, Any],
+    timestamp: str,
+    level: str,
+    fields: dict[str, Any],
+) -> None:
+    backend = manifest.get("backend")
+    if not isinstance(backend, dict):
+        backend = {}
+
+    backend["api_log_path"] = BACKEND_API_RAW_PATH
+    backend["last_api_event_at"] = timestamp
+    backend["last_api_event_level"] = level
+
+    status_code = fields.get("statusCode")
+    if isinstance(status_code, int):
+        backend["last_api_status_code"] = status_code
+    path_template = fields.get("pathTemplate")
+    if isinstance(path_template, str) and path_template.strip():
+        backend["last_api_path"] = _truncate_text(path_template.strip(), MAX_TELEMETRY_FIELD_TEXT_CHARS)
+    method = fields.get("method")
+    if isinstance(method, str) and method.strip():
+        backend["last_api_method"] = method.strip()
+
+    manifest["backend"] = backend
+    _save_scene_manifest(scene_dir, manifest)
+
+
 def _sanitize_token(value: object, *, default: str) -> str:
     token = str(value or "").strip()
     if not token:
@@ -481,6 +588,20 @@ def _sanitize_token(value: object, *, default: str) -> str:
 def _truncate_text(value: str, limit: int) -> str:
     text = str(value or "")
     return text if len(text) <= limit else f"{text[: max(0, limit - 3)]}..."
+
+
+def _coerce_int(value: object, *, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value: object, *, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _normalize_telemetry_fields(value: object) -> dict[str, Any]:

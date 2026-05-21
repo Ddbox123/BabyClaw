@@ -18,11 +18,16 @@ from core.chat.chat_result_contract import build_chat_coding_result_contract
 from core.chat.chat_result_formatter import format_chat_reply
 from core.chat.chat_task_types import trim_lines
 from core.infrastructure.event_bus import EventNames, get_event_bus
-from core.mental_model_flags import is_mental_model_enabled, mental_model_enabled_override
+from core.mental_model_flags import is_mental_model_enabled
 from core.evaluation.chat_dataset_capture import ChatDatasetCaptureService
 from core.evaluation.chat_segmenter import ChatTurnRecord, has_conclusion_signal, has_next_action_signal
 from core.logging.logger import debug as _debug_logger
 from core.logging.unified_logger import logger as unified_logger
+from core.mental_model_flags import mental_model_enabled_override
+from core.orchestration.output_boundary import (
+    sanitize_assistant_thought_text,
+    sanitize_assistant_visible_text,
+)
 from core.ui.chat_state import (
     CHAT_STATE_VERSION,
     DEFAULT_CHAT_CONVERSATION_ID,
@@ -579,32 +584,7 @@ def _sanitize_message_content(role: str, content: Any) -> str:
     text = str(content or "").strip()
     if str(role or "").strip().lower() != "assistant":
         return text
-    text = re.sub(
-        r"<(?:think|thinking)[^>]*>.*?</(?:think|thinking)>",
-        "",
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    text = re.sub(
-        r"<(?:think|thinking)[^>]*>.*$",
-        "",
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    text = re.sub(r"<state[^>]*>.*?</state>", "", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<state[^>]*>.*$", "", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<state(?:\s[^>\n]*)?$", "", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"</?invoke[^>]*>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"</?parameter[^>]*>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"<parameter(?:\s[^>\n]*)?$", "", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"</?[^>\n]*DSML[^>]*>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"<[^>\n]*DSML[^>\n]*$", "", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"</?(?:think|thinking)[^>]*>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"</?[\w:-]*tool_call[^>]*>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"<[\w:-]*tool_call(?:\s[^>\n]*)?$", "", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<\s*$", "", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+    return sanitize_assistant_visible_text(text)
 
 
 def _build_session_summary(conversation: dict[str, Any]) -> dict[str, Any]:
@@ -742,21 +722,30 @@ def _normalize_session_active_task(value: Any) -> dict[str, Any] | None:
         "task_id": str(value.get("task_id") or value.get("taskId") or "").strip(),
         "kind": str(value.get("kind") or "coding").strip().lower() or "coding",
         "status": str(value.get("status") or "idle").strip().lower() or "idle",
-        "title": trim_lines(value.get("title") or "", max_lines=2),
-        "goal": trim_lines(value.get("goal") or "", max_lines=2),
+        "title": trim_lines(_sanitize_message_content("assistant", value.get("title") or ""), max_lines=2),
+        "goal": trim_lines(_sanitize_message_content("assistant", value.get("goal") or ""), max_lines=2),
         "read_files": read_files,
         "changed_files": changed_files,
         "verification_status": str(value.get("verification_status") or value.get("verificationStatus") or "").strip().lower(),
         "verification_summary": trim_lines(
-            value.get("verification_summary") or value.get("verificationSummary") or "",
+            _sanitize_message_content(
+                "assistant",
+                value.get("verification_summary") or value.get("verificationSummary") or "",
+            ),
             max_lines=4,
         ),
         "latest_summary": trim_lines(
-            value.get("latest_summary") or value.get("latestSummary") or "",
+            _sanitize_message_content(
+                "assistant",
+                value.get("latest_summary") or value.get("latestSummary") or "",
+            ),
             max_lines=6,
         ),
         "next_action": trim_lines(
-            value.get("next_action") or value.get("nextAction") or "",
+            _sanitize_message_content(
+                "assistant",
+                value.get("next_action") or value.get("nextAction") or "",
+            ),
             max_lines=3,
         ),
         "last_user_message": trim_lines(
@@ -1311,22 +1300,7 @@ def _extract_embedded_thought(content: Any) -> str:
 
 
 def _sanitize_thought_text(text: Any) -> str:
-    cleaned = str(text or "")
-    cleaned = re.sub(r"</?(?:think|thinking)[^>]*>", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"<(?:think|thinking)?/?[^>\n]*$", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"<state[^>]*>.*?</state>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = re.sub(r"<state[^>]*>.*$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = re.sub(r"<state(?:\s[^>\n]*)?$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = re.sub(r"</?invoke[^>]*>", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"</?parameter[^>]*>", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"<parameter(?:\s[^>\n]*)?$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = re.sub(r"</?[^>\n]*DSML[^>]*>", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"<[^>\n]*DSML[^>\n]*$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = re.sub(r"</?[\w:-]*tool_call[^>]*>", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"<[\w:-]*tool_call(?:\s[^>\n]*)?$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = re.sub(r"<\s*$", "", cleaned)
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned.strip()
+    return sanitize_assistant_thought_text(text)
 
 
 def _thought_duplicates_reply(thought: str, reply: str) -> bool:

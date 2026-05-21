@@ -15,6 +15,12 @@ ERROR_SIGNAL_PATTERN = re.compile(
 WARNING_SIGNAL_PATTERN = re.compile(
     r"(?i)((?<![a-z])warn(?:ing)?(?![a-z])|retrying|deprecated|blocked|timeout|timed out)"
 )
+NOISE_SIGNAL_PATTERNS = (
+    re.compile(r'(?i)\b(GET|HEAD)\s+/(?:favicon\.ico|apple-touch-icon[^"\s]*)\b.*\b404\b'),
+    re.compile(r'(?i)\b(GET|HEAD)\s+/api/health\b.*\b(?:200|204)\b'),
+    re.compile(r'(?i)\b(GET|HEAD)\s+/api/(?:runtime/summary|runtime/events)\b.*\b(?:200|204)\b'),
+    re.compile(r'(?i)\b(GET|HEAD)\s+/api/(?:evolution/(?:active-run|self/latest-run)|sessions(?:/[^"\s]+)?/events)\b.*\b(?:200|204)\b'),
+)
 
 
 def analyze_log_content(
@@ -39,10 +45,18 @@ def analyze_log_content(
     last_signal_preview = ""
     type_counts: Counter[str] = Counter()
     structured_event_count = 0
+    ignored_signal_count = 0
 
     for index, line in enumerate(lines, start=1):
         stripped = line.strip()
         if not stripped:
+            continue
+        if _is_noise_signal_line(stripped):
+            ignored_signal_count += 1
+            event_type = _extract_structured_event_type(stripped)
+            if event_type:
+                structured_event_count += 1
+                type_counts[event_type] += 1
             continue
         is_error = bool(ERROR_SIGNAL_PATTERN.search(stripped))
         is_warning = bool(WARNING_SIGNAL_PATTERN.search(stripped))
@@ -71,6 +85,7 @@ def analyze_log_content(
         "nonEmptyLineCount": non_empty_line_count,
         "errorCount": error_count,
         "warningCount": warning_count,
+        "ignoredSignalCount": ignored_signal_count,
         "firstSignalLine": first_signal_line,
         "firstSignalPreview": first_signal_preview,
         "lastSignalLine": last_signal_line,
@@ -118,6 +133,11 @@ def _extract_structured_event_type(line: str) -> str:
         if value:
             return value[:80]
     return "json_object"
+
+
+def _is_noise_signal_line(line: str) -> bool:
+    normalized = " ".join(str(line or "").split())
+    return any(pattern.search(normalized) for pattern in NOISE_SIGNAL_PATTERNS)
 
 
 def _build_user_summary(

@@ -890,11 +890,26 @@ class ConversationLogger:
 
     def log_turn_end(self, turn: int, stats: dict = None):
         """记录轮次汇总"""
+        stats_payload = stats or {}
+        summary_record = {
+            "type": "round_summary",
+            "turn": turn,
+            "timestamp": self._timestamp(),
+            "summary": {
+                "session_id": self._session_id,
+                "actor": self._actor,
+                "actor_label": self._actor_label,
+                "parent_turn": self._parent_turn,
+                "delegation_depth": self._delegation_depth,
+                "stats": stats_payload,
+            },
+        }
+        self._write(summary_record)
         record = {
             "type": "turn_end",
             "turn": turn,
             "timestamp": self._timestamp(),
-            "stats": stats or {},
+            "stats": stats_payload,
         }
         self._write(record)
 

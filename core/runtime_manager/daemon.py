@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -26,6 +28,95 @@ from .constants import (
 )
 from .state_store import clear_pid, default_state, load_pid, load_state, now_iso, save_pid, save_state
 from .workbench_controller import close_workbench, observe_workbench, open_workbench, restart_workbench
+
+
+_WORKBENCH_LIFECYCLE_COMMANDS = {"open_workbench", "close_workbench", "restart_workbench", "toggle_workbench"}
+_SOURCE_SIGNATURE_PATHS = (
+    Path("core/runtime_manager/cli.py"),
+    Path("core/runtime_manager/command_queue.py"),
+    Path("core/runtime_manager/constants.py"),
+    Path("core/runtime_manager/daemon.py"),
+    Path("core/runtime_manager/evolution_store.py"),
+    Path("core/runtime_manager/state_store.py"),
+    Path("core/runtime_manager/workbench_controller.py"),
+    Path("core/web/services/self_evolution_control_service.py"),
+    Path("core/web/services/supervised_control_service.py"),
+)
+_ACTIVE_COMMAND_RESTART_GRACE_SECONDS = 300.0
+
+
+def _command_affects_workbench_lifecycle(command_type: str) -> bool:
+    return str(command_type or "").strip() in _WORKBENCH_LIFECYCLE_COMMANDS
+
+
+def _runtime_manager_source_signature() -> str:
+    digest = hashlib.sha256()
+    for relative_path in _SOURCE_SIGNATURE_PATHS:
+        path = PROJECT_ROOT / relative_path
+        digest.update(str(relative_path).replace("\\", "/").encode("utf-8"))
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            digest.update(b"<missing>")
+    return digest.hexdigest()
+
+
+_PROCESS_SOURCE_SIGNATURE = _runtime_manager_source_signature()
+
+
+def _process_source_signature() -> str:
+    return _PROCESS_SOURCE_SIGNATURE
+
+
+def _state_source_signature(state: dict[str, Any]) -> str:
+    payload = state.get("runtimeManager") if isinstance(state.get("runtimeManager"), dict) else {}
+    return str(payload.get("sourceSignature") or "").strip()
+
+
+def _active_command_is_recent(state: dict[str, Any]) -> bool:
+    command = state.get("command") if isinstance(state.get("command"), dict) else {}
+    if not str(command.get("activeCommandId") or "").strip():
+        return False
+    started_at = str(command.get("startedAt") or "").strip()
+    if not started_at:
+        return False
+    try:
+        parsed = datetime.fromisoformat(started_at)
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    age_seconds = (datetime.now(UTC) - parsed.astimezone(UTC)).total_seconds()
+    return age_seconds < _ACTIVE_COMMAND_RESTART_GRACE_SECONDS
+
+
+def _terminate_daemon_process(pid: int) -> None:
+    if pid <= 0 or pid == os.getpid():
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if not _is_process_alive(pid):
+            clear_pid(pid)
+            return
+        time.sleep(0.1)
+    if hasattr(signal, "SIGKILL"):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    clear_pid(pid)
+
+
+def _workbench_failure_should_stick(state: dict[str, Any], *, desired_state: str, observed_state: str) -> bool:
+    if observed_state == desired_state:
+        return False
+    last_error = state.get("lastError") if isinstance(state.get("lastError"), dict) else {}
+    scope = str(last_error.get("scope") or "").strip()
+    return not scope or _command_affects_workbench_lifecycle(scope)
 
 
 def _open_request_already_satisfied(observation: dict[str, Any], *, no_browser: bool) -> bool:
@@ -104,8 +195,17 @@ def _creation_flags() -> int:
 
 
 def ensure_daemon_running(*, python_executable: str | None = None) -> bool:
-    if is_daemon_running():
-        return False
+    current_pid = load_pid()
+    if _is_process_alive(current_pid):
+        state = load_state()
+        current_signature = _process_source_signature()
+        if _state_source_signature(state) == current_signature or _active_command_is_recent(state):
+            return False
+        _append_event(
+            "daemon.restart_requested",
+            {"pid": current_pid, "reason": "runtime_manager_source_changed"},
+        )
+        _terminate_daemon_process(current_pid)
 
     ensure_runtime_manager_dirs()
     python_cmd = python_executable or sys.executable
@@ -143,6 +243,10 @@ def load_runtime_snapshot() -> dict[str, Any]:
     desired_state = str(workbench.get("desiredState") or "closed").strip() or "closed"
     observed_state = str(observation.get("observedState") or "closed").strip() or "closed"
     phase = str(workbench.get("phase") or "steady").strip() or "steady"
+
+    if phase == "failed" and not _workbench_failure_should_stick(state, desired_state=desired_state, observed_state=observed_state):
+        phase = "steady"
+        workbench["failureMessage"] = ""
 
     if (not manager_running or not active_command) and phase != "failed":
         if observed_state == "open" and desired_state != "open":
@@ -185,6 +289,12 @@ def load_runtime_snapshot() -> dict[str, Any]:
     state["projectRoot"] = str(PROJECT_ROOT)
     state["statePath"] = str(STATE_PATH)
     state["evolution"] = build_evolution_summary()
+    runtime_manager = state.get("runtimeManager") if isinstance(state.get("runtimeManager"), dict) else {}
+    state["runtimeManager"] = {
+        "sourceSignature": str(runtime_manager.get("sourceSignature") or "").strip(),
+        "currentSourceSignature": _process_source_signature(),
+        "sourceMatches": _state_source_signature(state) == _process_source_signature(),
+    }
     return state
 
 
@@ -229,7 +339,8 @@ class RuntimeManagerDaemon:
             state = default_state()
         state["runtimeState"] = "running"
         state["managerPid"] = self._pid
-        state.setdefault("startedAt", now_iso())
+        state["runtimeManager"] = {"sourceSignature": _process_source_signature()}
+        state["startedAt"] = now_iso()
         state = self._reconcile_observation(state)
         save_state(state)
 
@@ -319,8 +430,9 @@ class RuntimeManagerDaemon:
             state["lastError"] = {"scope": "", "message": "", "at": ""}
         else:
             state["lastError"] = {"scope": error_scope, "message": message, "at": now_iso()}
-            state.setdefault("workbench", {})["phase"] = "failed"
-            state["workbench"]["failureMessage"] = failure_message or message
+            if _command_affects_workbench_lifecycle(error_scope):
+                state.setdefault("workbench", {})["phase"] = "failed"
+                state["workbench"]["failureMessage"] = failure_message or message
         state = self._reconcile_observation(state)
         state = save_state(state)
         result = {
@@ -344,6 +456,14 @@ class RuntimeManagerDaemon:
         observed_state = str(observation.get("observedState") or "closed").strip() or "closed"
         phase = str(workbench.get("phase") or "steady").strip() or "steady"
         active_command = str(state.setdefault("command", {}).get("activeCommandId") or "").strip()
+
+        if phase == "failed" and not _workbench_failure_should_stick(
+            state,
+            desired_state=desired_state,
+            observed_state=observed_state,
+        ):
+            phase = "steady"
+            workbench["failureMessage"] = ""
 
         if not active_command and phase != "failed":
             if observed_state == "open" and desired_state != "open":
@@ -386,6 +506,7 @@ class RuntimeManagerDaemon:
         )
         state["runtimeState"] = "running"
         state["managerPid"] = self._pid
+        state["runtimeManager"] = {"sourceSignature": _process_source_signature()}
         state["evolution"] = build_evolution_summary()
         return state
 

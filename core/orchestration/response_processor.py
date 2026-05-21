@@ -16,6 +16,7 @@ from typing import Any, Dict, List
 from langchain_core.messages import AIMessage
 
 from core.infrastructure.llm_utils import parse_state_block, parse_xml_tool_calls
+from core.orchestration.output_boundary import strip_llm_protocol_artifacts
 
 
 @dataclass
@@ -32,7 +33,7 @@ class ResponseProcessingResult:
 
     @property
     def visible_text(self) -> str:
-        return self.raw_content_clean or self.raw_content
+        return self.raw_content_clean
 
     def build_ai_message(self, response: Any) -> AIMessage:
         ai_kwargs = {
@@ -83,7 +84,7 @@ class ResponseProcessor:
 
     @staticmethod
     def strip_state_echo(raw_content: str) -> str:
-        return re.sub(r"<state>.*?</state>", "", raw_content or "", flags=re.DOTALL).strip()
+        return strip_llm_protocol_artifacts(raw_content)
 
     @staticmethod
     def extract_active_components(raw_content: str) -> List[str]:
@@ -101,7 +102,7 @@ class ResponseProcessor:
 
     @classmethod
     def strip_active_components_echo(cls, raw_content: str) -> str:
-        return re.sub(r"<active_components>[\s\S]*?</active_components>", "", raw_content or "", flags=re.IGNORECASE).strip()
+        return strip_llm_protocol_artifacts(raw_content)
 
     def process(self, response: Any, state_block_str: str = "") -> ResponseProcessingResult:
         raw_content = self.coerce_content_text(getattr(response, "content", ""))

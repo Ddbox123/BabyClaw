@@ -3,11 +3,34 @@ import subprocess
 
 import pytest
 
+from core.runtime_manager import cli as runtime_cli
 from core.runtime_manager import daemon
 from core.runtime_manager import evolution_store
 from core.runtime_manager import state_store
 from core.runtime_manager import workbench_controller
 
+
+def test_print_status_reports_stale_runtime_manager_source(capsys):
+    runtime_cli._print_status(
+        {
+            "daemonRunning": True,
+            "managerPid": 100,
+            "projectRoot": "C:/project",
+            "statePath": "C:/project/.runtime/runtime-manager/state.json",
+            "workbench": {
+                "desiredState": "open",
+                "observedState": "open",
+                "phase": "steady",
+                "backendPid": 200,
+                "browserWindowPid": 300,
+                "url": "http://127.0.0.1:8766",
+            },
+            "runtimeManager": {"sourceMatches": False},
+        }
+    )
+
+    output = capsys.readouterr().out
+    assert "source changed" in output
 
 def test_load_runtime_snapshot_aligns_legacy_open_session(monkeypatch):
     monkeypatch.setattr(
@@ -86,6 +109,50 @@ def test_load_runtime_snapshot_preserves_failed_close_state(monkeypatch):
     assert snapshot["workbench"]["failureMessage"] == "stop failed"
 
 
+def test_load_runtime_snapshot_recovers_failed_non_lifecycle_error_when_observation_matches(monkeypatch):
+    monkeypatch.setattr(
+        daemon,
+        "load_state",
+        lambda: {
+            "stateVersion": 9,
+            "workbench": {
+                "desiredState": "open",
+                "observedState": "open",
+                "phase": "failed",
+                "failureMessage": "missing supervised run",
+            },
+            "command": {"activeCommandId": ""},
+            "lastError": {
+                "scope": "stop_supervised_run",
+                "message": "missing supervised run",
+                "at": "2026-05-19T08:00:00+00:00",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        daemon,
+        "observe_workbench",
+        lambda: {
+            "observedState": "open",
+            "backendPid": 3200,
+            "browserLaunchPid": 0,
+            "browserWindowPid": 4500,
+            "browserManaged": True,
+            "sessionId": "managed-session",
+            "url": "http://127.0.0.1:8000",
+        },
+    )
+    monkeypatch.setattr(daemon, "is_daemon_running", lambda: True)
+    monkeypatch.setattr(daemon, "load_pid", lambda: 9912)
+    monkeypatch.setattr(daemon, "_process_source_signature", lambda: "sig-current")
+
+    snapshot = daemon.load_runtime_snapshot()
+
+    assert snapshot["workbench"]["phase"] == "steady"
+    assert snapshot["workbench"]["failureMessage"] == ""
+    assert "Workbench is open" in snapshot["workbench"]["statusLine"]
+
+
 def test_handle_start_supervised_run_returns_snapshot(monkeypatch):
     runtime_daemon = daemon.RuntimeManagerDaemon()
     monkeypatch.setattr(daemon, "load_state", lambda: {"command": {}, "workbench": {}})
@@ -107,6 +174,44 @@ def test_handle_start_supervised_run_returns_snapshot(monkeypatch):
     assert result["ok"] is True
     assert result["runId"] == "web-supervised-managed"
     assert result["snapshot"]["status"] == "queued"
+
+
+def test_run_forever_refreshes_manager_started_at(monkeypatch):
+    class StopLoop(Exception):
+        pass
+
+    runtime_daemon = daemon.RuntimeManagerDaemon()
+    saved_states: list[dict] = []
+    timestamps = iter(["2026-05-19T08:00:00+00:00", "2026-05-19T08:00:01+00:00"])
+
+    monkeypatch.setattr(daemon, "ensure_runtime_manager_dirs", lambda: None)
+    monkeypatch.setattr(daemon, "recover_processing_queue", lambda: None)
+    monkeypatch.setattr(daemon, "save_pid", lambda pid: None)
+    monkeypatch.setattr(
+        daemon,
+        "load_state",
+        lambda: {
+            "startedAt": "2026-05-18T01:00:00+00:00",
+            "command": {},
+            "workbench": {},
+        },
+    )
+    monkeypatch.setattr(daemon, "now_iso", lambda: next(timestamps))
+    monkeypatch.setattr(daemon, "observe_workbench", lambda: {"observedState": "closed"})
+    monkeypatch.setattr(daemon, "build_evolution_summary", lambda: {"self": {}, "supervised": {}})
+    monkeypatch.setattr(daemon, "_process_source_signature", lambda: "sig-current")
+    monkeypatch.setattr(daemon, "save_state", lambda state: saved_states.append(json.loads(json.dumps(state))) or state)
+
+    def stop_after_startup():
+        raise StopLoop()
+
+    monkeypatch.setattr(daemon, "claim_next_command", stop_after_startup)
+
+    with pytest.raises(StopLoop):
+        runtime_daemon.run_forever()
+
+    assert saved_states[0]["startedAt"] == "2026-05-19T08:00:00+00:00"
+    assert saved_states[0]["runtimeManager"]["sourceSignature"] == "sig-current"
 
 
 def test_handle_command_reports_exception_type(monkeypatch):
@@ -134,6 +239,54 @@ def test_handle_command_reports_exception_type(monkeypatch):
     assert result["errorType"] == "ValueError"
 
 
+def test_non_lifecycle_command_failure_does_not_mark_workbench_failed(monkeypatch):
+    runtime_daemon = daemon.RuntimeManagerDaemon()
+    saved_states: list[dict] = []
+    state = {
+        "command": {"activeCommandId": "cmd-err", "activeType": "stop_supervised_run"},
+        "workbench": {
+            "desiredState": "open",
+            "observedState": "open",
+            "phase": "steady",
+            "failureMessage": "",
+        },
+    }
+    monkeypatch.setattr(daemon, "load_state", lambda: json.loads(json.dumps(state)))
+    monkeypatch.setattr(daemon, "save_state", lambda payload: saved_states.append(payload) or payload)
+    monkeypatch.setattr(
+        daemon,
+        "observe_workbench",
+        lambda: {
+            "observedState": "open",
+            "backendPid": 3200,
+            "browserLaunchPid": 0,
+            "browserWindowPid": 4500,
+            "browserManaged": True,
+        },
+    )
+    monkeypatch.setattr(daemon, "build_evolution_summary", lambda: {"self": {}, "supervised": {}})
+
+    def boom(*, command_id: str, args: dict):
+        raise daemon.supervised_control_service.SupervisedRunNotFoundError("missing supervised run")
+
+    monkeypatch.setattr(runtime_daemon, "_handle_stop_supervised_run", boom)
+
+    result = runtime_daemon._handle_command(
+        {
+            "commandId": "cmd-err",
+            "type": "stop_supervised_run",
+            "requestedBy": "test",
+            "args": {"runId": "missing"},
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["errorType"] == "SupervisedRunNotFoundError"
+    assert saved_states[-1]["lastError"]["scope"] == "stop_supervised_run"
+    assert saved_states[-1]["workbench"]["phase"] == "steady"
+    assert saved_states[-1]["workbench"]["failureMessage"] == ""
+
+
 def test_is_process_alive_windows_with_real_process():
     import os
     import sys
@@ -153,6 +306,57 @@ def test_is_process_alive_windows_with_real_process():
         proc.wait(timeout=5)
 
     assert daemon._is_process_alive(proc.pid) is False
+
+
+def test_ensure_daemon_running_restarts_stale_source_signature(monkeypatch, tmp_path):
+    events: list[tuple[str, dict]] = []
+    terminated: list[int] = []
+    popen_calls: list[list[str]] = []
+    running_checks = iter([False, True])
+
+    monkeypatch.setattr(daemon, "load_pid", lambda: 12345)
+    monkeypatch.setattr(daemon, "_is_process_alive", lambda pid: pid == 12345)
+    monkeypatch.setattr(
+        daemon,
+        "load_state",
+        lambda: {
+            "runtimeManager": {"sourceSignature": "old-signature"},
+            "command": {"activeCommandId": "", "startedAt": ""},
+        },
+    )
+    monkeypatch.setattr(daemon, "_process_source_signature", lambda: "new-signature")
+    monkeypatch.setattr(daemon, "_append_event", lambda event_type, payload: events.append((event_type, payload)))
+    monkeypatch.setattr(daemon, "_terminate_daemon_process", lambda pid: terminated.append(pid))
+    monkeypatch.setattr(daemon, "ensure_runtime_manager_dirs", lambda: None)
+    monkeypatch.setattr(daemon, "is_daemon_running", lambda: next(running_checks))
+    monkeypatch.setattr(daemon, "DAEMON_STDOUT_PATH", tmp_path / "daemon.out.log")
+    monkeypatch.setattr(daemon, "DAEMON_STDERR_PATH", tmp_path / "daemon.err.log")
+    monkeypatch.setattr(
+        daemon.subprocess,
+        "Popen",
+        lambda args, **kwargs: popen_calls.append(args),
+    )
+
+    assert daemon.ensure_daemon_running(python_executable="python-test") is True
+    assert terminated == [12345]
+    assert events == [("daemon.restart_requested", {"pid": 12345, "reason": "runtime_manager_source_changed"})]
+    assert popen_calls == [["python-test", "-m", "core.runtime_manager.cli", "daemon"]]
+
+
+def test_ensure_daemon_running_keeps_current_source_signature(monkeypatch):
+    monkeypatch.setattr(daemon, "load_pid", lambda: 12345)
+    monkeypatch.setattr(daemon, "_is_process_alive", lambda pid: True)
+    monkeypatch.setattr(
+        daemon,
+        "load_state",
+        lambda: {
+            "runtimeManager": {"sourceSignature": "same-signature"},
+            "command": {"activeCommandId": "", "startedAt": ""},
+        },
+    )
+    monkeypatch.setattr(daemon, "_process_source_signature", lambda: "same-signature")
+
+    assert daemon.ensure_daemon_running() is False
 
 
 def test_load_launcher_state_supports_utf8_bom(tmp_path, monkeypatch):

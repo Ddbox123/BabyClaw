@@ -556,13 +556,35 @@ def request_stop_self_evolution_run(run_id: str) -> dict[str, Any]:
     with _RUN_STATE_LOCK:
         current = _RUN_STATES.get(normalized)
         if current is None:
-            raise SelfEvolutionRunNotFoundError(
-                text_for(lang, zh="未找到这条自进化记录。", en="Self-evolution run not found.")
+            stored = load_manager_run_snapshot("self", normalized)
+            stored_status = str((stored or {}).get("status") or "").strip().lower()
+            if stored is None or stored_status not in _RUN_LOCKED_STATUSES:
+                raise SelfEvolutionRunNotFoundError(
+                    text_for(lang, zh="未找到这条自进化记录。", en="Self-evolution run not found.")
+                )
+            finalize_snapshot = _build_cancelled_file_self_run_snapshot(
+                stored,
+                latest_message=text_for(
+                    lang,
+                    zh="这轮网页自进化已终止，可以重新开始新的一轮。",
+                    en="This web self-evolution pass has been terminated, and a new pass can be started now.",
+                ),
+                summary=text_for(
+                    lang,
+                    zh="用户请求终止这一轮网页自进化。",
+                    en="The operator requested this bounded self-evolution pass to terminate.",
+                ),
+                stop_reason=text_for(
+                    lang,
+                    zh="用户请求终止这一轮。",
+                    en="The operator requested this pass to terminate.",
+                ),
             )
+            return _decorate_runtime_snapshot(_clone_payload(finalize_snapshot))
         status = str(current.get("status") or "").strip().lower()
-        if status in _RUN_FINAL_STATUSES:
+        if current is not None and status in _RUN_FINAL_STATUSES:
             return _decorate_runtime_snapshot(_clone_payload(current))
-        if status in {"queued", "paused"}:
+        if current is not None and status in {"queued", "paused"}:
             current.update(
                 {
                     "status": "cancelled",
@@ -601,7 +623,7 @@ def request_stop_self_evolution_run(run_id: str) -> dict[str, Any]:
                 _ACTIVE_RUN_ID = None
             finalize_snapshot = _clone_payload(current)
             publish_terminal = True
-        else:
+        elif current is not None:
             current.update(
                 {
                     "status": "stopping",
@@ -1633,6 +1655,74 @@ def _decorate_runtime_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     return _decorate_self_snapshot_fields(payload)
 
 
+def _finalize_orphaned_manager_self_run(snapshot: dict[str, Any]) -> dict[str, Any]:
+    lang = get_web_language()
+    return _build_cancelled_file_self_run_snapshot(
+        snapshot,
+        latest_message=text_for(
+            lang,
+            zh="这轮网页自进化已失去活动索引，系统已自动收口，可以重新开始新的一轮。",
+            en="This web self-evolution pass lost its active index and was closed automatically. A new pass can be started now.",
+        ),
+        summary=text_for(
+            lang,
+            zh="系统检测到历史自进化快照仍处于锁定状态，但运行管理器已没有对应 active run。",
+            en="The system found a historical self-evolution snapshot still in a locked state, but the runtime manager no longer has a matching active run.",
+        ),
+        stop_reason=text_for(
+            lang,
+            zh="清理孤儿自进化运行快照。",
+            en="Cleaned up an orphaned self-evolution run snapshot.",
+        ),
+    )
+
+
+def _build_cancelled_file_self_run_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    latest_message: str,
+    summary: str,
+    stop_reason: str,
+) -> dict[str, Any]:
+    now = _now_timestamp()
+    payload = _clone_payload(snapshot)
+    payload.update(
+        {
+            "status": "cancelled",
+            "phase": "cancelled",
+            "updatedAt": now,
+            "finishedAt": now,
+            "runtimeStatus": "idle",
+            "latestMessage": latest_message,
+            "summary": summary,
+            "cancelRequested": True,
+            "cancelRequestedAt": now,
+            "stopReason": stop_reason,
+            "controlAction": "",
+            "controlRequestedAt": "",
+        }
+    )
+    _append_run_message_locked(
+        payload,
+        role="assistant",
+        content=str(payload.get("latestMessage") or ""),
+        timestamp=now,
+    )
+    return persist_manager_run_snapshot("self", payload, active_run_id="")
+
+
+def _normalize_manager_latest_self_run(snapshot: dict[str, Any]) -> dict[str, Any]:
+    status = str(snapshot.get("status") or "").strip().lower()
+    if status not in _RUN_LOCKED_STATUSES:
+        return snapshot
+    active = load_manager_active_run_snapshot("self")
+    active_run_id = str((active or {}).get("runId") or "").strip()
+    snapshot_run_id = str(snapshot.get("runId") or "").strip()
+    if active_run_id and active_run_id == snapshot_run_id:
+        return snapshot
+    return _finalize_orphaned_manager_self_run(snapshot)
+
+
 def _derive_self_live_phase(
     *,
     status: str,
@@ -2242,6 +2332,7 @@ def get_latest_self_evolution_run() -> dict[str, Any] | None:
         snapshot = load_manager_latest_run_snapshot("self")
         if snapshot is None:
             return None
+        snapshot = _normalize_manager_latest_self_run(snapshot)
         return _decorate_self_snapshot_fields(_clone_payload(snapshot))
     return _LOCAL_GET_LATEST_SELF_EVOLUTION_RUN()
 

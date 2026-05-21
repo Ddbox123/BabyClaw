@@ -42,6 +42,13 @@ from config.public_config import (  # noqa: E402
     save_public_config,
     update_llm_model,
 )  # noqa: E402
+from config.llm_security import (  # noqa: E402
+    coerce_llm_probe_timeout,
+    redact_llm_probe_error,
+    validate_llm_api_key_env,
+    validate_llm_provider_target,
+    validate_llm_public_config,
+)
 from config.settings import PUBLIC_INLINE_PROVIDER_FIELDS  # noqa: E402
 from config.toml_writer import dumps_public_config  # noqa: E402
 
@@ -52,6 +59,12 @@ PANEL_BUILD_ID = "config-panel-toast-v2"
 
 class ConfigConflictError(ValueError):
     """Raised when applying a draft against a stale saved config snapshot."""
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401, ANN001
+        return None
+
 
 RUNTIME_PROFILE_OPTIONS = ["safe_local", "safe_remote", "debug", "ci"]
 AGENT_MODE_OPTIONS = ["chat", "self_evolution", "supervised_evolution"]
@@ -1162,9 +1175,7 @@ def _write_windows_user_env_var(name: str, value: str | None) -> None:
 
 
 def _set_user_env_var(name: str, value: str) -> None:
-    name = (name or "").strip()
-    if not name:
-        raise ValueError("api_key_env is required")
+    name = validate_llm_api_key_env(name, required=True)
     os.environ[name] = value
     if os.name != "nt":
         return
@@ -1172,7 +1183,7 @@ def _set_user_env_var(name: str, value: str) -> None:
 
 
 def _delete_user_env_var(name: str) -> None:
-    name = (name or "").strip()
+    name = validate_llm_api_key_env(name, required=False)
     if not name:
         return
     os.environ.pop(name, None)
@@ -1187,7 +1198,10 @@ def set_llm_model_api_key(public_config: dict, model_id: str, api_key: str) -> s
     item = model_library.get(model_id, {}) if isinstance(model_library, dict) else {}
     if not isinstance(item, dict):
         raise ValueError(f"unknown LLM model: {model_id}")
-    api_key_env = str(item.get("api_key_env") or _default_model_api_key_env(model_id)).strip()
+    api_key_env = validate_llm_api_key_env(
+        str(item.get("api_key_env") or _default_model_api_key_env(model_id)).strip(),
+        required=True,
+    )
     item["api_key_env"] = api_key_env
     _set_user_env_var(api_key_env, api_key)
     return api_key_env
@@ -1199,7 +1213,10 @@ def clear_llm_model_api_key(public_config: dict, model_id: str) -> str:
     item = model_library.get(model_id, {}) if isinstance(model_library, dict) else {}
     if not isinstance(item, dict):
         raise ValueError(f"unknown LLM model: {model_id}")
-    api_key_env = str(item.get("api_key_env") or _default_model_api_key_env(model_id)).strip()
+    api_key_env = validate_llm_api_key_env(
+        str(item.get("api_key_env") or _default_model_api_key_env(model_id)).strip(),
+        required=True,
+    )
     item["api_key_env"] = api_key_env
     _delete_user_env_var(api_key_env)
     return api_key_env
@@ -1219,8 +1236,14 @@ def _find_profile_id_for_provider(public_config: dict, provider_id: str) -> str:
 def _probe_llm_http(provider, profile, api_key: str | None = None) -> dict:
     if provider.requires_api_key and not api_key:
         return {"ok": False, "message": f"missing API key for provider `{provider.provider_id}`"}
+    if not provider.requires_api_key:
+        api_key = None
     if not provider.base_url:
         return {"ok": False, "message": f"missing base_url for provider `{provider.provider_id}`"}
+    try:
+        validate_llm_provider_target(provider, context="probe", resolve_dns=True)
+    except ValueError as exc:
+        return {"ok": False, "message": str(exc)}
 
     base_url = provider.base_url.rstrip("/")
     url = f"{base_url}/chat/completions"
@@ -1241,7 +1264,9 @@ def _probe_llm_http(provider, profile, api_key: str | None = None) -> dict:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=min(profile.connect_timeout, profile.timeout)) as response:
+        timeout = coerce_llm_probe_timeout(profile.connect_timeout, profile.timeout)
+        opener = urllib.request.build_opener(_NoRedirectHandler)
+        with opener.open(request, timeout=timeout) as response:
             status = getattr(response, "status", 200)
             if 200 <= status < 300:
                 return {"ok": True, "message": f"connected to {profile.model}"}
@@ -1249,15 +1274,19 @@ def _probe_llm_http(provider, profile, api_key: str | None = None) -> dict:
     except urllib.error.HTTPError as exc:
         return {"ok": False, "message": f"HTTP {exc.code}: {exc.reason}"}
     except Exception as exc:
-        return {"ok": False, "message": str(exc)}
+        return {"ok": False, "message": redact_llm_probe_error(str(exc), api_key=api_key)}
 
 
 def test_llm_connection(public_config: dict, profile_id: str | None = None, draft_meta: dict | None = None) -> dict:
+    validate_llm_public_config(public_config)
     effective = build_effective_config(public_config)
     profile = effective.llm.get_profile(profile_id=profile_id) if profile_id else effective.llm.get_profile(role="primary")
     provider = effective.llm.get_provider(profile.provider_id)
     api_key = effective.get_api_key_for_profile(profile_id=profile.profile_id)
     api_key_source = effective.llm.get_api_key_source_label_for_profile(profile_id=profile.profile_id)
+    if not provider.requires_api_key:
+        api_key = None
+        api_key_source = "not-required"
     meta = _normalize_draft_meta(draft_meta)
     pending = meta["pending_api_keys"]
     cleared = meta["pending_cleared_api_keys"]
@@ -1268,18 +1297,19 @@ def test_llm_connection(public_config: dict, profile_id: str | None = None, draf
     )
     profile_api_key_env = str(profile_public.get("api_key_env", "")).strip() if isinstance(profile_public, dict) else ""
     provider_api_key_env = str(getattr(provider, "api_key_env", "") or "").strip()
-    if isinstance(cleared, list) and profile_api_key_env and profile_api_key_env in cleared:
-        api_key = None
-        api_key_source = f"pending-clear:{profile_api_key_env}"
-    elif isinstance(cleared, list) and provider_api_key_env and provider_api_key_env in cleared:
-        api_key = None
-        api_key_source = f"pending-clear:{provider_api_key_env}"
-    elif isinstance(pending, dict) and profile_api_key_env and profile_api_key_env in pending:
-        api_key = pending[profile_api_key_env]
-        api_key_source = f"pending-env:{profile_api_key_env}"
-    elif isinstance(pending, dict) and provider_api_key_env and provider_api_key_env in pending:
-        api_key = pending[provider_api_key_env]
-        api_key_source = f"pending-env:{provider_api_key_env}"
+    if provider.requires_api_key:
+        if isinstance(cleared, list) and profile_api_key_env and profile_api_key_env in cleared:
+            api_key = None
+            api_key_source = f"pending-clear:{profile_api_key_env}"
+        elif isinstance(cleared, list) and provider_api_key_env and provider_api_key_env in cleared:
+            api_key = None
+            api_key_source = f"pending-clear:{provider_api_key_env}"
+        elif isinstance(pending, dict) and profile_api_key_env and profile_api_key_env in pending:
+            api_key = pending[profile_api_key_env]
+            api_key_source = f"pending-env:{profile_api_key_env}"
+        elif isinstance(pending, dict) and provider_api_key_env and provider_api_key_env in pending:
+            api_key = pending[provider_api_key_env]
+            api_key_source = f"pending-env:{provider_api_key_env}"
     try:
         result = _probe_llm_http(provider, profile, api_key)
     except TypeError:
@@ -3896,6 +3926,7 @@ class ConfigPanelHandler(BaseHTTPRequestHandler):
                 submitted["ui"]["language"] = lang
             draft_meta = _submitted_draft_meta(form)
             _assert_base_hash_matches(submitted_base_hash, old_public, lang)
+            validate_llm_public_config(submitted)
             _validate_required_llm_profiles(submitted, lang)
             build_effective_config(submitted)
             save_public_config(submitted)

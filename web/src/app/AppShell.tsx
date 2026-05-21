@@ -1,11 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigationType } from "react-router-dom";
-import { LoaderCircle, Power, Settings } from "lucide-react";
+import { GitBranch, LoaderCircle, Power, Settings } from "lucide-react";
 
-import { fetchJson } from "../api/client";
+import { fetchJson, setFetchJsonFailureReporter } from "../api/client";
 import { queryKeys } from "../api/queryKeys";
-import { BackendHealth, ConfigSummary, RuntimeSummary, ShutdownResponse } from "../api/types";
+import { BackendHealth, ConfigSummary, GitStatusSummary, RuntimeSummary, ShutdownResponse } from "../api/types";
 import { useAppI18n } from "../i18n/useAppI18n";
 import {
   collectBrowserPageSnapshot,
@@ -34,6 +34,17 @@ function formatHistoryTarget(value: string | URL | null | undefined): string {
     return "";
   }
   return typeof value === "string" ? value : value.toString();
+}
+
+function compactGitPath(path: string): string {
+  const normalized = path.replaceAll("\\", "/");
+  if (normalized.length <= 52) {
+    return normalized;
+  }
+  const parts = normalized.split("/");
+  const fileName = parts.pop() ?? normalized;
+  const parent = parts.pop();
+  return parent ? `.../${parent}/${fileName}` : `.../${fileName}`;
 }
 
 export function AppShell() {
@@ -76,6 +87,12 @@ export function AppShell() {
     refetchIntervalInBackground: true,
     staleTime: 0,
     retry: false,
+  });
+  const gitStatusQuery = useQuery({
+    queryKey: queryKeys.gitStatus(),
+    queryFn: () => fetchJson<GitStatusSummary>("/api/git/status"),
+    refetchInterval: 6_000,
+    refetchIntervalInBackground: true,
   });
 
   const workbench = runtimeQuery.data?.workbench;
@@ -134,6 +151,21 @@ export function AppShell() {
   const currentTime = clockFormatter.format(clockNow);
   const fullCurrentTime = fullClockFormatter.format(clockNow);
   const buildId = __VIBELUTION_BUILD_ID__;
+  const gitStatus = gitStatusQuery.data;
+  const gitAvailable = Boolean(gitStatus?.available);
+  const gitDirty = Boolean(gitStatus?.dirty);
+  const gitTone: SystemStatusTone = gitAvailable ? (gitDirty ? "caution" : "running") : "idle";
+  const gitBranch = gitStatus?.branch || gitStatus?.headRevShort || "-";
+  const gitValue = gitAvailable
+    ? gitDirty
+      ? `${gitStatus?.counts.total ?? 0}`
+      : t("gitClean")
+    : gitStatusQuery.isPending
+      ? t("gitChecking")
+      : t("gitUnavailable");
+  const gitTitle = gitAvailable
+    ? `${t("gitStatus")}: ${gitStatus?.summary ?? ""}`
+    : gitStatus?.error || t("gitUnavailable");
 
   const frontendStateLabel = {
     connected: t("systemFrontend_connected"),
@@ -208,6 +240,25 @@ export function AppShell() {
     document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
     document.title = t("appTitle");
   }, [lang, t]);
+
+  useEffect(() => {
+    setFetchJsonFailureReporter((failure) => {
+      emitBrowserTelemetry({
+        phase: "api",
+        eventCode: failure.failureKind === "network" ? "browser.api.network_error" : "browser.api.request_failed",
+        message: `${failure.method} ${failure.endpoint} failed${failure.status === null ? "" : ` (${failure.status})`}`,
+        level: "error",
+        fields: {
+          endpoint: failure.endpoint,
+          method: failure.method,
+          status: failure.status,
+          failureKind: failure.failureKind,
+          failureMessage: failure.message,
+        },
+      });
+    });
+    return () => setFetchJsonFailureReporter(null);
+  }, [emitBrowserTelemetry]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -656,6 +707,50 @@ export function AppShell() {
         </nav>
 
         <div className={styles.topActions}>
+          <div className={styles.gitCluster} tabIndex={0} aria-label={t("gitStatusGuide")} title={gitTitle}>
+            <div className={styles.gitChip}>
+              <GitBranch size={14} />
+              <span className={`${styles.statusDot} ${styles[`status_${gitTone}`]}`} />
+              <span className={styles.gitBranchName}>{gitBranch}</span>
+              <strong className={styles.gitCount}>{gitValue}</strong>
+            </div>
+            <div className={styles.gitPanel} role="note" aria-live="polite">
+              <div className={styles.statusGuideHeader}>
+                <strong>{t("gitStatusGuide")}</strong>
+                <span>{t("gitStatusGuideHint")}</span>
+              </div>
+              <div className={styles.gitMetaGrid}>
+                <span>{t("gitBranch")}</span>
+                <strong>{gitBranch}</strong>
+                <span>{t("gitHead")}</span>
+                <strong>{gitStatus?.headRevShort || "-"}</strong>
+                <span>{t("gitChangedFiles")}</span>
+                <strong>{gitStatus?.counts.total ?? 0}</strong>
+              </div>
+              <div className={styles.gitCountGrid}>
+                <span>{t("gitStaged")} <strong>{gitStatus?.counts.staged ?? 0}</strong></span>
+                <span>{t("gitUnstaged")} <strong>{gitStatus?.counts.unstaged ?? 0}</strong></span>
+                <span>{t("gitUntracked")} <strong>{gitStatus?.counts.untracked ?? 0}</strong></span>
+                <span>{t("gitDeleted")} <strong>{gitStatus?.counts.deleted ?? 0}</strong></span>
+              </div>
+              <div className={styles.gitFileSection}>
+                <strong>{t("gitRecentChanges")}</strong>
+                {gitStatus?.files.length ? (
+                  <ul className={styles.gitFileList}>
+                    {gitStatus.files.slice(0, 10).map((file) => (
+                      <li key={`${file.status}-${file.path}`}>
+                        <span className={styles.gitFileStatus}>{file.status}</span>
+                        <span className={styles.gitFilePath} title={file.path}>{compactGitPath(file.path)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className={styles.gitEmpty}>{gitAvailable ? t("gitNoChanges") : gitTitle}</p>
+                )}
+                {gitStatus?.truncated ? <p className={styles.gitEmpty}>{t("gitTruncated")}</p> : null}
+              </div>
+            </div>
+          </div>
           <div className={styles.statusCluster} tabIndex={0} aria-label={t("systemStatusGuide")}>
             <div className={styles.statusChipRow}>
               {systemStatusCards.map((item) => (

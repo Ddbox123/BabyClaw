@@ -764,6 +764,44 @@ def test_llm_connection_prefers_pending_draft_api_key(monkeypatch):
     assert result["api_key_source"] == "pending-env:VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY"
 
 
+def test_llm_connection_rejects_metadata_service_base_url():
+    public_config = load_public_config()
+    public_config["llm"]["profiles"]["primary"]["provider"] = _provider(
+        "openai",
+        "http://169.254.169.254/v1",
+        "OPENAI_API_KEY",
+    )
+    public_config["llm"]["profiles"]["primary"]["model"] = "gpt-5.5"
+
+    with pytest.raises(ValueError, match="base_url"):
+        run_llm_connection_test(public_config, "primary")
+
+
+def test_llm_connection_allows_localhost_without_api_key(monkeypatch):
+    public_config = load_public_config()
+    public_config["llm"]["profiles"]["primary"]["provider"] = _provider(
+        "local",
+        "http://127.0.0.1:11434/v1",
+        "",
+        requires_api_key=False,
+        context_window=65536,
+    )
+    public_config["llm"]["profiles"]["primary"]["model"] = "llama3.2"
+    monkeypatch.setenv("VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY", "should-not-be-sent")
+
+    def fake_http_probe(provider, profile, api_key=None):
+        assert provider.kind == "local"
+        assert api_key is None
+        return {"ok": True, "message": "ok"}
+
+    monkeypatch.setattr("scripts.config_panel._probe_llm_http", fake_http_probe)
+
+    result = run_llm_connection_test(public_config, "primary")
+
+    assert result["ok"] is True
+    assert result["api_key_source"] == "not-required"
+
+
 def test_validate_required_llm_profiles_blocks_missing_models():
     public_config = load_public_config()
     public_config["llm"]["profiles"]["primary"] = {
@@ -814,12 +852,17 @@ def test_set_user_env_var_uses_windows_registry_helper(monkeypatch):
 
     monkeypatch.setattr("scripts.config_panel.os.name", "nt", raising=False)
     monkeypatch.setattr("scripts.config_panel._write_windows_user_env_var", lambda name, value: writes.append((name, value)))
-    monkeypatch.delenv("VIBELUTION_TEST_ENV_KEY", raising=False)
+    monkeypatch.delenv("VIBELUTION_LLM_TEST_ENV_KEY", raising=False)
 
-    _set_user_env_var("VIBELUTION_TEST_ENV_KEY", "secret")
+    _set_user_env_var("VIBELUTION_LLM_TEST_ENV_KEY", "secret")
 
-    assert writes == [("VIBELUTION_TEST_ENV_KEY", "secret")]
-    assert os.environ["VIBELUTION_TEST_ENV_KEY"] == "secret"
+    assert writes == [("VIBELUTION_LLM_TEST_ENV_KEY", "secret")]
+    assert os.environ["VIBELUTION_LLM_TEST_ENV_KEY"] == "secret"
+
+
+def test_set_user_env_var_rejects_system_names():
+    with pytest.raises(ValueError, match="PATH"):
+        _set_user_env_var("PATH", "secret")
 
 
 def test_delete_user_env_var_uses_windows_registry_helper(monkeypatch):
@@ -827,12 +870,12 @@ def test_delete_user_env_var_uses_windows_registry_helper(monkeypatch):
 
     monkeypatch.setattr("scripts.config_panel.os.name", "nt", raising=False)
     monkeypatch.setattr("scripts.config_panel._write_windows_user_env_var", lambda name, value: deletes.append((name, value)))
-    monkeypatch.setenv("VIBELUTION_TEST_ENV_KEY", "secret")
+    monkeypatch.setenv("VIBELUTION_LLM_TEST_ENV_KEY", "secret")
 
-    _delete_user_env_var("VIBELUTION_TEST_ENV_KEY")
+    _delete_user_env_var("VIBELUTION_LLM_TEST_ENV_KEY")
 
-    assert deletes == [("VIBELUTION_TEST_ENV_KEY", None)]
-    assert "VIBELUTION_TEST_ENV_KEY" not in os.environ
+    assert deletes == [("VIBELUTION_LLM_TEST_ENV_KEY", None)]
+    assert "VIBELUTION_LLM_TEST_ENV_KEY" not in os.environ
 
 
 def test_list_llm_model_options_detects_windows_user_scoped_model_key(monkeypatch):

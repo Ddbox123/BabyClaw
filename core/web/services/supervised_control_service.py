@@ -405,7 +405,9 @@ def request_stop_supervised_run(run_id: str) -> dict[str, Any]:
 
     publish_terminal = False
     with _RUN_STATE_LOCK:
-        state = _require_run_locked(normalized, lang=lang)
+        state = _RUN_STATES.get(normalized)
+        if state is None:
+            return _cancel_file_only_supervised_run(normalized, lang=lang)
         controller = _require_controller_locked(normalized, lang=lang)
         status = str(state.get("status") or "").strip().lower()
         now = _now_timestamp()
@@ -465,6 +467,53 @@ def request_stop_supervised_run(run_id: str) -> dict[str, Any]:
     controller.request_stop()
     _publish_run_snapshot(normalized, terminal=publish_terminal)
     return get_supervised_run_snapshot(normalized)
+
+
+def _cancel_file_only_supervised_run(run_id: str, *, lang: str) -> dict[str, Any]:
+    stored = load_manager_run_snapshot("supervised", run_id)
+    if stored is None:
+        raise SupervisedRunNotFoundError(text_for(lang, zh="未找到监督记录。", en="Supervised run not found."))
+
+    status = str(stored.get("status") or "").strip().lower()
+    if status not in _ACTIVE_RUN_STATUSES:
+        return _decorate_supervised_snapshot(_clone_locked(stored))
+
+    now = _now_timestamp()
+    summary = text_for(
+        lang,
+        zh="运行管理器中断后已清理孤儿监督运行。",
+        en="The orphaned supervised run was cleaned up after the runtime manager lost its live control context.",
+    )
+    reason = text_for(
+        lang,
+        zh="监督运行只有持久化快照，没有可继续控制的内存运行上下文。",
+        en="The supervised run only had a persisted snapshot and no live in-memory control context.",
+    )
+    payload = _clone_locked(stored)
+    payload["status"] = "cancelled"
+    payload["currentPhase"] = "cancelled"
+    payload["runtimeStatus"] = "idle"
+    payload["updatedAt"] = now
+    payload["finishedAt"] = now
+    payload["stopRequested"] = True
+    payload["stopRequestedAt"] = str(payload.get("stopRequestedAt") or now)
+    payload["pauseRequested"] = False
+    payload["reason"] = reason
+    payload["latestMessage"] = summary
+    payload["currentTask"] = text_for(
+        lang,
+        zh="监督任务已结束，不再继续执行。",
+        en="The supervised run has stopped and will not continue.",
+    )
+    _append_control_event_locked(
+        payload,
+        event="run_cancelled",
+        title="监督任务已终止",
+        summary=summary,
+        status="cancelled",
+    )
+    persisted = persist_manager_run_snapshot("supervised", payload, active_run_id="")
+    return _decorate_supervised_snapshot(_clone_locked(persisted))
 
 
 def stream_active_supervised_run_events(initial_snapshot: dict[str, Any] | None = None):

@@ -61,11 +61,11 @@ def validate_control_source(request: Request) -> ControlGuardError | None:
         return ControlGuardError(403, "Untrusted web control host")
 
     origin = request.headers.get("origin", "")
-    if origin and not _is_trusted_origin(origin):
+    if origin and not (_is_trusted_origin(origin) or _matches_request_origin(origin, request)):
         return ControlGuardError(403, "Untrusted web control origin")
 
     referer = request.headers.get("referer", "")
-    if not origin and referer and not _is_trusted_referer(referer):
+    if not origin and referer and not (_is_trusted_referer(referer) or _matches_request_origin(referer, request)):
         return ControlGuardError(403, "Untrusted web control referer")
 
     return None
@@ -130,6 +130,17 @@ def _is_trusted_origin(value: str) -> bool:
 def _is_trusted_referer(value: str) -> bool:
     normalized = _normalize_origin(value)
     return bool(normalized and normalized in trusted_control_origins())
+
+
+def _matches_request_origin(value: str, request: Request) -> bool:
+    normalized = _normalize_origin(value)
+    if not normalized:
+        return False
+    host = request.headers.get("host", "")
+    if not host or not _is_trusted_host(host):
+        return False
+    request_origin = _normalize_origin(f"{request.url.scheme}://{host}")
+    return bool(request_origin and normalized == request_origin)
 
 
 def _normalize_origin(value: str) -> str:

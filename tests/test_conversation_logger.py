@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from core.logging.logger import ConversationLogger
+from core.logging.transcript_logger import TranscriptLogger
 
 
 def _fresh_logger(tmp_path: Path) -> ConversationLogger:
@@ -129,3 +130,43 @@ def test_session_file_name_includes_readable_label(tmp_path):
     assert session_file.name == "conversation_20260520_120001__chat__继续修复对话日志吞消息问题.jsonl"
     record = json.loads(session_file.read_text(encoding="utf-8").splitlines()[-1])
     assert record["session_label"] == "chat__继续修复对话日志吞消息问题"
+
+
+def test_turn_end_writes_round_summary_before_terminal_marker(tmp_path):
+    logger = _fresh_logger(tmp_path)
+
+    logger.log_turn_end(1, {"iterations": 3, "tool_calls": 2})
+
+    session_file = tmp_path / "conversation_test_session.jsonl"
+    lines = [json.loads(line) for line in session_file.read_text(encoding="utf-8").splitlines()]
+
+    assert lines[-2]["type"] == "round_summary"
+    assert lines[-2]["turn"] == 1
+    assert lines[-2]["summary"]["session_id"] == "test_session"
+    assert lines[-2]["summary"]["stats"] == {"iterations": 3, "tool_calls": 2}
+    assert lines[-1]["type"] == "turn_end"
+    assert lines[-1]["stats"] == {"iterations": 3, "tool_calls": 2}
+
+
+def test_transcript_writer_marks_queue_items_done(tmp_path):
+    TranscriptLogger._instance = None
+    logger = TranscriptLogger()
+    logger._logs_dir = tmp_path
+    logger.start_session()
+    logger.write_external_request("flush me")
+
+    logger._flush_pending_writes()
+
+    assert logger._write_queue.unfinished_tasks == 0
+    assert "flush me" in logger._get_transcript_file().read_text(encoding="utf-8")
+
+
+def test_transcript_writer_marks_failed_items_done(tmp_path):
+    TranscriptLogger._instance = None
+    logger = TranscriptLogger()
+    logger._logs_dir = tmp_path
+    logger._write_queue.put((tmp_path, "cannot append to directory"))
+
+    logger._flush_pending_writes()
+
+    assert logger._write_queue.unfinished_tasks == 0

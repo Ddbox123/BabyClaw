@@ -34,6 +34,7 @@ export type LogDiagnostics = {
   nonEmptyLineCount: number;
   errorCount: number;
   warningCount: number;
+  ignoredSignalCount?: number;
   firstSignalLine: number | null;
   firstSignalPreview: string;
   lastSignalLine: number | null;
@@ -120,6 +121,38 @@ export type RuntimeSceneDeleteResponse = {
   deletedSceneIds: string[];
   missingSceneIds: string[];
   summary: string;
+};
+
+export type GitStatusFile = {
+  path: string;
+  status: string;
+  statusLabel: string;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+  deleted: boolean;
+  oldPath: string;
+};
+
+export type GitStatusSummary = {
+  available: boolean;
+  error: string;
+  branch: string;
+  headRev: string;
+  headRevShort: string;
+  snapshotId: string;
+  createdAt: string;
+  dirty: boolean;
+  summary: string;
+  counts: {
+    total: number;
+    staged: number;
+    unstaged: number;
+    untracked: number;
+    deleted: number;
+  };
+  files: GitStatusFile[];
+  truncated: boolean;
 };
 
 export type LogTreeResponse = {
@@ -1087,18 +1120,115 @@ export type PetSummary = {
 
 export type ResetSummary = {
   warning: string;
+  mode: "custom" | string;
+  items: ResetInventoryItem[];
+  protected: ResetProtectedGroup[];
   presets: Array<{
     id: string;
     label: string;
     keys: string[];
   }>;
-  categories: Array<{
-    id: string;
-    name: string;
-    description: string;
-    detail: string;
-    exists: boolean;
-    size: string;
-    fileCount: number;
-  }>;
+  categories: ResetInventoryItem[];
+};
+
+export type ResetInventoryItem = {
+  id: string;
+  name: string;
+  description: string;
+  detail: string;
+  risk: "low" | "medium" | "high" | string;
+  defaultSelected: boolean;
+  exists: boolean;
+  sizeBytes: number;
+  size: string;
+  fileCount: number;
+  candidateCount: number;
+  protectedCount: number;
+  missingCount: number;
+  rebuildHint: string;
+};
+
+export type ResetProtectedGroup = {
+  id: string;
+  label: string;
+  paths: string[];
+  reason: string;
+};
+
+export type ResetPathEntry = {
+  path: string;
+  kind: string;
+  action: string;
+  sizeBytes?: number;
+  fileCount?: number;
+  status?: string;
+  message?: string;
+};
+
+export type ResetItemTotals = {
+  deleteCount?: number;
+  deleteFileCount?: number;
+  deleteSizeBytes?: number;
+  deletedCount?: number;
+  deletedFileCount?: number;
+  deletedSizeBytes?: number;
+  skippedCount: number;
+  protectedCount: number;
+  failedCount: number;
+};
+
+export type ResetPreviewItem = {
+  id: string;
+  name: string;
+  risk: string;
+  deleteCandidates: ResetPathEntry[];
+  skipped: ResetPathEntry[];
+  protected: ResetPathEntry[];
+  failed: ResetPathEntry[];
+  warnings: string[];
+  truncated: boolean;
+  summary: ResetItemTotals;
+};
+
+export type ResetExecuteItem = {
+  id: string;
+  name: string;
+  risk: string;
+  deleted: ResetPathEntry[];
+  skipped: ResetPathEntry[];
+  protected: ResetPathEntry[];
+  failed: ResetPathEntry[];
+  warnings: string[];
+  truncated: boolean;
+  summary: ResetItemTotals;
+};
+
+export type ResetTotals = {
+  deleteCount: number;
+  deleteFileCount: number;
+  deleteSizeBytes: number;
+  deletedCount: number;
+  deletedFileCount: number;
+  deletedSizeBytes: number;
+  skippedCount: number;
+  protectedCount: number;
+  failedCount: number;
+};
+
+export type ResetPreviewResponse = {
+  selectedItemIds: string[];
+  items: ResetPreviewItem[];
+  totals: ResetTotals;
+  warnings: string[];
+  rebuildHints: string[];
+  summary: string;
+};
+
+export type ResetExecuteResponse = {
+  selectedItemIds: string[];
+  items: ResetExecuteItem[];
+  totals: ResetTotals;
+  warnings: string[];
+  rebuildHints: string[];
+  summary: string;
 };

@@ -3,9 +3,22 @@ const CONTROL_TOKEN_HEADER_FALLBACK = "X-Vibelution-Control-Token";
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 let controlTokenPromise: Promise<{ header: string; token: string }> | null = null;
+let fetchJsonFailureReporter: ((report: FetchJsonFailureReport) => void) | null = null;
+
+export type FetchJsonFailureReport = {
+  endpoint: string;
+  method: string;
+  status: number | null;
+  message: string;
+  failureKind: "http" | "network";
+};
 
 export function resetControlTokenForTests() {
   controlTokenPromise = null;
+}
+
+export function setFetchJsonFailureReporter(reporter: ((report: FetchJsonFailureReport) => void) | null) {
+  fetchJsonFailureReporter = reporter;
 }
 
 export async function getControlToken(): Promise<{ header: string; token: string }> {
@@ -40,6 +53,39 @@ function shouldAttachControlToken(input: string, method: string): boolean {
   return MUTATING_METHODS.has(method) && input.startsWith("/api/");
 }
 
+function apiEndpointForTelemetry(input: string): string {
+  if (input.startsWith("/api/")) {
+    return input;
+  }
+  if (typeof window === "undefined") {
+    return "";
+  }
+  try {
+    const url = new URL(input, window.location.origin);
+    if (url.origin !== window.location.origin || !url.pathname.startsWith("/api/")) {
+      return "";
+    }
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return "";
+  }
+}
+
+function reportFetchJsonFailure(input: string, report: Omit<FetchJsonFailureReport, "endpoint">) {
+  const endpoint = apiEndpointForTelemetry(input);
+  if (!endpoint || !fetchJsonFailureReporter) {
+    return;
+  }
+  try {
+    fetchJsonFailureReporter({
+      endpoint,
+      ...report,
+    });
+  } catch {
+    // Telemetry must not affect the request path.
+  }
+}
+
 export async function fetchJson<T>(input: string, init?: RequestInit): Promise<T> {
   const method = String(init?.method ?? "GET").toUpperCase();
   const headers = new Headers(init?.headers ?? {});
@@ -49,11 +95,23 @@ export async function fetchJson<T>(input: string, init?: RequestInit): Promise<T
     headers.set(control.header, control.token);
   }
 
-  const response = await fetch(input, {
-    ...init,
-    headers,
-    credentials: init?.credentials ?? "same-origin",
-  });
+  let response: Response;
+  try {
+    response = await fetch(input, {
+      ...init,
+      headers,
+      credentials: init?.credentials ?? "same-origin",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    reportFetchJsonFailure(input, {
+      method,
+      status: null,
+      message: message || "Network request failed",
+      failureKind: "network",
+    });
+    throw error;
+  }
 
   if (!response.ok) {
     const contentType = response.headers.get("content-type") ?? "";
@@ -69,6 +127,12 @@ export async function fetchJson<T>(input: string, init?: RequestInit): Promise<T
     if (!message) {
       message = await response.text();
     }
+    reportFetchJsonFailure(input, {
+      method,
+      status: response.status,
+      message: message || `Request failed: ${response.status}`,
+      failureKind: "http",
+    });
     throw new Error(message || `Request failed: ${response.status}`);
   }
 

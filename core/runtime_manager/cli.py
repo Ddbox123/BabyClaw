@@ -46,6 +46,9 @@ def _print_status(snapshot: dict) -> None:
     print(f"Browser   : {'running' if browser_pid else 'stopped'} (window PID={browser_pid or '-'})")
     print(f"URL       : {workbench.get('url') or ''}")
     print(f"State     : {snapshot.get('statePath') or ''}")
+    runtime_manager = snapshot.get("runtimeManager") if isinstance(snapshot.get("runtimeManager"), dict) else {}
+    if runtime_manager and runtime_manager.get("sourceMatches") is False:
+        print("Manager   : source changed; next command will restart the runtime manager")
     if workbench.get("failureMessage"):
         print(f"Error     : {workbench.get('failureMessage')}")
 

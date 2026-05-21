@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -11,16 +12,20 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 from .control import WebControlGuardMiddleware, control_token_payload, ensure_control_source, trusted_control_origins
 from .routes.config import router as config_router
 from .routes.evolution import router as evolution_router
 from .routes.files import router as files_router
+from .routes.git import router as git_router
 from .routes.logs import router as logs_router
 from .routes.pet import router as pet_router
 from .routes.reset import router as reset_router
 from .routes.runtime import router as runtime_router
 from .routes.sessions import router as sessions_router
+from .services.runtime_scene_service import record_backend_api_event
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -65,6 +70,75 @@ def _is_windows_proactor_disconnect_noise(context: dict[str, Any]) -> bool:
     return "proactorbasepipetransport._call_connection_lost" in haystack
 
 
+class RuntimeSceneApiEventMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next) -> Response:
+        start = time.perf_counter()
+        should_record = _should_record_api_runtime_event(request)
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            if should_record:
+                _record_api_runtime_event(
+                    request,
+                    status_code=500,
+                    duration_ms=(time.perf_counter() - start) * 1000,
+                    exception=exc,
+                )
+            raise
+
+        if should_record and _is_signal_api_response(request, response.status_code):
+            _record_api_runtime_event(
+                request,
+                status_code=response.status_code,
+                duration_ms=(time.perf_counter() - start) * 1000,
+            )
+        return response
+
+
+def _should_record_api_runtime_event(request: Request) -> bool:
+    path = str(request.url.path or "")
+    if not path.startswith("/api/"):
+        return False
+    if path in {"/api/health", "/api/control-token", "/api/runtime/browser-telemetry", "/api/runtime/events"}:
+        return False
+    return True
+
+
+def _is_signal_api_response(request: Request, status_code: int) -> bool:
+    method = request.method.upper()
+    if method in {"POST", "PUT", "PATCH", "DELETE"}:
+        return True
+    return int(status_code or 0) >= 400
+
+
+def _record_api_runtime_event(
+    request: Request,
+    *,
+    status_code: int,
+    duration_ms: float,
+    exception: Exception | None = None,
+) -> None:
+    try:
+        route = request.scope.get("route")
+        path_template = str(getattr(route, "path", "") or request.url.path)
+        client = request.client.host if request.client else ""
+        record_backend_api_event(
+            {
+                "method": request.method.upper(),
+                "path": str(request.url.path or ""),
+                "path_template": path_template,
+                "query": str(request.url.query or ""),
+                "status_code": int(status_code or 0),
+                "duration_ms": duration_ms,
+                "client": client,
+                "exception_type": type(exception).__name__ if exception else "",
+                "exception_message": str(exception or ""),
+            }
+        )
+    except Exception:
+        pass
+
+
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
     loop = asyncio.get_running_loop()
@@ -103,6 +177,7 @@ def create_app() -> FastAPI:
         allow_headers=["*", "X-Vibelution-Control-Token"],
     )
     app.add_middleware(WebControlGuardMiddleware)
+    app.add_middleware(RuntimeSceneApiEventMiddleware)
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
@@ -116,6 +191,7 @@ def create_app() -> FastAPI:
     app.include_router(runtime_router, prefix="/api")
     app.include_router(sessions_router, prefix="/api")
     app.include_router(files_router, prefix="/api")
+    app.include_router(git_router, prefix="/api")
     app.include_router(logs_router, prefix="/api")
     app.include_router(evolution_router, prefix="/api")
     app.include_router(config_router, prefix="/api")

@@ -68,14 +68,16 @@ class TranscriptLogger:
     def _writer_loop(self):
         """后台线程：从队列中取出内容并写入文件"""
         while True:
+            filepath, content = self._write_queue.get()
             try:
-                filepath, content = self._write_queue.get()
                 if filepath is None:
-                    break
+                    return
                 with open(filepath, 'a', encoding='utf-8') as f:
                     f.write(content)
             except Exception:
                 pass
+            finally:
+                self._write_queue.task_done()
 
     def _enqueue_write(self, content: str):
         """将写入内容放入队列，由后台线程异步写入"""

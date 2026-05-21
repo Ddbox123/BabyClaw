@@ -1809,6 +1809,15 @@ function Stop-ManagedSession {
         }
         Write-Note "Keeping the browser window open until the backend stops."
     }
+
+    $stopFailures = @()
+    if (-not $backendStopped) {
+        $stopFailures += "backend did not stop"
+    }
+    if (-not $browserStopped) {
+        $stopFailures += "browser did not stop"
+    }
+    throw "Managed session did not stop cleanly: $($stopFailures -join '; ')."
 }
 
 function Show-Status {

@@ -8,16 +8,48 @@ import pytest
 from fastapi.testclient import TestClient
 
 from core.web.app import create_app
+from core.web.control import CONTROL_TOKEN_HEADER, get_control_token
 from core.web.routes import evolution as evolution_routes
 from core.web.services import self_evolution_control_service as service
 
 
-client = TestClient(create_app())
+client = TestClient(create_app(), headers={CONTROL_TOKEN_HEADER: get_control_token()})
 
 
 @pytest.fixture(autouse=True)
 def reset_self_evolution_run_state(monkeypatch: pytest.MonkeyPatch):
+    manager_store: dict[str, dict[str, dict]] = {"self": {}, "supervised": {}}
+    manager_index: dict[str, dict[str, str]] = {
+        "self": {"activeRunId": "", "latestRunId": ""},
+        "supervised": {"activeRunId": "", "latestRunId": ""},
+    }
+
+    def fake_persist_manager_run_snapshot(kind: str, snapshot: dict, *, active_run_id: str = "") -> dict:
+        run_id = str(snapshot.get("runId") or "").strip()
+        payload = copy.deepcopy(snapshot)
+        manager_store.setdefault(kind, {})[run_id] = payload
+        manager_index.setdefault(kind, {"activeRunId": "", "latestRunId": ""})
+        manager_index[kind]["activeRunId"] = str(active_run_id or "").strip()
+        manager_index[kind]["latestRunId"] = run_id
+        return copy.deepcopy(payload)
+
+    def fake_load_manager_run_snapshot(kind: str, run_id: str) -> dict | None:
+        payload = manager_store.get(kind, {}).get(str(run_id or "").strip())
+        return copy.deepcopy(payload) if payload is not None else None
+
+    def fake_load_manager_active_run_snapshot(kind: str) -> dict | None:
+        active_run_id = manager_index.get(kind, {}).get("activeRunId", "")
+        return fake_load_manager_run_snapshot(kind, active_run_id)
+
+    def fake_load_manager_latest_run_snapshot(kind: str) -> dict | None:
+        latest_run_id = manager_index.get(kind, {}).get("latestRunId", "")
+        return fake_load_manager_run_snapshot(kind, latest_run_id)
+
     monkeypatch.setattr(service, "_runtime_manager_live_control_enabled", lambda: False)
+    monkeypatch.setattr(service, "persist_manager_run_snapshot", fake_persist_manager_run_snapshot)
+    monkeypatch.setattr(service, "load_manager_run_snapshot", fake_load_manager_run_snapshot)
+    monkeypatch.setattr(service, "load_manager_active_run_snapshot", fake_load_manager_active_run_snapshot)
+    monkeypatch.setattr(service, "load_manager_latest_run_snapshot", fake_load_manager_latest_run_snapshot)
     with service._RUN_STATE_LOCK:
         service._RUN_STATES.clear()
         service._RUN_INTERNALS.clear()
@@ -265,6 +297,7 @@ def test_runtime_manager_latest_self_evolution_run_reads_store(monkeypatch):
 
     monkeypatch.setattr(service, "_runtime_manager_live_control_enabled", lambda: True)
     monkeypatch.setattr(service, "load_manager_latest_run_snapshot", lambda kind: snapshot if kind == "self" else None)
+    monkeypatch.setattr(service, "load_manager_active_run_snapshot", lambda kind: snapshot if kind == "self" else None)
 
     result = service.get_latest_self_evolution_run()
 
@@ -273,6 +306,69 @@ def test_runtime_manager_latest_self_evolution_run_reads_store(monkeypatch):
     assert result["status"] == snapshot["status"]
     assert result["runSemantics"]["runStatus"] == "running"
     assert result["actionStates"]["pause"]["enabled"] is True
+
+
+def test_runtime_manager_latest_self_evolution_run_closes_orphaned_locked_snapshot(monkeypatch):
+    snapshot = {
+        "runId": "web-self-orphan",
+        "goal": "orphan",
+        "status": "queued",
+        "phase": "queued",
+        "startedAt": "2026-05-18T12:00:00Z",
+        "updatedAt": "2026-05-18T12:00:00Z",
+        "finishedAt": "",
+        "latestMessage": "queued",
+        "currentGoal": "orphan",
+        "lastToolName": "",
+        "runtimeStatus": "working",
+        "toolCallCount": 0,
+        "summary": "",
+        "error": "",
+        "cancelRequested": False,
+        "cancelRequestedAt": "",
+        "stopReason": "",
+        "controlAction": "",
+        "controlRequestedAt": "",
+        "messages": [],
+        "turnCount": 0,
+        "resumeCount": 0,
+        "rollback": {
+            "status": "unavailable",
+            "reason": "",
+            "baseRev": "",
+            "rolledBackAt": "",
+            "entryCount": 0,
+            "touchedFiles": [],
+            "conflictFiles": [],
+            "blockedHint": "",
+        },
+    }
+    persisted: dict[str, object] = {}
+
+    monkeypatch.setattr(service, "_runtime_manager_live_control_enabled", lambda: True)
+    monkeypatch.setattr(service, "load_manager_latest_run_snapshot", lambda kind: copy.deepcopy(snapshot) if kind == "self" else None)
+    monkeypatch.setattr(service, "load_manager_active_run_snapshot", lambda kind: None)
+
+    def fake_persist(kind: str, payload: dict, *, active_run_id: str = "") -> dict:
+        persisted["kind"] = kind
+        persisted["payload"] = copy.deepcopy(payload)
+        persisted["active_run_id"] = active_run_id
+        return copy.deepcopy(payload)
+
+    monkeypatch.setattr(service, "persist_manager_run_snapshot", fake_persist)
+
+    result = service.get_latest_self_evolution_run()
+
+    assert result is not None
+    assert result["status"] == "cancelled"
+    assert result["phase"] == "cancelled"
+    assert result["runtimeStatus"] == "idle"
+    assert result["cancelRequested"] is True
+    assert result["finishedAt"]
+    assert result["messages"][-1]["role"] == "assistant"
+    assert persisted["kind"] == "self"
+    assert persisted["active_run_id"] == ""
+    assert persisted["payload"]["status"] == "cancelled"
 
 
 def test_runtime_manager_start_self_evolution_still_blocks_running_sessions(monkeypatch):
@@ -361,6 +457,67 @@ def test_request_pause_self_evolution_run_marks_queued_run_paused():
     assert snapshot["phase"] == "paused"
     assert snapshot["messages"][-1]["role"] == "assistant"
     assert snapshot["messages"][-1]["content"] == snapshot["latestMessage"]
+
+
+def test_request_stop_self_evolution_run_closes_file_only_queued_run(monkeypatch):
+    run_id = "web-self-file-only"
+    persisted: dict[str, object] = {}
+    stored = {
+        "runId": run_id,
+        "goal": "file only",
+        "status": "queued",
+        "phase": "queued",
+        "startedAt": "2026-05-18T12:00:00Z",
+        "updatedAt": "2026-05-18T12:00:00Z",
+        "finishedAt": "",
+        "latestMessage": "queued",
+        "currentGoal": "file only",
+        "lastToolName": "",
+        "runtimeStatus": "working",
+        "toolCallCount": 0,
+        "summary": "",
+        "error": "",
+        "cancelRequested": False,
+        "cancelRequestedAt": "",
+        "stopReason": "",
+        "controlAction": "",
+        "controlRequestedAt": "",
+        "messages": [],
+        "turnCount": 0,
+        "resumeCount": 0,
+        "rollback": {
+            "status": "unavailable",
+            "reason": "",
+            "baseRev": "",
+            "rolledBackAt": "",
+            "entryCount": 0,
+            "touchedFiles": [],
+            "conflictFiles": [],
+            "blockedHint": "",
+        },
+    }
+
+    monkeypatch.setattr(service, "load_manager_run_snapshot", lambda kind, loaded_run_id: copy.deepcopy(stored) if kind == "self" and loaded_run_id == run_id else None)
+
+    def fake_persist(kind: str, payload: dict, *, active_run_id: str = "") -> dict:
+        persisted["kind"] = kind
+        persisted["payload"] = copy.deepcopy(payload)
+        persisted["active_run_id"] = active_run_id
+        return copy.deepcopy(payload)
+
+    monkeypatch.setattr(service, "persist_manager_run_snapshot", fake_persist)
+
+    snapshot = service.request_stop_self_evolution_run(run_id)
+
+    assert snapshot["status"] == "cancelled"
+    assert snapshot["phase"] == "cancelled"
+    assert snapshot["runtimeStatus"] == "idle"
+    assert snapshot["cancelRequested"] is True
+    assert snapshot["finishedAt"]
+    assert snapshot["messages"][-1]["role"] == "assistant"
+    assert persisted["kind"] == "self"
+    assert persisted["active_run_id"] == ""
+    assert persisted["payload"]["status"] == "cancelled"
 
 
 def test_resume_self_evolution_run_requeues_paused_run(monkeypatch):

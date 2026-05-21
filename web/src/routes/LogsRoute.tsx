@@ -55,10 +55,15 @@ type ActionNotice = {
 
 const RESIZE_HANDLE_WIDTH = 16;
 const LOG_SIDEBAR_STORAGE_KEY = "vibelution.logs.sidebar-width";
+const LOG_RIGHT_RAIL_STORAGE_KEY = "vibelution.logs.right-rail-width";
 const DEFAULT_LOG_SIDEBAR_WIDTH = 320;
+const DEFAULT_LOG_RIGHT_RAIL_WIDTH = 280;
 const MIN_LOG_SIDEBAR_WIDTH = 280;
+const MIN_LOG_RIGHT_RAIL_WIDTH = 220;
 const MAX_LOG_SIDEBAR_WIDTH = 560;
+const MAX_LOG_RIGHT_RAIL_WIDTH = 520;
 const MIN_LOG_PREVIEW_WIDTH = 520;
+const MIN_LOG_MAIN_WIDTH = 640;
 const KEYBOARD_RESIZE_STEP = 24;
 
 type DragState = {
@@ -77,6 +82,15 @@ function getMaxSidebarWidth(layoutWidth: number) {
 
 function normalizeSidebarWidth(layoutWidth: number, sidebarWidth: number) {
   return Math.round(clamp(sidebarWidth, MIN_LOG_SIDEBAR_WIDTH, getMaxSidebarWidth(layoutWidth)));
+}
+
+function getMaxRightRailWidth(layoutWidth: number) {
+  const maxWidth = layoutWidth - RESIZE_HANDLE_WIDTH - MIN_LOG_MAIN_WIDTH;
+  return Math.max(MIN_LOG_RIGHT_RAIL_WIDTH, Math.min(MAX_LOG_RIGHT_RAIL_WIDTH, maxWidth));
+}
+
+function normalizeRightRailWidth(layoutWidth: number, rightRailWidth: number) {
+  return Math.round(clamp(rightRailWidth, MIN_LOG_RIGHT_RAIL_WIDTH, getMaxRightRailWidth(layoutWidth)));
 }
 
 function filterTree(nodes: FileTreeNode[], query: string): FileTreeNode[] {
@@ -386,6 +400,7 @@ async function copyText(text: string) {
 export function LogsRoute() {
   const { lang, t, statusLabel } = useAppI18n();
   const queryClient = useQueryClient();
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
   const layoutRef = useRef<HTMLDivElement | null>(null);
   const [activeRootId, setActiveRootId] = useState<string>("");
   const [openPaths, setOpenPaths] = useState<Record<string, string>>({});
@@ -395,6 +410,7 @@ export function LogsRoute() {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
   const [actionNotice, setActionNotice] = useState<ActionNotice | null>(null);
   const [dragState, setDragState] = useState<DragState | null>(null);
+  const [rightRailDragState, setRightRailDragState] = useState<DragState | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     if (typeof window === "undefined") {
       return DEFAULT_LOG_SIDEBAR_WIDTH;
@@ -403,6 +419,15 @@ export function LogsRoute() {
     return Number.isFinite(saved)
       ? clamp(saved, MIN_LOG_SIDEBAR_WIDTH, MAX_LOG_SIDEBAR_WIDTH)
       : DEFAULT_LOG_SIDEBAR_WIDTH;
+  });
+  const [rightRailWidth, setRightRailWidth] = useState(() => {
+    if (typeof window === "undefined") {
+      return DEFAULT_LOG_RIGHT_RAIL_WIDTH;
+    }
+    const saved = Number(window.localStorage.getItem(LOG_RIGHT_RAIL_STORAGE_KEY) || "");
+    return Number.isFinite(saved)
+      ? clamp(saved, MIN_LOG_RIGHT_RAIL_WIDTH, MAX_LOG_RIGHT_RAIL_WIDTH)
+      : DEFAULT_LOG_RIGHT_RAIL_WIDTH;
   });
 
   const rootsQuery = useQuery({
@@ -439,6 +464,17 @@ export function LogsRoute() {
       setSidebarWidth(normalized);
     }
   }, [sidebarWidth]);
+
+  const syncRightRailWidthToLayout = useCallback(() => {
+    const layoutWidth = workspaceRef.current?.getBoundingClientRect().width ?? 0;
+    if (!layoutWidth) {
+      return;
+    }
+    const normalized = normalizeRightRailWidth(layoutWidth, rightRailWidth);
+    if (normalized !== rightRailWidth) {
+      setRightRailWidth(normalized);
+    }
+  }, [rightRailWidth]);
 
   const treeQuery = useQuery({
     queryKey: queryKeys.logTree(activeRoot?.id ?? ""),
@@ -600,6 +636,13 @@ export function LogsRoute() {
   }, [sidebarWidth]);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(LOG_RIGHT_RAIL_STORAGE_KEY, String(rightRailWidth));
+  }, [rightRailWidth]);
+
+  useEffect(() => {
     if (isRuntimeScenesRoot) {
       setDragState(null);
       return;
@@ -617,6 +660,20 @@ export function LogsRoute() {
     observer.observe(layoutElement);
     return () => observer.disconnect();
   }, [isRuntimeScenesRoot, syncSidebarWidthToLayout]);
+
+  useEffect(() => {
+    syncRightRailWidthToLayout();
+    const layoutElement = workspaceRef.current;
+    if (!layoutElement) {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      syncRightRailWidthToLayout();
+    });
+    observer.observe(layoutElement);
+    return () => observer.disconnect();
+  }, [syncRightRailWidthToLayout]);
 
   useEffect(() => {
     if (!dragState) {
@@ -655,6 +712,43 @@ export function LogsRoute() {
     };
   }, [dragState]);
 
+  useEffect(() => {
+    if (!rightRailDragState) {
+      return;
+    }
+
+    const activeDrag = rightRailDragState;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    function stopDragging() {
+      setRightRailDragState(null);
+    }
+
+    function handlePointerMove(event: globalThis.PointerEvent) {
+      const layoutWidth = workspaceRef.current?.getBoundingClientRect().width ?? 0;
+      if (!layoutWidth) {
+        return;
+      }
+      const delta = activeDrag.startX - event.clientX;
+      setRightRailWidth(normalizeRightRailWidth(layoutWidth, activeDrag.startWidth + delta));
+    }
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopDragging);
+    window.addEventListener("pointercancel", stopDragging);
+
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopDragging);
+      window.removeEventListener("pointercancel", stopDragging);
+    };
+  }, [rightRailDragState]);
+
   const filteredTree = useMemo(
     () => filterTree(treeQuery.data?.nodes ?? [], fileFilter),
     [fileFilter, treeQuery.data?.nodes],
@@ -664,8 +758,9 @@ export function LogsRoute() {
     () =>
       ({
         "--logs-sidebar-width": `${sidebarWidth}px`,
+        "--logs-right-rail-width": `${rightRailWidth}px`,
       }) as CSSProperties,
-    [sidebarWidth],
+    [rightRailWidth, sidebarWidth],
   );
 
   async function handleCopy() {
@@ -770,6 +865,13 @@ export function LogsRoute() {
     });
   }
 
+  function beginRightRailResize(clientX: number) {
+    setRightRailDragState({
+      startX: clientX,
+      startWidth: rightRailWidth,
+    });
+  }
+
   function handleResizeStart(event: PointerEvent<HTMLButtonElement>) {
     if (event.button !== 0) {
       return;
@@ -810,6 +912,50 @@ export function LogsRoute() {
     setSidebarWidth(Math.round(nextWidth));
   }
 
+  function handleRightRailResizeStart(event: PointerEvent<HTMLButtonElement>) {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    beginRightRailResize(event.clientX);
+  }
+
+  function handleRightRailResizeMouseDown(event: MouseEvent<HTMLButtonElement>) {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    beginRightRailResize(event.clientX);
+  }
+
+  function handleRightRailResizeKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
+    if (!workspaceRef.current) {
+      return;
+    }
+
+    const { key } = event;
+    const direction =
+      key === "ArrowLeft" ? 1 : key === "ArrowRight" ? -1 : key === "Home" ? "min" : key === "End" ? "max" : null;
+    if (direction === null) {
+      return;
+    }
+
+    event.preventDefault();
+    const layoutWidth = workspaceRef.current.getBoundingClientRect().width;
+    const maxWidth = getMaxRightRailWidth(layoutWidth);
+    const nextWidth =
+      direction === "min"
+        ? MIN_LOG_RIGHT_RAIL_WIDTH
+        : direction === "max"
+          ? maxWidth
+          : clamp(
+              rightRailWidth + Number(direction) * KEYBOARD_RESIZE_STEP,
+              MIN_LOG_RIGHT_RAIL_WIDTH,
+              maxWidth,
+            );
+    setRightRailWidth(Math.round(nextWidth));
+  }
+
   const copyLabel =
     copyState === "copied" ? t("copied") : copyState === "error" ? t("copyFailed") : t("copyContent");
   const severityFilterOptions: Array<{
@@ -826,6 +972,7 @@ export function LogsRoute() {
       ? `${t("selectedFiles")} ${selectedLogPaths.length} 个`
       : `${selectedLogPaths.length} ${t("selectedFiles")}`;
   const destructiveBusy = deleteLogsMutation.isPending;
+  const resizeRightRailLabel = lang === "zh" ? "调整右侧日志导航宽度" : "Resize right log navigation";
   const severityFilterControl = (
     <div className={styles.filterGroup} role="group" aria-label={t("logSeverityFilter")}>
       {severityFilterOptions.map((option) => {
@@ -880,11 +1027,11 @@ export function LogsRoute() {
         </div>
       </header>
 
-      <div className={styles.workspace}>
+      <div ref={workspaceRef} className={styles.workspace} style={layoutStyle}>
         {activeRoot && isRuntimeScenesRoot ? (
           <RuntimeScenesPane activeRoot={activeRoot} lang={lang} t={t} statusLabel={statusLabel} />
         ) : (
-          <div ref={layoutRef} className={styles.resizableLayout} style={layoutStyle}>
+          <div ref={layoutRef} className={styles.resizableLayout}>
             <aside className={styles.sidebar}>
               <div className={styles.sidebarHeader}>
                 <div>
@@ -1026,6 +1173,23 @@ export function LogsRoute() {
           </div>
         )}
 
+        <button
+          type="button"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={resizeRightRailLabel}
+          title={resizeRightRailLabel}
+          tabIndex={0}
+          className={
+            rightRailDragState
+              ? `${styles.resizeHandle} ${styles.resizeHandleActive} ${styles.rightRailResizeHandle}`
+              : `${styles.resizeHandle} ${styles.rightRailResizeHandle}`
+          }
+          onPointerDown={handleRightRailResizeStart}
+          onMouseDown={handleRightRailResizeMouseDown}
+          onKeyDown={handleRightRailResizeKeyDown}
+        />
+
         <aside className={styles.rightRail}>
           <div className={styles.railHeader}>
             <p className={styles.sidebarEyebrow}>{t("logsRootNavigation")}</p>
@@ -1037,28 +1201,42 @@ export function LogsRoute() {
             {(rootsQuery.data ?? []).map((root) => {
               const isActive = root.id === activeRoot?.id;
               const labelKey = ROOT_LABEL_KEYS[root.id as keyof typeof ROOT_LABEL_KEYS] as RootLabelKey | undefined;
+              const rootLabel = labelKey ? t(labelKey) : root.path;
+              const latestLabel = root.summary.latestPath
+                ? `${lang === "zh" ? "最近" : "Latest"}: ${root.summary.latestPath}`
+                : lang === "zh"
+                  ? "暂无最近文件"
+                  : "No latest file";
+              const stateLabel = root.exists ? t("present") : t("missing");
+              const timestampLabel = root.exists ? formatTimestamp(root.summary.lastModifiedAt, lang) : "";
               return (
                 <button
                   key={root.id}
                   type="button"
                   className={isActive ? `${styles.rootButton} ${styles.rootButtonActive}` : styles.rootButton}
                   onClick={() => setActiveRootId(root.id)}
+                  aria-pressed={isActive}
                 >
-                  <span className={styles.rootButtonLabel}>{labelKey ? t(labelKey) : root.path}</span>
-                  <span className={styles.rootButtonPath}>{root.path}</span>
-                  <span className={styles.rootButtonGuide}>{root.summary.userGuide}</span>
-                  <span className={styles.rootButtonStats}>
-                    {root.summary.fileCount} {lang === "zh" ? "个文件" : "files"} · {formatBytes(root.summary.sizeBytes)}
+                  <span className={styles.rootButtonHeader}>
+                    <span className={styles.rootButtonLabel}>{rootLabel}</span>
+                    <span className={root.exists ? styles.rootState : `${styles.rootState} ${styles.rootStateMissing}`}>
+                      {stateLabel}
+                    </span>
                   </span>
-                  <span className={styles.rootButtonPath}>
-                    {root.summary.latestPath
-                      ? `${lang === "zh" ? "最近" : "Latest"}: ${root.summary.latestPath}`
-                      : lang === "zh"
-                        ? "暂无最近文件"
-                        : "No latest file"}
+                  <span className={styles.rootButtonPath} title={root.path}>
+                    {root.path}
                   </span>
-                  <span className={root.exists ? styles.rootState : `${styles.rootState} ${styles.rootStateMissing}`}>
-                    {root.exists ? `${t("present")} · ${formatTimestamp(root.summary.lastModifiedAt, lang)}` : t("missing")}
+                  <span className={styles.rootButtonGuide} title={root.summary.userGuide}>
+                    {root.summary.userGuide}
+                  </span>
+                  <span className={styles.rootButtonFooter}>
+                    <span className={styles.rootButtonStats}>
+                      {root.summary.fileCount} {lang === "zh" ? "个文件" : "files"} · {formatBytes(root.summary.sizeBytes)}
+                    </span>
+                    {timestampLabel ? <span className={styles.rootButtonTime}>{timestampLabel}</span> : null}
+                  </span>
+                  <span className={styles.rootButtonLatest} title={latestLabel}>
+                    {latestLabel}
                   </span>
                 </button>
               );

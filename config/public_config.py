@@ -14,6 +14,13 @@ from typing import Any
 
 from core.llm import assert_llm_compatibility
 
+from .llm_security import (
+    coerce_llm_probe_timeout,
+    redact_llm_probe_error,
+    validate_llm_api_key_env,
+    validate_llm_provider_target,
+    validate_llm_public_config,
+)
 from .models import AppConfig
 from .profiles import apply_runtime_profile
 from .settings import (
@@ -345,6 +352,11 @@ LLM_MODEL_PRESETS = {
 }
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401, ANN001
+        return None
+
+
 def _load_raw_public_config(config_path: Path) -> dict:
     raw_text = config_path.read_text(encoding="utf-8")
     try:
@@ -563,9 +575,7 @@ def _write_windows_user_env_var(name: str, value: str | None) -> None:
 
 
 def _set_user_env_var(name: str, value: str) -> None:
-    name = (name or "").strip()
-    if not name:
-        raise ValueError("api_key_env is required")
+    name = validate_llm_api_key_env(name, required=True)
     os.environ[name] = value
     if os.name != "nt":
         return
@@ -573,7 +583,7 @@ def _set_user_env_var(name: str, value: str) -> None:
 
 
 def _delete_user_env_var(name: str) -> None:
-    name = (name or "").strip()
+    name = validate_llm_api_key_env(name, required=False)
     if not name:
         return
     os.environ.pop(name, None)
@@ -679,6 +689,9 @@ def apply_llm_model_preset(
     preset = LLM_MODEL_PRESETS[preset_id]
     resolved_model_id = (model_id or str(preset["model_id"])).strip()
     resolved_provider = _resolve_public_provider_input(public_config, provider_id, fallback=preset["provider"])
+    validate_llm_provider_target(resolved_provider, context="llm.model_library")
+    if api_key_env:
+        api_key_env = validate_llm_api_key_env(api_key_env, context="llm.model_library.api_key_env")
     model_defaults = copy.deepcopy(preset["model"])
     model_defaults.update(_model_library_details(details or {}))
     resolved_model = (model or str(model_defaults.get("model", ""))).strip()
@@ -786,6 +799,9 @@ def add_llm_model(
         raise ValueError("model is required")
 
     provider = _resolve_public_provider_input(public_config, provider_id)
+    validate_llm_provider_target(provider, context="llm.model_library")
+    if api_key_env:
+        api_key_env = validate_llm_api_key_env(api_key_env, context="llm.model_library.api_key_env")
     updated = copy.deepcopy(public_config)
     llm = updated.setdefault("llm", {})
     model_library = llm.setdefault("model_library", {})
@@ -826,6 +842,9 @@ def update_llm_model(
         raise ValueError("llm.model_library must be an object")
     existing = model_library.get(model_id, {}) if isinstance(model_library.get(model_id, {}), dict) else {}
     provider = _resolve_public_provider_input(updated, provider_id, fallback=existing.get("provider"))
+    validate_llm_provider_target(provider, context="llm.model_library")
+    if api_key_env:
+        api_key_env = validate_llm_api_key_env(api_key_env, context="llm.model_library.api_key_env")
     entry = _model_library_entry(provider, model, label or model, details)
     entry["api_key_env"] = (
         api_key_env
@@ -883,7 +902,10 @@ def set_llm_model_api_key(public_config: dict, model_id: str, api_key: str) -> s
     item = model_library.get(model_id, {}) if isinstance(model_library, dict) else {}
     if not isinstance(item, dict):
         raise ValueError(f"unknown LLM model: {model_id}")
-    api_key_env = str(item.get("api_key_env") or _default_model_api_key_env(model_id)).strip()
+    api_key_env = validate_llm_api_key_env(
+        str(item.get("api_key_env") or _default_model_api_key_env(model_id)).strip(),
+        required=True,
+    )
     item["api_key_env"] = api_key_env
     _set_user_env_var(api_key_env, api_key)
     return api_key_env
@@ -895,7 +917,10 @@ def clear_llm_model_api_key(public_config: dict, model_id: str) -> str:
     item = model_library.get(model_id, {}) if isinstance(model_library, dict) else {}
     if not isinstance(item, dict):
         raise ValueError(f"unknown LLM model: {model_id}")
-    api_key_env = str(item.get("api_key_env") or _default_model_api_key_env(model_id)).strip()
+    api_key_env = validate_llm_api_key_env(
+        str(item.get("api_key_env") or _default_model_api_key_env(model_id)).strip(),
+        required=True,
+    )
     item["api_key_env"] = api_key_env
     _delete_user_env_var(api_key_env)
     return api_key_env
@@ -946,11 +971,15 @@ def add_llm_profile(
         new_profile["provider"] = copy.deepcopy(selected_option.get("provider", {}))
         new_profile["model"] = str(selected_option.get("model", "")).strip()
         new_profile.update(_model_library_details(selected_option.get("details", {})))
-        new_profile["api_key_env"] = str(selected_option.get("api_key_env", "")).strip()
+        new_profile["api_key_env"] = validate_llm_api_key_env(
+            str(selected_option.get("api_key_env", "")).strip(),
+            context="llm.profiles.api_key_env",
+        )
     else:
         if not model:
             raise ValueError("model is required")
         new_profile["provider"] = _resolve_public_provider_input(updated, provider_id, fallback=source_profile.get("provider"))
+        validate_llm_provider_target(new_profile["provider"], context="llm.profiles.provider")
         new_profile["model"] = model
     profiles[profile_id] = new_profile
     build_effective_config(updated)
@@ -960,8 +989,14 @@ def add_llm_profile(
 def _probe_llm_http(provider, profile, api_key: str | None = None) -> dict:
     if provider.requires_api_key and not api_key:
         return {"ok": False, "message": f"missing API key for provider `{provider.provider_id}`"}
+    if not provider.requires_api_key:
+        api_key = None
     if not provider.base_url:
         return {"ok": False, "message": f"missing base_url for provider `{provider.provider_id}`"}
+    try:
+        validate_llm_provider_target(provider, context="probe", resolve_dns=True)
+    except ValueError as exc:
+        return {"ok": False, "message": str(exc)}
 
     base_url = provider.base_url.rstrip("/")
     url = f"{base_url}/chat/completions"
@@ -982,7 +1017,9 @@ def _probe_llm_http(provider, profile, api_key: str | None = None) -> dict:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=min(profile.connect_timeout, profile.timeout)) as response:
+        timeout = coerce_llm_probe_timeout(profile.connect_timeout, profile.timeout)
+        opener = urllib.request.build_opener(_NoRedirectHandler)
+        with opener.open(request, timeout=timeout) as response:
             status = getattr(response, "status", 200)
             if 200 <= status < 300:
                 return {"ok": True, "message": f"connected to {profile.model}"}
@@ -990,14 +1027,19 @@ def _probe_llm_http(provider, profile, api_key: str | None = None) -> dict:
     except urllib.error.HTTPError as exc:
         return {"ok": False, "message": f"HTTP {exc.code}: {exc.reason}"}
     except Exception as exc:
-        return {"ok": False, "message": str(exc)}
+        return {"ok": False, "message": redact_llm_probe_error(str(exc), api_key=api_key)}
 
 
 def test_llm_connection(public_config: dict, profile_id: str | None = None) -> dict:
+    validate_llm_public_config(public_config)
     effective = build_effective_config(public_config)
     profile = effective.llm.get_profile(profile_id=profile_id) if profile_id else effective.llm.get_profile(role="primary")
     provider = effective.llm.get_provider(profile.provider_id)
     api_key = effective.get_api_key_for_profile(profile_id=profile.profile_id)
+    api_key_source = effective.llm.get_api_key_source_label_for_profile(profile_id=profile.profile_id)
+    if not provider.requires_api_key:
+        api_key = None
+        api_key_source = "not-required"
     try:
         result = _probe_llm_http(provider, profile, api_key)
     except TypeError:
@@ -1009,7 +1051,7 @@ def test_llm_connection(public_config: dict, profile_id: str | None = None) -> d
         "provider_kind": provider.kind,
         "base_url": provider.base_url,
         "model": profile.model,
-        "api_key_source": effective.llm.get_api_key_source_label_for_profile(profile_id=profile.profile_id),
+        "api_key_source": api_key_source,
     }
 
 
@@ -1066,6 +1108,14 @@ def _profile_api_key_status(effective: AppConfig) -> tuple[int, int]:
 def inspect_public_config(public_config: dict) -> dict[str, Any]:
     effective = build_effective_config(public_config)
     diagnosis = effective.diagnose_config()
+    try:
+        validate_llm_public_config(public_config)
+    except ValueError as exc:
+        diagnosis = copy.deepcopy(diagnosis)
+        diagnosis.setdefault("blocking_issues", []).append(f"LLM security guard: {exc}")
+        diagnosis.setdefault("suggested_actions", []).append(
+            "Review LLM provider base_url and api_key_env before testing or applying this config."
+        )
     llm = public_config.get("llm", {})
     profiles = llm.get("profiles", {}) if isinstance(llm, dict) else {}
     model_library = llm.get("model_library", {}) if isinstance(llm, dict) else {}
@@ -1117,4 +1167,7 @@ __all__ = [
     "inspect_public_config",
     "_delete_user_env_var",
     "_set_user_env_var",
+    "validate_llm_api_key_env",
+    "validate_llm_provider_target",
+    "validate_llm_public_config",
 ]

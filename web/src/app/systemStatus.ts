@@ -1,6 +1,6 @@
 import { BackendHealth, RuntimeSummary } from "../api/types";
 
-export type SystemStatusTone = "idle" | "running" | "failed";
+export type SystemStatusTone = "idle" | "running" | "failed" | "caution";
 
 export type FrontendSystemState = "connected" | "background" | "offline";
 export type BackendSystemState = "checking" | "healthy" | "offline" | "unhealthy";

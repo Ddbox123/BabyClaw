@@ -27,6 +27,7 @@ from core.web.services import (
     chat_review_service,
     config_service,
     evolution_service,
+    git_status_service,
     log_service,
     runtime_service,
     runtime_scene_service,
@@ -117,6 +118,39 @@ def test_web_control_token_endpoint_rejects_untrusted_origin():
 
     assert response.status_code == 403
     assert "origin" in response.json()["detail"].lower()
+
+
+def test_static_assets_allow_same_origin_referer_on_custom_port(tmp_path, monkeypatch):
+    dist_dir = tmp_path / "web-dist"
+    assets_dir = dist_dir / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    (dist_dir / "index.html").write_text("<!doctype html><html><body>app</body></html>", encoding="utf-8")
+    (assets_dir / "app.js").write_text("console.log('ok');", encoding="utf-8")
+
+    monkeypatch.setattr("core.web.app.WEB_DIST", dist_dir)
+    temp_client = TestClient(create_app(), base_url="http://127.0.0.1:8012")
+
+    response = temp_client.get("/assets/app.js", headers={"Referer": "http://127.0.0.1:8012/"})
+
+    assert response.status_code == 200, response.text
+    assert "console.log" in response.text
+
+
+def test_static_assets_reject_cross_origin_referer(tmp_path, monkeypatch):
+    dist_dir = tmp_path / "web-dist"
+    assets_dir = dist_dir / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    (dist_dir / "index.html").write_text("<!doctype html><html><body>app</body></html>", encoding="utf-8")
+    (assets_dir / "app.js").write_text("console.log('ok');", encoding="utf-8")
+
+    monkeypatch.setattr("core.web.app.WEB_DIST", dist_dir)
+    temp_client = TestClient(create_app(), base_url="http://127.0.0.1:8012")
+
+    response = temp_client.get("/assets/app.js", headers={"Referer": "https://example.invalid/"})
+
+    assert response.status_code == 403
+    assert "referer" in response.json()["detail"].lower()
+
 
 def _seed_runtime_scene_bundle(project_root: Path, scene_id: str = "scene-1", status: str = "stopped") -> Path:
     scene_dir = project_root / "logs" / "runtime_scenes" / f"20260518T120000Z__{scene_id}"
@@ -237,7 +271,7 @@ def _seed_runtime_scene_bundle(project_root: Path, scene_id: str = "scene-1", st
 
 def test_runtime_summary_shape():
     response = client.get("/api/runtime/summary")
-    assert response.status_code == 200
+    assert response.status_code == 200, response.json()
     payload = response.json()
     assert payload["agentName"] == "Vibelution"
     assert "mode" in payload
@@ -349,7 +383,7 @@ def test_runtime_shutdown_falls_back_to_local_exit_when_not_managed(monkeypatch)
 
 def test_files_tree_lists_repo_entries():
     response = client.get("/api/files/tree")
-    assert response.status_code == 200
+    assert response.status_code == 200, response.json()
     payload = response.json()
     assert any(item["name"] == "core" for item in payload)
     assert any(item["name"] == "docs" for item in payload)
@@ -359,6 +393,94 @@ def test_file_content_rejects_path_escape():
     response = client.get("/api/files/content", params={"path": "../outside.txt"})
     assert response.status_code == 400
     assert "project root" in response.json()["detail"]
+
+
+def test_git_status_endpoint_exposes_read_only_worktree_snapshot(monkeypatch):
+    class FakeGitStatusService:
+        def scan_working_tree(self, store=False):
+            assert store is False
+            return SimpleNamespace(
+                available=True,
+                error=None,
+                snapshot_id="wt-test",
+                created_at="2026-05-21T10:00:00",
+                base_rev="abcdef1234567890",
+                files=[
+                    SimpleNamespace(
+                        path="web/src/app/AppShell.tsx",
+                        status=" M",
+                        staged=False,
+                        unstaged=True,
+                        untracked=False,
+                        deleted=False,
+                        old_path=None,
+                    ),
+                    SimpleNamespace(
+                        path="core/web/routes/git.py",
+                        status="??",
+                        staged=False,
+                        unstaged=False,
+                        untracked=True,
+                        deleted=False,
+                        old_path=None,
+                    ),
+                ],
+            )
+
+        def _git_head_rev(self):
+            return "abcdef1234567890"
+
+        def _run_git(self, args):
+            if args == ["branch", "--show-current"]:
+                return SimpleNamespace(returncode=0, stdout="codex/git-navbar\n")
+            raise AssertionError(args)
+
+    monkeypatch.setattr(git_status_service, "get_git_memory_service", lambda: FakeGitStatusService())
+
+    response = client.get("/api/git/status")
+
+    assert response.status_code == 200, response.json()
+    payload = response.json()
+    assert payload["available"] is True
+    assert payload["branch"] == "codex/git-navbar"
+    assert payload["headRevShort"] == "abcdef123456"
+    assert payload["dirty"] is True
+    assert payload["counts"] == {
+        "total": 2,
+        "staged": 0,
+        "unstaged": 1,
+        "untracked": 1,
+        "deleted": 0,
+    }
+    assert payload["files"][0]["path"] == "web/src/app/AppShell.tsx"
+    assert payload["files"][0]["statusLabel"] == "modified"
+    assert payload["files"][1]["statusLabel"] == "untracked"
+    assert payload["truncated"] is False
+
+
+def test_git_status_endpoint_reports_unavailable(monkeypatch):
+    class FakeUnavailableGitStatusService:
+        def scan_working_tree(self, store=False):
+            return SimpleNamespace(
+                available=False,
+                error="not a git repository",
+                snapshot_id="unavailable",
+                created_at="2026-05-21T10:00:00",
+                base_rev=None,
+                files=[],
+            )
+
+    monkeypatch.setattr(git_status_service, "get_git_memory_service", lambda: FakeUnavailableGitStatusService())
+
+    response = client.get("/api/git/status")
+
+    assert response.status_code == 200, response.json()
+    payload = response.json()
+    assert payload["available"] is False
+    assert payload["dirty"] is False
+    assert payload["summary"] == "Git unavailable: not a git repository"
+    assert payload["error"] == "not a git repository"
+    assert payload["files"] == []
 
 
 def test_logs_roots_and_tree_are_read_only(tmp_path, monkeypatch):
@@ -386,12 +508,22 @@ def test_logs_roots_and_tree_are_read_only(tmp_path, monkeypatch):
 
     assert roots_response.status_code == 200
     roots_payload = roots_response.json()
-    assert roots_payload == [
+    assert [
+        {"id": item["id"], "path": item["path"], "exists": item["exists"]}
+        for item in roots_payload
+    ] == [
         {"id": "runtime_scenes", "path": "logs/runtime_scenes", "exists": True},
         {"id": "runtime_logs", "path": "logs", "exists": True},
         {"id": "workspace_logs", "path": "workspace/logs", "exists": True},
         {"id": "conversation_logs", "path": "log_info", "exists": True},
     ]
+    runtime_root = next(item for item in roots_payload if item["id"] == "runtime_logs")
+    assert runtime_root["summary"]["fileCount"] == 1
+    assert runtime_root["summary"]["latestPath"] == "agent_realtime.log"
+    assert "后端" in runtime_root["summary"]["userGuide"]
+    conversation_root = next(item for item in roots_payload if item["id"] == "conversation_logs")
+    assert conversation_root["summary"]["fileCount"] == 1
+    assert "conversation_" in conversation_root["summary"]["agentGuide"] or "debug_" in conversation_root["summary"]["agentGuide"]
 
     assert tree_response.status_code == 200
     tree_payload = tree_response.json()
@@ -405,11 +537,49 @@ def test_logs_roots_and_tree_are_read_only(tmp_path, monkeypatch):
     assert content_payload["path"] == "workspace/logs/turns/latest.md"
     assert content_payload["relativePath"] == "turns/latest.md"
     assert "# latest transcript" in content_payload["content"]
+    assert content_payload["diagnostics"]["severity"] == "info"
+    assert content_payload["diagnostics"]["lineCount"] == 1
+    assert "正常路径" in content_payload["diagnostics"]["userSummary"]
 
     runtime_tree_response = client.get("/api/logs/tree", params={"root": "runtime_logs"})
     assert runtime_tree_response.status_code == 200
     runtime_tree_payload = runtime_tree_response.json()
     assert all(node["name"] != "runtime_scenes" for node in runtime_tree_payload["nodes"])
+
+
+def test_log_content_returns_user_and_agent_diagnostics(tmp_path, monkeypatch):
+    conversation_log = tmp_path / "log_info" / "conversation_debug.jsonl"
+    conversation_log.parent.mkdir(parents=True, exist_ok=True)
+    conversation_log.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "external_request", "content": "复现问题"}, ensure_ascii=False),
+                json.dumps({"type": "tool_call", "tool": "read_file_tool", "status": "success"}, ensure_ascii=False),
+                "Traceback (most recent call last): RuntimeError: failed to stop subagent",
+                "WARNING retrying stop request",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(log_service, "PROJECT_ROOT", tmp_path)
+
+    response = client.get(
+        "/api/logs/content",
+        params={"root": "conversation_logs", "path": "conversation_debug.jsonl"},
+    )
+
+    assert response.status_code == 200, response.json()
+    payload = response.json()
+    diagnostics = payload["diagnostics"]
+    assert diagnostics["severity"] == "error"
+    assert diagnostics["lineCount"] == 4
+    assert diagnostics["errorCount"] == 1
+    assert diagnostics["warningCount"] == 1
+    assert diagnostics["firstSignalLine"] == 3
+    assert "failed to stop subagent" in diagnostics["firstSignalPreview"]
+    assert diagnostics["topEventTypes"][0] == {"type": "external_request", "count": 1}
+    assert "conversation_logs/conversation_debug.jsonl:3" in diagnostics["agentHint"]
+    assert "错误筛选" in diagnostics["suggestedNextStep"]
 
 
 def test_log_content_rejects_path_escape(tmp_path, monkeypatch):
@@ -436,7 +606,7 @@ def test_clear_log_file_empties_content_but_keeps_file(tmp_path, monkeypatch):
         json={"root": "runtime_logs", "path": "agent_realtime.log"},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.json()
     payload = response.json()
     assert payload["relativePath"] == "agent_realtime.log"
     assert payload["content"] == ""
@@ -520,6 +690,8 @@ def test_runtime_scene_endpoints_list_detail_content_and_delete(tmp_path, monkey
     assert content_payload["rootId"] == "runtime_scenes"
     assert content_payload["relativePath"] == "raw/backend.stdout.log"
     assert "uvicorn started" in content_payload["content"]
+    assert content_payload["diagnostics"]["severity"] == "info"
+    assert content_payload["diagnostics"]["agentHint"] == "runtime_scenes/scene-a/raw/backend.stdout.log; severity=info"
 
     delete_response = client.post(
         "/api/logs/runtime-scenes/delete",
@@ -584,6 +756,72 @@ def test_runtime_browser_telemetry_records_into_active_scene(tmp_path, monkeypat
     assert manifest["browser"]["current_pathname"] == "/chat"
     assert manifest["browser"]["active_nav_href"] == "/self-evolution"
     assert manifest["browser"]["current_heading"] == "Self evolution"
+
+
+def test_backend_api_runtime_event_records_mutating_request(tmp_path, monkeypatch):
+    scene_dir = _seed_runtime_scene_bundle(tmp_path, scene_id="scene-api", status="running")
+    launcher_state_path = tmp_path / ".runtime" / "launcher" / "state.json"
+    launcher_state_path.parent.mkdir(parents=True, exist_ok=True)
+    launcher_state_path.write_text(
+        json.dumps(
+            {
+                "runtimeSceneId": "scene-api",
+                "runtimeSceneDir": str(scene_dir),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime_scene_service, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(runtime_scene_service, "LAUNCHER_STATE_PATH", launcher_state_path)
+    monkeypatch.setattr(runtime_service, "_schedule_local_backend_exit", lambda delay_seconds=0.35: None)
+    monkeypatch.setattr(runtime_service, "LAUNCHER_SCRIPT_PATH", tmp_path / "missing-launcher.ps1")
+    monkeypatch.setattr(runtime_service, "LAUNCHER_STATE_PATH", tmp_path / "missing-state.json")
+
+    response = client.post("/api/runtime/shutdown")
+
+    assert response.status_code == 202
+    backend_raw = (scene_dir / "raw" / "backend.api.log").read_text(encoding="utf-8")
+    assert "backend.api.request" in backend_raw
+    assert "/api/runtime/shutdown" in backend_raw
+
+    backend_events = [
+        json.loads(line)
+        for line in (scene_dir / "events" / "backend.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    api_event = backend_events[-1]
+    assert api_event["phase"] == "api"
+    assert api_event["event_code"] == "backend.api.request"
+    assert api_event["fields"]["method"] == "POST"
+    assert api_event["fields"]["pathTemplate"] == "/api/runtime/shutdown"
+    assert api_event["fields"]["statusCode"] == 202
+    assert api_event["raw_refs"] == [{"path": "raw/backend.api.log", "tail_lines": 80}]
+
+    manifest = json.loads((scene_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["backend"]["api_log_path"] == "raw/backend.api.log"
+    assert manifest["backend"]["last_api_path"] == "/api/runtime/shutdown"
+
+
+def test_backend_api_runtime_event_skips_health_noise(tmp_path, monkeypatch):
+    scene_dir = _seed_runtime_scene_bundle(tmp_path, scene_id="scene-health", status="running")
+    launcher_state_path = tmp_path / ".runtime" / "launcher" / "state.json"
+    launcher_state_path.parent.mkdir(parents=True, exist_ok=True)
+    launcher_state_path.write_text(
+        json.dumps(
+            {
+                "runtimeSceneId": "scene-health",
+                "runtimeSceneDir": str(scene_dir),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime_scene_service, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(runtime_scene_service, "LAUNCHER_STATE_PATH", launcher_state_path)
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert not (scene_dir / "raw" / "backend.api.log").exists()
 
 
 def test_runtime_logs_reject_runtime_scene_path_operations(tmp_path, monkeypatch):
@@ -1282,6 +1520,64 @@ def test_session_detail_hides_parameter_live_answer(tmp_path, monkeypatch):
         {"name": "cli_tool", "status": "running"}
     ]
 
+
+def test_session_detail_sanitizes_persisted_protocol_messages_and_active_task(tmp_path, monkeypatch):
+    (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tests" / "prompt_debugger.py").write_text("pass\n", encoding="utf-8")
+    _seed_chat_state(
+        tmp_path,
+        task_status="reading",
+        active_task={
+            "task_id": "polluted-protocol",
+            "kind": "coding",
+            "status": "reading",
+            "title": "<invoke name=\"read_file_tool\"><parameter name=\"file_path\">secret.py</parameter></invoke>",
+            "goal": "<state",
+            "read_files": ["tests/prompt_debugger.py"],
+            "latest_summary": "继续检查。\n</parameter>",
+            "next_action": "<parameter name=\"file_path\">secret.py</parameter>",
+            "updated_at": "2026-05-20T17:54:06",
+        },
+    )
+    state = load_chat_state(tmp_path)
+    state["conversations"][0]["messages"].append(
+        {
+            "role": "assistant",
+            "content": (
+                "继续检查。\n"
+                '<invoke name="read_file_tool">'
+                '<parameter name="file_path">tests/prompt_debugger.py</parameter>'
+                "</invoke>\n"
+                "<state"
+            ),
+            "thought": "</parameter>\n<parameter",
+            "timestamp": "2026-05-20T17:55:00",
+            "tool_calls": [{"name": "read_file_tool"}],
+        }
+    )
+    save_chat_state(tmp_path, state)
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+
+    response = client.get("/api/sessions/session-live")
+
+    assert response.status_code == 200, response.json()
+    payload = response.json()
+    normalized_task = session_service._normalize_session_active_task(
+        load_chat_state(tmp_path)["conversations"][0]["active_task"]
+    )
+    assistant = payload["messages"][-1]
+    assert assistant["content"] == "继续检查。"
+    assert "thought" not in assistant
+    assert payload["taskSummary"] == "继续检查。"
+    assert normalized_task["latest_summary"] == "继续检查。"
+    assert normalized_task["title"] == ""
+    assert normalized_task["goal"] == ""
+    assert normalized_task["next_action"] == ""
+    assert "<invoke" not in json.dumps(payload, ensure_ascii=False)
+    assert "<parameter" not in json.dumps(payload, ensure_ascii=False)
+    assert "<state" not in json.dumps(payload, ensure_ascii=False)
+
+
 def test_session_detail_recovers_stale_running_state(tmp_path, monkeypatch):
     _seed_chat_state(tmp_path, task_status="reading")
     state = load_chat_state(tmp_path)
@@ -1406,6 +1702,74 @@ def test_submit_session_message_continues_progress_until_done(tmp_path, monkeypa
     assert "继续完成同一个用户目标" in calls[1]
     assert payload["messages"][-1]["content"] == "规划完成：先复用 prompt_debugger，再包装 BDD 调试入口。"
     assert payload["currentPhase"] == "ready"
+
+
+def test_submit_session_message_does_not_persist_xml_protocol_as_reply_or_task(tmp_path, monkeypatch):
+    (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tests" / "prompt_debugger.py").write_text("pass\n", encoding="utf-8")
+    _seed_chat_state(tmp_path, task_status="reading")
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        session_service,
+        "get_web_chat_config",
+        lambda: SimpleNamespace(max_continuation_turns=1),
+    )
+
+    class ProtocolOnlyAgent:
+        def seed_chat_history(self, messages):
+            self.messages = list(messages)
+
+        def run_single_turn(self, initial_prompt=None):
+            return {
+                "status": "completed",
+                "summary": (
+                    "继续检查文件。\n"
+                    '<invoke name="read_file_tool">'
+                    '<parameter name="file_path">tests/prompt_debugger.py</parameter>'
+                    "</invoke>\n"
+                    "</parameter>"
+                ),
+                "raw_output": (
+                    "继续检查文件。\n"
+                    '<invoke name="read_file_tool">'
+                    '<parameter name="file_path">tests/prompt_debugger.py</parameter>'
+                    "</invoke>\n"
+                    "<state"
+                ),
+                "outcome": "done",
+                "read_files": ["tests/prompt_debugger.py"],
+                "tool_call_count": 1,
+                "tool_trace": [
+                    {"name": "read_file_tool", "args": {"file_path": "tests/prompt_debugger.py"}},
+                ],
+            }
+
+    monkeypatch.setattr(session_service, "create_chat_agent", lambda: ProtocolOnlyAgent())
+    monkeypatch.setattr(
+        session_service,
+        "_schedule_session_turn",
+        lambda context: session_service._run_session_turn(context),
+    )
+
+    response = client.post(
+        "/api/sessions/session-live/messages",
+        json={"content": "请继续检查 BDD 调试工具规划"},
+    )
+
+    assert response.status_code == 202, response.json()
+    payload = response.json()
+    assistant = payload["messages"][-1]
+    assert assistant["content"] == "继续检查文件。"
+    state = load_chat_state(tmp_path)
+    persisted_json = json.dumps(state, ensure_ascii=False)
+    assert "<invoke" not in persisted_json
+    assert "<parameter" not in persisted_json
+    assert "</parameter>" not in persisted_json
+    assert "<state" not in persisted_json
+    active_task = state["conversations"][0]["active_task"]
+    assert active_task["latest_summary"] == "继续检查文件。"
+    assert active_task["title"] == "请继续检查 BDD 调试工具规划"
+    assert active_task["goal"] == "请继续检查 BDD 调试工具规划"
 
 
 def test_submit_session_message_surfaces_continuation_limit(tmp_path, monkeypatch):
@@ -1650,6 +2014,7 @@ def test_persist_turn_result_cleans_parameter_and_requires_real_stop(tmp_path, m
     active_task = state["conversations"][0]["active_task"]
     assert active_task["latest_summary"] == "连续被拦截。让我尝试拆分写入。"
     assert "</parameter>" not in json.dumps(active_task, ensure_ascii=False)
+
 
 def test_session_detail_uses_ready_phase_for_resting_sessions(tmp_path, monkeypatch):
     _seed_chat_state(tmp_path, task_status="done")
@@ -2334,6 +2699,27 @@ def test_config_workspace_exposes_full_editor_schema(monkeypatch):
     assert any(section["id"] == "shell" for section in payload["sections"])
 
 
+def test_config_workspace_surfaces_llm_security_diagnostics_without_blocking_read(monkeypatch):
+    public_config = copy.deepcopy(load_public_config())
+    public_config["llm"]["profiles"]["primary"]["provider"] = {
+        "kind": "openai",
+        "api_key_env": "OPENAI_API_KEY",
+        "base_url": "file:///C:/Windows/win.ini",
+        "compat_mode": "openai",
+        "requires_api_key": True,
+        "context_window": 100000,
+    }
+
+    monkeypatch.setattr(config_service, "load_public_config", lambda: copy.deepcopy(public_config))
+
+    response = client.get("/api/config/workspace")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["blockingCount"] >= 1
+    assert any("LLM security guard" in item for item in payload["diagnosis"]["blocking_issues"])
+
+
 def test_config_workspace_draft_delete_model_marks_profiles_unconfigured(monkeypatch):
     public_config = copy.deepcopy(load_public_config())
     public_config["llm"]["profiles"]["primary"] = {
@@ -2370,12 +2756,63 @@ def test_config_workspace_test_llm_uses_pending_draft_key(monkeypatch):
 
     monkeypatch.setattr("config.public_config._probe_llm_http", fake_http_probe)
 
+    draft_response = client.post(
+        "/api/config/draft/update-model",
+        json={
+            "publicConfig": public_config,
+            "draftMeta": {},
+            "baseHash": public_config_hash(public_config),
+            "modelId": "deepseek_v4_pro",
+            "provider": public_config["llm"]["model_library"]["deepseek_v4_pro"]["provider"],
+            "model": "deepseek-v4-pro",
+            "label": "DeepSeek V4 Pro",
+            "details": public_config["llm"]["model_library"]["deepseek_v4_pro"],
+            "apiKeyEnv": "VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY",
+            "apiKey": "draft-secret",
+        },
+    )
+
+    assert draft_response.status_code == 200
+    draft_payload = draft_response.json()
+    pending_token = draft_payload["draftMeta"]["pending_api_keys"]["VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY"]
+    assert pending_token != "draft-secret"
+    assert pending_token.startswith("pending-secret:")
+
+    response = client.post(
+        "/api/config/test-llm",
+        json={
+            "publicConfig": draft_payload["publicConfig"],
+            "draftMeta": draft_payload["draftMeta"],
+            "profileId": "subagent_explorer",
+        },
+    )
+
+    assert response.status_code == 200, response.json()
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["api_key_source"] == "pending-env:VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY"
+    assert payload["config_scope"] == "draft"
+    assert payload["requires_api_key"] is True
+
+
+def test_config_workspace_test_llm_ignores_forged_pending_draft_key(monkeypatch):
+    public_config = copy.deepcopy(load_public_config())
+    monkeypatch.delenv("VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY", raising=False)
+
+    monkeypatch.setattr(config_service, "load_public_config", lambda: copy.deepcopy(public_config))
+
+    def fake_http_probe(provider, profile, api_key=None):
+        assert api_key is None
+        return {"ok": False, "message": "missing"}
+
+    monkeypatch.setattr("config.public_config._probe_llm_http", fake_http_probe)
+
     response = client.post(
         "/api/config/test-llm",
         json={
             "publicConfig": public_config,
             "draftMeta": {
-                "pending_api_keys": {"VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY": "draft-secret"},
+                "pending_api_keys": {"VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY": "forged-secret"},
                 "pending_cleared_api_keys": [],
             },
             "profileId": "subagent_explorer",
@@ -2384,16 +2821,15 @@ def test_config_workspace_test_llm_uses_pending_draft_key(monkeypatch):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["ok"] is True
-    assert payload["api_key_source"] == "pending-env:VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY"
-    assert payload["config_scope"] == "draft"
-    assert payload["requires_api_key"] is True
+    assert payload["ok"] is False
+    assert payload["api_key_source"] == "missing"
 
 
 def test_config_workspace_test_llm_reports_local_draft_route_clearly(monkeypatch):
     saved_config = copy.deepcopy(load_public_config())
     draft_config = copy.deepcopy(saved_config)
     draft_config.setdefault("runtime", {})["profile"] = "safe_local"
+    monkeypatch.delenv("VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY", raising=False)
 
     monkeypatch.setattr(config_service, "load_public_config", lambda: copy.deepcopy(saved_config))
 
@@ -2420,7 +2856,126 @@ def test_config_workspace_test_llm_reports_local_draft_route_clearly(monkeypatch
     assert payload["base_url"] == "http://localhost:11434/v1"
     assert payload["config_scope"] == "draft"
     assert payload["requires_api_key"] is False
-    assert payload["api_key_source"] == "missing"
+    assert payload["api_key_source"] == "not-required"
+
+
+def test_config_workspace_test_llm_rejects_metadata_service_base_url(monkeypatch):
+    public_config = copy.deepcopy(load_public_config())
+    target = public_config["llm"]["profiles"]["primary"]
+    target["provider"] = {
+        "kind": "openai",
+        "api_key_env": "OPENAI_API_KEY",
+        "base_url": "http://169.254.169.254/v1",
+        "compat_mode": "openai",
+        "requires_api_key": True,
+        "context_window": 100000,
+    }
+    target["model"] = "gpt-5.5"
+
+    monkeypatch.setattr(config_service, "load_public_config", lambda: copy.deepcopy(load_public_config()))
+
+    response = client.post(
+        "/api/config/test-llm",
+        json={
+            "publicConfig": public_config,
+            "draftMeta": {},
+            "profileId": "primary",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "base_url" in response.json()["detail"]
+
+
+def test_config_workspace_test_llm_rejects_file_base_url(monkeypatch):
+    public_config = copy.deepcopy(load_public_config())
+    target = public_config["llm"]["profiles"]["primary"]
+    target["provider"] = {
+        "kind": "openai",
+        "api_key_env": "OPENAI_API_KEY",
+        "base_url": "file:///C:/Windows/win.ini",
+        "compat_mode": "openai",
+        "requires_api_key": True,
+        "context_window": 100000,
+    }
+    target["model"] = "gpt-5.5"
+
+    monkeypatch.setattr(config_service, "load_public_config", lambda: copy.deepcopy(load_public_config()))
+
+    response = client.post(
+        "/api/config/test-llm",
+        json={
+            "publicConfig": public_config,
+            "draftMeta": {},
+            "profileId": "primary",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "http(s)" in response.json()["detail"]
+
+
+def test_config_workspace_test_llm_allows_localhost_for_local_provider(monkeypatch):
+    public_config = copy.deepcopy(load_public_config())
+    target = public_config["llm"]["profiles"]["primary"]
+    target["provider"] = {
+        "kind": "local",
+        "api_key_env": "",
+        "base_url": "http://127.0.0.1:11434/v1",
+        "compat_mode": "openai",
+        "requires_api_key": False,
+        "context_window": 65536,
+    }
+    target["model"] = "llama3.2"
+
+    monkeypatch.setattr(config_service, "load_public_config", lambda: copy.deepcopy(load_public_config()))
+
+    def fake_http_probe(provider, profile, api_key=None):
+        assert provider.kind == "local"
+        assert provider.base_url == "http://127.0.0.1:11434/v1"
+        assert api_key is None
+        return {"ok": True, "message": "local-ok"}
+
+    monkeypatch.setattr("config.public_config._probe_llm_http", fake_http_probe)
+
+    response = client.post(
+        "/api/config/test-llm",
+        json={
+            "publicConfig": public_config,
+            "draftMeta": {},
+            "profileId": "primary",
+        },
+    )
+
+    assert response.status_code == 200, response.json()
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["provider_kind"] == "local"
+
+
+def test_config_workspace_draft_model_rejects_path_api_key_env(monkeypatch):
+    public_config = copy.deepcopy(load_public_config())
+
+    monkeypatch.setattr(config_service, "load_public_config", lambda: copy.deepcopy(public_config))
+
+    response = client.post(
+        "/api/config/draft/update-model",
+        json={
+            "publicConfig": public_config,
+            "draftMeta": {},
+            "baseHash": public_config_hash(public_config),
+            "modelId": "deepseek_v4_pro",
+            "provider": public_config["llm"]["model_library"]["deepseek_v4_pro"]["provider"],
+            "model": "deepseek-v4-pro",
+            "label": "DeepSeek V4 Pro",
+            "details": public_config["llm"]["model_library"]["deepseek_v4_pro"],
+            "apiKeyEnv": "PATH",
+            "apiKey": "draft-secret",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "PATH" in response.json()["detail"]
 
 
 def test_config_workspace_apply_rejects_stale_base_hash(monkeypatch):
@@ -2465,14 +3020,30 @@ def test_config_workspace_apply_persists_changes_and_pending_env(monkeypatch):
     payload = copy.deepcopy(public_config)
     payload.setdefault("ui", {})["language"] = "en"
 
+    draft_response = client.post(
+        "/api/config/draft/update-model",
+        json={
+            "publicConfig": payload,
+            "draftMeta": {},
+            "baseHash": public_config_hash(public_config),
+            "modelId": "deepseek_v4_pro",
+            "provider": payload["llm"]["model_library"]["deepseek_v4_pro"]["provider"],
+            "model": "deepseek-v4-pro",
+            "label": "DeepSeek V4 Pro",
+            "details": payload["llm"]["model_library"]["deepseek_v4_pro"],
+            "apiKeyEnv": "VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY",
+            "apiKey": "draft-secret",
+        },
+    )
+
+    assert draft_response.status_code == 200
+    draft_payload = draft_response.json()
+
     response = client.put(
         "/api/config/apply",
         json={
-            "publicConfig": payload,
-            "draftMeta": {
-                "pending_api_keys": {"VIBELUTION_TEST_PENDING": "draft-secret"},
-                "pending_cleared_api_keys": ["VIBELUTION_TEST_CLEAR"],
-            },
+            "publicConfig": draft_payload["publicConfig"],
+            "draftMeta": draft_payload["draftMeta"],
             "baseHash": public_config_hash(public_config),
         },
     )
@@ -2480,9 +3051,33 @@ def test_config_workspace_apply_persists_changes_and_pending_env(monkeypatch):
     assert response.status_code == 200
     persisted = response.json()
     assert public_config["ui"]["language"] == "en"
-    assert writes == [("VIBELUTION_TEST_PENDING", "draft-secret")]
-    assert deletes == ["VIBELUTION_TEST_CLEAR"]
+    assert writes == [("VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY", "draft-secret")]
+    assert deletes == []
     assert persisted["baseHash"] == persisted["hash"]
+
+
+def test_config_workspace_apply_ignores_forged_pending_env(monkeypatch):
+    public_config = copy.deepcopy(load_public_config())
+    writes = []
+
+    monkeypatch.setattr(config_service, "load_public_config", lambda: copy.deepcopy(public_config))
+    monkeypatch.setattr(config_service, "save_public_config", lambda updated: None)
+    monkeypatch.setattr(config_service, "_set_user_env_var", lambda name, value: writes.append((name, value)))
+
+    response = client.put(
+        "/api/config/apply",
+        json={
+            "publicConfig": public_config,
+            "draftMeta": {
+                "pending_api_keys": {"VIBELUTION_LLM_DEEPSEEK_V4_PRO_API_KEY": "forged-secret"},
+                "pending_cleared_api_keys": [],
+            },
+            "baseHash": public_config_hash(public_config),
+        },
+    )
+
+    assert response.status_code == 200
+    assert writes == []
 
 
 def test_config_and_evolution_share_intake_mode(monkeypatch):
@@ -3665,8 +4260,16 @@ def test_reset_summary_shape():
     response = client.get("/api/reset/summary")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["presets"]
+    assert payload["mode"] == "custom"
+    assert payload["presets"] == []
+    assert payload["items"]
     assert payload["categories"]
+    item_ids = {item["id"] for item in payload["items"]}
+    assert "chat_history" in item_ids
+    assert "web_dist" in item_ids
+    protected_paths = {path for group in payload["protected"] for path in group["paths"]}
+    assert "workspace/memory/" in protected_paths
+    assert "workspace/prompts/" in protected_paths
 
 
 def _seed_supervised_proposal_record(project_root: Path, session_id: str, *, status: str) -> dict[str, Path]:

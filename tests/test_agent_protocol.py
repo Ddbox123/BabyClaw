@@ -457,6 +457,41 @@ class TestToolMessageFlow:
         assert len(processed.xml_tool_calls) == 1
         assert processed.xml_tool_calls[0]["name"] == "read_file_tool"
 
+    def test_response_processor_hides_xml_protocol_from_visible_text(self):
+        processor = ResponseProcessor()
+        response = SimpleNamespace(
+            content=(
+                "先读取文件再继续判断。\n"
+                '<invoke name="read_file_tool">'
+                '<parameter name="file_path">demo.py</parameter>'
+                "</invoke>\n"
+                "<sta"
+            ),
+            tool_calls=[],
+        )
+
+        processed = processor.process(response)
+
+        assert len(processed.xml_tool_calls) == 1
+        assert processed.visible_text == "先读取文件再继续判断。"
+        assert "<invoke" not in processed.raw_content_clean
+        assert "<parameter" not in processed.raw_content_clean
+        assert "demo.py" not in processed.raw_content_clean
+        assert "<sta" not in processed.raw_content_clean
+
+    def test_response_processor_does_not_fallback_to_raw_protocol_when_clean_is_empty(self):
+        processor = ResponseProcessor()
+        response = SimpleNamespace(
+            content='<invoke name="read_file_tool"><parameter name="file_path">demo.py</parameter></invoke>',
+            tool_calls=[],
+        )
+
+        processed = processor.process(response)
+
+        assert len(processed.xml_tool_calls) == 1
+        assert processed.raw_content_clean == ""
+        assert processed.visible_text == ""
+
     def test_response_processor_extracts_active_components_and_strips_echo(self):
         processor = ResponseProcessor()
         response = SimpleNamespace(

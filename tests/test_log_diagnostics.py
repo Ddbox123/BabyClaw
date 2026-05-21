@@ -80,3 +80,28 @@ def test_runtime_scene_raw_content_returns_same_diagnostics_shape(tmp_path, monk
     assert diagnostics["severity"] == "info"
     assert diagnostics["userSummary"] == "这份原始日志未发现明显错误或警告，可作为运行现场的补充证据。"
     assert diagnostics["agentHint"] == "runtime_scenes/scene-a/raw/backend.stdout.log; severity=info"
+
+
+def test_log_diagnostics_ignores_health_polling_and_favicon_noise(tmp_path, monkeypatch):
+    runtime_log = tmp_path / "logs" / "backend.stdout.log"
+    runtime_log.parent.mkdir(parents=True, exist_ok=True)
+    runtime_log.write_text(
+        "\n".join(
+            [
+                'INFO: 127.0.0.1:51111 - "GET /favicon.ico HTTP/1.1" 404 Not Found',
+                'INFO: 127.0.0.1:51112 - "GET /api/health HTTP/1.1" 200 OK',
+                'INFO: 127.0.0.1:51113 - "GET /api/runtime/summary HTTP/1.1" 200 OK',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(log_service, "PROJECT_ROOT", tmp_path)
+
+    payload = log_service.read_log_file("runtime_logs", "backend.stdout.log")
+
+    diagnostics = payload["diagnostics"]
+    assert diagnostics["severity"] == "info"
+    assert diagnostics["errorCount"] == 0
+    assert diagnostics["warningCount"] == 0
+    assert diagnostics["ignoredSignalCount"] == 3
+    assert diagnostics["firstSignalLine"] is None

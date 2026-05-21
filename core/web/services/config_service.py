@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import secrets
 from typing import Any
 
 import config.public_config as public_config_module
@@ -24,6 +25,8 @@ from config.public_config import (
     public_config_hash,
     save_public_config,
     update_llm_model,
+    validate_llm_api_key_env,
+    validate_llm_public_config,
 )
 
 from .config_editor_schema import build_editor_meta, build_editor_sections
@@ -44,6 +47,9 @@ PROFILE_LABELS = {
     "supervised_candidate": {"zh": "监督候选", "en": "Supervised Candidate"},
     "compression": {"zh": "压缩配置", "en": "Compression"},
 }
+_PENDING_SECRET_PREFIX = "pending-secret:"
+_PENDING_API_KEY_SECRETS: dict[str, tuple[str, str]] = {}
+_PENDING_CLEAR_ENVS: set[str] = set()
 
 
 def _resolve_workspace_language(public_config: dict[str, Any]) -> str:
@@ -129,24 +135,78 @@ def _empty_draft_meta() -> dict[str, object]:
     }
 
 
+def _register_pending_api_key(api_key_env: str, api_key: str) -> str:
+    env_name = validate_llm_api_key_env(api_key_env, required=True, context="api_key_env")
+    token = f"{_PENDING_SECRET_PREFIX}{secrets.token_urlsafe(24)}"
+    _PENDING_API_KEY_SECRETS[token] = (env_name, str(api_key))
+    return token
+
+
+def _resolve_pending_api_key(env_name: str, token: object) -> str | None:
+    env_name = validate_llm_api_key_env(env_name, required=True, context="api_key_env")
+    value = str(token or "").strip()
+    if not value.startswith(_PENDING_SECRET_PREFIX):
+        return None
+    stored = _PENDING_API_KEY_SECRETS.get(value)
+    if not stored:
+        return None
+    stored_env, secret = stored
+    if stored_env != env_name:
+        return None
+    return secret
+
+
+def _drop_pending_api_key_token(token: object) -> None:
+    value = str(token or "").strip()
+    if value.startswith(_PENDING_SECRET_PREFIX):
+        _PENDING_API_KEY_SECRETS.pop(value, None)
+
+
+def _move_pending_api_key_token(token: object, old_env: str, new_env: str) -> None:
+    value = str(token or "").strip()
+    if not value.startswith(_PENDING_SECRET_PREFIX):
+        return
+    stored = _PENDING_API_KEY_SECRETS.get(value)
+    if not stored:
+        return
+    stored_env, secret = stored
+    if stored_env == old_env:
+        _PENDING_API_KEY_SECRETS[value] = (new_env, secret)
+
+
 def _normalize_draft_meta(meta: dict | None) -> dict[str, object]:
     payload = _empty_draft_meta()
     if not isinstance(meta, dict):
         return payload
     pending = meta.get("pending_api_keys", {})
     if isinstance(pending, dict):
-        payload["pending_api_keys"] = {
-            str(key).strip(): str(value)
-            for key, value in pending.items()
-            if str(key).strip() and str(value) != ""
-        }
+        normalized_pending: dict[str, str] = {}
+        for key, value in pending.items():
+            env_name = str(key or "").strip()
+            if not env_name or str(value) == "":
+                continue
+            try:
+                validate_llm_api_key_env(env_name, required=True, context="api_key_env")
+            except ValueError:
+                continue
+            if _resolve_pending_api_key(env_name, value) is None:
+                continue
+            normalized_pending[env_name] = str(value)
+        payload["pending_api_keys"] = normalized_pending
     cleared = meta.get("pending_cleared_api_keys", [])
     if isinstance(cleared, list):
-        payload["pending_cleared_api_keys"] = [
-            str(item).strip()
-            for item in cleared
-            if str(item).strip()
-        ]
+        normalized_cleared: list[str] = []
+        for item in cleared:
+            env_name = str(item or "").strip()
+            if not env_name:
+                continue
+            try:
+                env_name = validate_llm_api_key_env(env_name, required=True, context="api_key_env")
+            except ValueError:
+                continue
+            if env_name in _PENDING_CLEAR_ENVS and env_name not in normalized_cleared:
+                normalized_cleared.append(env_name)
+        payload["pending_cleared_api_keys"] = normalized_cleared
     return payload
 
 
@@ -168,64 +228,75 @@ def _llm_test_config_scope(public_config: dict[str, Any], draft_meta: dict | Non
 
 def _with_pending_api_key(meta: dict[str, object], api_key_env: str, api_key: str) -> dict[str, object]:
     payload = _normalize_draft_meta(meta)
-    env_name = str(api_key_env or "").strip()
+    env_name = validate_llm_api_key_env(api_key_env, required=False, context="api_key_env")
     if not env_name:
         return payload
     pending = payload["pending_api_keys"]
     cleared = payload["pending_cleared_api_keys"]
     if isinstance(pending, dict):
-        pending[env_name] = str(api_key)
+        _drop_pending_api_key_token(pending.get(env_name))
+        pending[env_name] = _register_pending_api_key(env_name, api_key)
     if isinstance(cleared, list):
         payload["pending_cleared_api_keys"] = [item for item in cleared if item != env_name]
+        _PENDING_CLEAR_ENVS.discard(env_name)
     return payload
 
 
 def _with_cleared_api_key(meta: dict[str, object], api_key_env: str) -> dict[str, object]:
     payload = _normalize_draft_meta(meta)
-    env_name = str(api_key_env or "").strip()
+    env_name = validate_llm_api_key_env(api_key_env, required=False, context="api_key_env")
     if not env_name:
         return payload
     pending = payload["pending_api_keys"]
     cleared = payload["pending_cleared_api_keys"]
     if isinstance(pending, dict):
-        pending.pop(env_name, None)
+        _drop_pending_api_key_token(pending.pop(env_name, None))
     if isinstance(cleared, list) and env_name not in cleared:
         cleared.append(env_name)
+        _PENDING_CLEAR_ENVS.add(env_name)
     return payload
 
 
 def _drop_api_key_state(meta: dict[str, object], api_key_env: str) -> dict[str, object]:
     payload = _normalize_draft_meta(meta)
-    env_name = str(api_key_env or "").strip()
+    env_name = validate_llm_api_key_env(api_key_env, required=False, context="api_key_env")
     if not env_name:
         return payload
     pending = payload["pending_api_keys"]
     cleared = payload["pending_cleared_api_keys"]
     if isinstance(pending, dict):
-        pending.pop(env_name, None)
+        _drop_pending_api_key_token(pending.pop(env_name, None))
     if isinstance(cleared, list):
         payload["pending_cleared_api_keys"] = [item for item in cleared if item != env_name]
+        _PENDING_CLEAR_ENVS.discard(env_name)
     return payload
 
 
 def _move_pending_api_key_env(meta: dict[str, object], old_env: str, new_env: str) -> dict[str, object]:
     payload = _normalize_draft_meta(meta)
-    old_env = str(old_env or "").strip()
-    new_env = str(new_env or "").strip()
+    old_env = validate_llm_api_key_env(old_env, required=False, context="api_key_env")
+    new_env = validate_llm_api_key_env(new_env, required=False, context="api_key_env")
     if not old_env or old_env == new_env:
         return payload
     pending = payload["pending_api_keys"]
     cleared = payload["pending_cleared_api_keys"]
     if isinstance(pending, dict) and old_env in pending and new_env:
-        pending[new_env] = pending.pop(old_env)
+        token = pending.pop(old_env)
+        _drop_pending_api_key_token(pending.get(new_env))
+        _move_pending_api_key_token(token, old_env, new_env)
+        pending[new_env] = token
     elif isinstance(pending, dict):
-        pending.pop(old_env, None)
+        _drop_pending_api_key_token(pending.pop(old_env, None))
     if isinstance(cleared, list):
         payload["pending_cleared_api_keys"] = [
             new_env if item == old_env and new_env else item
             for item in cleared
             if item != old_env or new_env
         ]
+        if old_env in _PENDING_CLEAR_ENVS:
+            _PENDING_CLEAR_ENVS.discard(old_env)
+            if new_env:
+                _PENDING_CLEAR_ENVS.add(new_env)
     return payload
 
 
@@ -370,11 +441,15 @@ def _run_draft_test_llm_connection(
     profile_id: str | None = None,
     draft_meta: dict | None = None,
 ) -> dict[str, Any]:
+    validate_llm_public_config(public_config)
     effective = build_effective_config(public_config)
     profile = effective.llm.get_profile(profile_id=profile_id) if profile_id else effective.llm.get_profile(role="primary")
     provider = effective.llm.get_provider(profile.provider_id)
     api_key = effective.get_api_key_for_profile(profile_id=profile.profile_id)
     api_key_source = effective.llm.get_api_key_source_label_for_profile(profile_id=profile.profile_id)
+    if not provider.requires_api_key:
+        api_key = None
+        api_key_source = "not-required"
     meta = _normalize_draft_meta(draft_meta)
     pending = meta["pending_api_keys"]
     cleared = meta["pending_cleared_api_keys"]
@@ -390,17 +465,20 @@ def _run_draft_test_llm_connection(
         str(selected_option.get("api_key_env", "")).strip(),
         str(getattr(provider, "api_key_env", "") or "").strip(),
     ]
-    for env_name in env_candidates:
-        if not env_name:
-            continue
-        if isinstance(cleared, list) and env_name in cleared:
-            api_key = None
-            api_key_source = f"pending-clear:{env_name}"
-            break
-        if isinstance(pending, dict) and env_name in pending:
-            api_key = pending[env_name]
-            api_key_source = f"pending-env:{env_name}"
-            break
+    if provider.requires_api_key:
+        for env_name in env_candidates:
+            if not env_name:
+                continue
+            if isinstance(cleared, list) and env_name in cleared:
+                api_key = None
+                api_key_source = f"pending-clear:{env_name}"
+                break
+            if isinstance(pending, dict) and env_name in pending:
+                pending_secret = _resolve_pending_api_key(env_name, pending[env_name])
+                if pending_secret is not None:
+                    api_key = pending_secret
+                    api_key_source = f"pending-env:{env_name}"
+                    break
     try:
         result = public_config_module._probe_llm_http(provider, profile, api_key)
     except TypeError:
@@ -590,6 +668,7 @@ def draft_add_model(
     old_public = load_public_config()
     current = _prepare_submitted_public_config(public_config, old_public)
     current_meta = _normalize_draft_meta(draft_meta)
+    validate_llm_public_config(current)
     before_keys = set(current.get("llm", {}).get("model_library", {}).keys()) if isinstance(current.get("llm", {}), dict) else set()
     if str(preset_id or "").strip():
         updated = apply_llm_model_preset(
@@ -653,6 +732,7 @@ def draft_update_model(
     old_public = load_public_config()
     current = _prepare_submitted_public_config(public_config, old_public)
     current_meta = _normalize_draft_meta(draft_meta)
+    validate_llm_public_config(current)
     current_library = current.get("llm", {}).get("model_library", {}) if isinstance(current.get("llm", {}), dict) else {}
     old_item = current_library.get(model_id, {}) if isinstance(current_library, dict) else {}
     old_env = str(old_item.get("api_key_env", "")).strip() if isinstance(old_item, dict) else ""
@@ -723,6 +803,7 @@ def draft_add_profile(
 ) -> dict[str, Any]:
     old_public = load_public_config()
     current = _prepare_submitted_public_config(public_config, old_public)
+    validate_llm_public_config(current)
     updated = add_llm_profile(
         current,
         profile_id,
@@ -749,6 +830,7 @@ def run_draft_llm_test(
 ) -> dict[str, Any]:
     old_public = load_public_config()
     submitted = _prepare_submitted_public_config(public_config, old_public)
+    validate_llm_public_config(submitted)
     return _run_draft_test_llm_connection(submitted, profile_id, _normalize_draft_meta(draft_meta))
 
 
@@ -762,6 +844,7 @@ def apply_config_workspace(
     submitted = _prepare_submitted_public_config(public_config, old_public)
     lang = _resolve_workspace_language(submitted)
     _assert_base_hash_matches(base_hash, old_public, lang)
+    validate_llm_public_config(submitted)
     _validate_required_llm_profiles(submitted, lang)
     build_effective_config(submitted)
     save_public_config(submitted)
@@ -769,8 +852,13 @@ def apply_config_workspace(
     normalized_meta = _normalize_draft_meta(draft_meta)
     for env_name in normalized_meta.get("pending_cleared_api_keys", []):
         _delete_user_env_var(str(env_name))
+        _PENDING_CLEAR_ENVS.discard(str(env_name))
     for env_name, api_key in normalized_meta.get("pending_api_keys", {}).items():
-        _set_user_env_var(str(env_name), str(api_key))
+        secret = _resolve_pending_api_key(str(env_name), api_key)
+        if secret is None:
+            continue
+        _set_user_env_var(str(env_name), secret)
+        _drop_pending_api_key_token(api_key)
 
     persisted = load_public_config()
     return _build_workspace(

@@ -1,3 +1,4 @@
+import copy
 import threading
 import time
 from pathlib import Path
@@ -9,7 +10,33 @@ from core.web.services import supervised_control_service as service
 
 @pytest.fixture(autouse=True)
 def reset_supervised_run_state(monkeypatch: pytest.MonkeyPatch):
+    manager_store: dict[str, dict[str, dict]] = {"self": {}, "supervised": {}}
+    manager_index: dict[str, dict[str, str]] = {
+        "self": {"activeRunId": "", "latestRunId": ""},
+        "supervised": {"activeRunId": "", "latestRunId": ""},
+    }
+
+    def fake_persist_manager_run_snapshot(kind: str, snapshot: dict, *, active_run_id: str = "") -> dict:
+        run_id = str(snapshot.get("runId") or "").strip()
+        payload = copy.deepcopy(snapshot)
+        manager_store.setdefault(kind, {})[run_id] = payload
+        manager_index.setdefault(kind, {"activeRunId": "", "latestRunId": ""})
+        manager_index[kind]["activeRunId"] = str(active_run_id or "").strip()
+        manager_index[kind]["latestRunId"] = run_id
+        return copy.deepcopy(payload)
+
+    def fake_load_manager_run_snapshot(kind: str, run_id: str) -> dict | None:
+        payload = manager_store.get(kind, {}).get(str(run_id or "").strip())
+        return copy.deepcopy(payload) if payload is not None else None
+
+    def fake_load_manager_active_run_snapshot(kind: str) -> dict | None:
+        active_run_id = manager_index.get(kind, {}).get("activeRunId", "")
+        return fake_load_manager_run_snapshot(kind, active_run_id)
+
     monkeypatch.setattr(service, "_runtime_manager_live_control_enabled", lambda: False)
+    monkeypatch.setattr(service, "persist_manager_run_snapshot", fake_persist_manager_run_snapshot)
+    monkeypatch.setattr(service, "load_manager_run_snapshot", fake_load_manager_run_snapshot)
+    monkeypatch.setattr(service, "load_manager_active_run_snapshot", fake_load_manager_active_run_snapshot)
     with service._RUN_STATE_LOCK:
         service._RUN_STATES.clear()
         service._RUN_CONTROLLERS.clear()
@@ -123,6 +150,96 @@ def test_supervised_checkpoint_stops_at_role_boundary_before_next_role():
     assert final_snapshot["status"] == "cancelled"
     assert final_snapshot["currentRole"] == "candidate"
     assert service.get_active_supervised_run() is None
+
+
+def test_request_stop_supervised_run_closes_file_only_queued_run(monkeypatch):
+    run_id = "web-supervised-file-only-queued"
+    persisted: dict[str, object] = {}
+    stored = {
+        "runId": run_id,
+        "status": "queued",
+        "currentPhase": "queued",
+        "runtimeStatus": "queued",
+        "startedAt": "2026-05-18T12:00:00Z",
+        "updatedAt": "2026-05-18T12:00:00Z",
+        "finishedAt": "",
+        "latestMessage": "queued",
+        "currentTask": "queued",
+        "pauseRequested": False,
+        "pauseRequestedAt": "",
+        "stopRequested": False,
+        "stopRequestedAt": "",
+        "eventTail": [],
+    }
+
+    monkeypatch.setattr(
+        service,
+        "load_manager_run_snapshot",
+        lambda kind, loaded_run_id: copy.deepcopy(stored) if kind == "supervised" and loaded_run_id == run_id else None,
+    )
+
+    def fake_persist(kind: str, payload: dict, *, active_run_id: str = "") -> dict:
+        persisted["kind"] = kind
+        persisted["payload"] = copy.deepcopy(payload)
+        persisted["active_run_id"] = active_run_id
+        return copy.deepcopy(payload)
+
+    monkeypatch.setattr(service, "persist_manager_run_snapshot", fake_persist)
+
+    snapshot = service.request_stop_supervised_run(run_id)
+
+    assert snapshot["status"] == "cancelled"
+    assert snapshot["currentPhase"] == "cancelled"
+    assert snapshot["runtimeStatus"] == "idle"
+    assert snapshot["stopRequested"] is True
+    assert snapshot["finishedAt"]
+    assert persisted["kind"] == "supervised"
+    assert persisted["active_run_id"] == ""
+    assert persisted["payload"]["status"] == "cancelled"
+
+
+def test_request_stop_supervised_run_closes_file_only_running_run(monkeypatch):
+    run_id = "web-supervised-file-only-running"
+    persisted: dict[str, object] = {}
+    stored = {
+        "runId": run_id,
+        "status": "running",
+        "currentPhase": "running",
+        "runtimeStatus": "running",
+        "startedAt": "2026-05-18T12:00:00Z",
+        "updatedAt": "2026-05-18T12:00:00Z",
+        "finishedAt": "",
+        "latestMessage": "running",
+        "currentTask": "running",
+        "pauseRequested": False,
+        "pauseRequestedAt": "",
+        "stopRequested": False,
+        "stopRequestedAt": "",
+        "eventTail": [],
+    }
+
+    monkeypatch.setattr(
+        service,
+        "load_manager_run_snapshot",
+        lambda kind, loaded_run_id: copy.deepcopy(stored) if kind == "supervised" and loaded_run_id == run_id else None,
+    )
+
+    def fake_persist(kind: str, payload: dict, *, active_run_id: str = "") -> dict:
+        persisted["kind"] = kind
+        persisted["payload"] = copy.deepcopy(payload)
+        persisted["active_run_id"] = active_run_id
+        return copy.deepcopy(payload)
+
+    monkeypatch.setattr(service, "persist_manager_run_snapshot", fake_persist)
+
+    snapshot = service.request_stop_supervised_run(run_id)
+
+    assert snapshot["status"] == "cancelled"
+    assert snapshot["runtimeStatus"] == "idle"
+    assert snapshot["stopRequested"] is True
+    assert snapshot["finishedAt"]
+    assert persisted["active_run_id"] == ""
+    assert persisted["payload"]["status"] == "cancelled"
 
 
 def test_handle_progress_event_updates_current_case_io_snapshot():
