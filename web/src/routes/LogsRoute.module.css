@@ -743,6 +743,23 @@
   color: var(--fg-primary);
 }
 
+.sceneIndexKey {
+  display: block;
+  min-width: 0;
+  width: fit-content;
+  max-width: 100%;
+  padding: 3px 6px;
+  border: 1px solid rgba(124, 155, 150, 0.18);
+  border-radius: 6px;
+  background: rgba(124, 155, 150, 0.08);
+  color: var(--accent-cool);
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .sceneCardStatus,
 .sceneCardMeta,
 .sceneCardSummary,
@@ -768,13 +785,14 @@
 .sceneDetailSurface {
   display: grid;
   align-content: start;
-  gap: 18px;
+  gap: 12px;
   height: 100%;
   min-height: 0;
   overflow: auto;
 }
 
 .sceneDetailHeader,
+.sceneDetailHeaderCompact,
 .sceneInfoGrid {
   display: grid;
   gap: 16px;
@@ -785,10 +803,117 @@
   align-items: start;
 }
 
+.sceneDetailHeaderCompact {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(20, 23, 26, 0.72);
+}
+
+.sceneIdentityBlock {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
 .sceneDetailTitle {
   margin: 0;
   font-family: var(--font-display);
-  font-size: 1.18rem;
+  font-size: 1.04rem;
+  line-height: 1.25;
+}
+
+.sceneQuickFacts,
+.sceneEvidenceStrip,
+.sceneTechnicalGrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sceneQuickFacts {
+  align-items: center;
+}
+
+.sceneQuickFacts > span,
+.sceneQuickFacts > code,
+.sceneEvidenceStrip > span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: rgba(27, 31, 35, 0.74);
+  color: var(--fg-secondary);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.sceneQuickFacts > code {
+  max-width: min(520px, 100%);
+  border-radius: 6px;
+  color: var(--accent-cool);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sceneEvidenceStrip {
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(27, 31, 35, 0.52);
+}
+
+.sceneEvidenceStrip > span {
+  border-color: rgba(236, 230, 220, 0.08);
+  background: rgba(18, 20, 22, 0.48);
+}
+
+.sceneEvidenceStrip strong {
+  color: var(--fg-primary);
+}
+
+.sceneTechnicalDetails {
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(18, 20, 22, 0.46);
+}
+
+.sceneTechnicalDetails summary {
+  padding: 9px 12px;
+  color: var(--fg-secondary);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.sceneTechnicalGrid {
+  padding: 0 12px 12px;
+}
+
+.sceneTechnicalGrid span {
+  display: grid;
+  gap: 4px;
+  min-width: min(280px, 100%);
+  color: var(--fg-secondary);
+  font-size: 0.8rem;
+}
+
+.sceneTechnicalGrid strong {
+  color: var(--fg-tertiary);
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+.sceneTechnicalGrid code {
+  color: var(--accent-cool);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
 }
 
 .sceneMetricGrid {
@@ -825,14 +950,15 @@
 }
 
 .sceneInfoGrid {
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(300px, 0.82fr) minmax(420px, 1.18fr);
+  gap: 12px;
 }
 
 .sceneInfoCard {
   display: grid;
   align-content: start;
-  gap: 12px;
-  padding: 14px;
+  gap: 10px;
+  padding: 12px;
   min-height: 0;
 }
 
@@ -849,16 +975,16 @@
 
 .timelineList {
   display: grid;
-  gap: 10px;
-  max-height: 420px;
+  gap: 8px;
+  max-height: 520px;
   overflow: auto;
   padding-right: 4px;
 }
 
 .timelineItem {
   display: grid;
-  gap: 8px;
-  padding: 12px;
+  gap: 6px;
+  padding: 10px;
 }
 
 .timelineItemError {
@@ -890,7 +1016,7 @@
 }
 
 .timelineCode {
-  font-size: 0.9rem;
+  font-size: 0.84rem;
   overflow-wrap: anywhere;
 }
 
@@ -918,17 +1044,21 @@
 }
 
 .rawFileTabs {
-  gap: 10px;
+  gap: 8px;
+  max-height: 118px;
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .rawFileButton {
   display: grid;
-  gap: 4px;
-  min-width: 180px;
-  padding: 10px 12px;
+  gap: 3px;
+  min-width: 150px;
+  padding: 8px 10px;
   text-align: left;
   color: var(--fg-secondary);
   cursor: pointer;
+  font-size: 0.78rem;
 }
 
 .rawFileButtonActive {
@@ -1002,6 +1132,7 @@
   }
 
   .sceneDetailHeader,
+  .sceneDetailHeaderCompact,
   .sceneInfoGrid {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1022,5 +1153,15 @@
 
   .sceneMetricGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .sceneDetailHeaderCompact {
+    padding: 12px;
+  }
+
+  .sceneQuickFacts > span,
+  .sceneQuickFacts > code,
+  .sceneEvidenceStrip > span {
+    white-space: normal;
   }
 }

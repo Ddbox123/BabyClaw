@@ -112,17 +112,32 @@ def reset_singletons():
 def isolate_runtime_manager_evolution_store(tmp_path, monkeypatch):
     """Keep manager-owned evolution snapshots out of the real .runtime tree."""
     from core.runtime_manager import evolution_store
+    from core.runtime_manager import work_run_store
+    try:
+        from core.web.services import session_service
+    except Exception:
+        session_service = None
 
     runtime_manager_dir = tmp_path / ".runtime" / "runtime-manager"
     evolution_dir = runtime_manager_dir / "evolution"
     self_runs_dir = evolution_dir / "self" / "runs"
     supervised_runs_dir = evolution_dir / "supervised" / "runs"
+    work_runs_dir = runtime_manager_dir / "work_runs"
 
     monkeypatch.setattr(evolution_store, "EVOLUTION_DIR", evolution_dir)
     monkeypatch.setattr(evolution_store, "SELF_RUNS_DIR", self_runs_dir)
     monkeypatch.setattr(evolution_store, "SUPERVISED_RUNS_DIR", supervised_runs_dir)
     monkeypatch.setattr(evolution_store, "SELF_INDEX_PATH", evolution_dir / "self" / "index.json")
     monkeypatch.setattr(evolution_store, "SUPERVISED_INDEX_PATH", evolution_dir / "supervised" / "index.json")
+    monkeypatch.setattr(work_run_store, "WORK_RUNS_DIR", work_runs_dir)
+    if session_service is not None:
+        monkeypatch.setattr(session_service, "_WORK_RUN_STORE", work_run_store.WorkRunStore(root=work_runs_dir))
+        with session_service._RUNNING_SESSIONS_LOCK:
+            session_service._RUNNING_SESSION_IDS.clear()
+            session_service._SESSION_ACTIVE_TURN_IDS.clear()
+            session_service._SESSION_ACTIVE_TURN_LEASES.clear()
+        with session_service._SESSION_TURN_CONTROLS_LOCK:
+            session_service._SESSION_TURN_CONTROLS.clear()
 
 
 # ============================================================================

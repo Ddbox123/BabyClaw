@@ -35,6 +35,24 @@
 - LLM provider/profile 的配置治理。
 - Reset、Config、Pet Space 的深度功能，只能保持入口一致。
 
+## 共享底座边界
+
+对话线必须遵守横向计划：[WorkRun Substrate And Chat Case Loop Implementation Plan](./2026-05-21-workrun-substrate-and-chat-case-loop.md)。
+
+统一边界：
+
+- `ChatSession` 是持久对话容器，不是 WorkRun。
+- `ChatTurn` 是一次用户请求触发的执行单元，应该登记为 `WorkRun(chat_turn)`。
+- 对话线不能自己定义一套全局 active run，也不能用 Chat running 状态阻断所有进化；是否并行由 `ResourceLease` 判断。
+- raw chat transcript 不能直接进入训练或监督评测。
+- 对话经验必须走 `Chat Segment -> Dataset Candidate -> Review -> Reviewed Chat Case -> Dataset/Bundle`，才能交给监督进化或 Gym。
+
+对话线向共享底座提供：
+
+- `chat_turn` 的 queued/running/stopping/completed/failed/stopped 快照。
+- 当前 turn 的 resource leases，例如 `readonly_chat` 或 `worktree_write`。
+- 可审核的 chat case candidate，不提供未审核训练样本。
+
 ## 关键文件
 
 后端：

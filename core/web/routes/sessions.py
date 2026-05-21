@@ -27,6 +27,8 @@ router = APIRouter(tags=["sessions"])
 class SessionMessagePayload(BaseModel):
     content: str = ""
     mentalModelEnabled: bool | None = None
+    turnMode: str = ""
+    writeIntent: bool | None = None
 
 
 class SessionUpdatePayload(BaseModel):
@@ -93,6 +95,8 @@ def session_submit_message(session_id: str, payload: SessionMessagePayload) -> d
             session_id,
             payload.content,
             mental_model_enabled=payload.mentalModelEnabled,
+            turn_mode=payload.turnMode,
+            write_intent=payload.writeIntent,
         )
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

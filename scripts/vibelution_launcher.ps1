@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("toggle", "start", "stop", "restart", "status", "supervise", "internal-start", "internal-stop", "internal-restart", "internal-status")]
+    [ValidateSet("toggle", "start", "stop", "restart", "status", "monitor", "supervise", "internal-start", "internal-stop", "internal-restart", "internal-status")]
     [string]$Action = "start",
     [switch]$NoBrowser,
     [string]$SessionId
@@ -17,6 +17,8 @@ $webDistDir = Join-Path $webDir "dist"
 $webDistIndex = Join-Path $webDistDir "index.html"
 $runtimeDir = Join-Path $projectDir ".runtime"
 $launcherDir = Join-Path $runtimeDir "launcher"
+$runtimeManagerStatePath = Join-Path $runtimeDir "runtime-manager\state.json"
+$launcherControlLogPath = Join-Path $launcherDir "launcher-control.log"
 $runtimeSceneRoot = Join-Path $projectDir "logs\runtime_scenes"
 $browserProfileDir = Join-Path $launcherDir "edge-app-profile"
 $statePath = Join-Path $launcherDir "state.json"
@@ -35,7 +37,7 @@ $healthUrl = "$url/api/health"
 $mode = "single_service_bundled_edge_app"
 $mutexName = "Global\Vibelution.Workbench.Launcher"
 $selfProcessId = $PID
-$sceneSchemaVersion = 1
+$sceneSchemaVersion = 2
 $script:currentRuntimeSceneId = $null
 $script:currentRuntimeSceneDir = $null
 $script:sceneEventSequence = @{}
@@ -82,6 +84,80 @@ function Sync-LauncherEndpointFromState {
 function Write-Note {
     param([string]$Message)
     Write-Host "[Vibelution] $Message"
+}
+
+function Get-ObjectPropertyValue {
+    param(
+        $Object,
+        [string]$Name,
+        $Default = $null
+    )
+
+    if ($null -eq $Object) {
+        return $Default
+    }
+
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $Default
+    }
+    return $property.Value
+}
+
+function Write-LauncherControlLog {
+    param(
+        [string]$Event,
+        [string]$Message,
+        [string]$Level = "info",
+        [hashtable]$Fields = @{}
+    )
+
+    try {
+        Ensure-Directories
+        $payload = @{
+            ts = (Get-Date).ToUniversalTime().ToString("o")
+            level = $Level
+            event = $Event
+            message = $Message
+            fields = if ($Fields) { $Fields } else { @{} }
+        }
+        $line = $payload | ConvertTo-Json -Depth 8 -Compress
+        Add-Content -Path $launcherControlLogPath -Value $line -Encoding utf8
+
+        if ($script:currentRuntimeSceneDir) {
+            $relativePath = (Get-RuntimeSceneRelativePaths).LauncherControl
+            $targetPath = Get-CurrentRuntimeSceneFilePath $relativePath
+            $targetDir = Split-Path -Parent $targetPath
+            if (-not (Test-Path $targetDir)) {
+                New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+            }
+            Add-Content -Path $targetPath -Value $line -Encoding utf8
+        }
+    } catch {
+    }
+}
+
+function Write-LauncherMonitorEvent {
+    param(
+        [string]$EventCode,
+        [string]$Message,
+        [string]$Level = "info",
+        [string]$Outcome = "observed",
+        [hashtable]$Fields = @{}
+    )
+
+    Write-LauncherControlLog -Event $EventCode -Message $Message -Level $Level -Fields $Fields
+    if ($script:currentRuntimeSceneId) {
+        Write-RuntimeSceneEvent `
+            -Component "launcher" `
+            -Phase "desktop_monitor" `
+            -EventCode $EventCode `
+            -Message $Message `
+            -Level $Level `
+            -Outcome $Outcome `
+            -Fields $Fields `
+            -RawRefs @(New-RuntimeSceneRawRef -RelativePath (Get-RuntimeSceneRelativePaths).LauncherControl -TailLines 80)
+    }
 }
 
 function Invoke-RuntimeManagerClient {
@@ -145,6 +221,193 @@ function ConvertTo-PortableTimestampToken {
     param([datetime]$Value)
 
     return $Value.ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
+}
+
+function ConvertTo-RuntimeSceneIndexToken {
+    param(
+        [string]$Value,
+        [string]$Default = "unknown"
+    )
+
+    $text = ([string]$Value).Trim().ToLowerInvariant()
+    if (-not $text) {
+        return $Default
+    }
+    $normalized = ($text -replace "[^a-z0-9]+", "-").Trim("-")
+    if ($normalized) {
+        return $normalized
+    }
+    return $Default
+}
+
+function Get-RuntimeSceneTriggerIndexToken {
+    param([string]$Trigger)
+
+    $normalized = ([string]$Trigger).Trim().ToLowerInvariant()
+    switch ($normalized) {
+        "start" { return "workbench-start" }
+        "internal-start" { return "workbench-start" }
+        "restart" { return "workbench-restart" }
+        "internal-restart" { return "workbench-restart" }
+        "open" { return "workbench-open" }
+        "stop" { return "workbench-stop" }
+        "shutdown" { return "workbench-shutdown" }
+        default { return ConvertTo-RuntimeSceneIndexToken -Value $normalized -Default "workbench-run" }
+    }
+}
+
+function Get-RuntimeSceneStatusIndexToken {
+    param(
+        [string]$Status,
+        [string]$Result,
+        [string]$StopReason
+    )
+
+    $normalizedStatus = ([string]$Status).Trim().ToLowerInvariant()
+    $normalizedResult = ([string]$Result).Trim().ToLowerInvariant()
+    if ($normalizedStatus -eq "stopped" -and $normalizedResult) {
+        switch ($normalizedResult) {
+            "explicit_stop" { return "manual-stop" }
+            "explicit stop" { return "manual-stop" }
+            "browser_window_closed" { return "window-closed" }
+            "startup_failed" { return "startup-failed" }
+            "backend_exited" { return "backend-exited" }
+            default { return ConvertTo-RuntimeSceneIndexToken -Value $normalizedResult -Default "stopped" }
+        }
+    }
+    return ConvertTo-RuntimeSceneIndexToken -Value $normalizedStatus -Default "unknown"
+}
+
+function Get-RuntimeSceneStatusDisplayLabel {
+    param(
+        [string]$Status,
+        [string]$Result,
+        [string]$StopReason
+    )
+
+    $normalizedStatus = ([string]$Status).Trim().ToLowerInvariant()
+    $normalizedResult = ([string]$Result).Trim().ToLowerInvariant()
+    $normalizedStopReason = ([string]$StopReason).Trim().ToLowerInvariant()
+    if ($normalizedStatus -eq "stopped" -and ($normalizedResult -or $normalizedStopReason)) {
+        switch ($normalizedResult) {
+            "explicit_stop" { return "manual stop" }
+            "explicit stop" { return "manual stop" }
+            "browser_window_closed" { return "window closed" }
+            "startup_failed" { return "startup failed" }
+            "backend_exited" { return "backend exited" }
+            default {
+                if ($normalizedStopReason) {
+                    return $normalizedStopReason -replace "[-_]+", " "
+                }
+                return $normalizedResult -replace "[-_]+", " "
+            }
+        }
+    }
+    switch ($normalizedStatus) {
+        "running" { return "running" }
+        "starting" { return "starting" }
+        "queued" { return "queued" }
+        "stopping" { return "stopping" }
+        "stopped" { return "stopped" }
+        "failed" { return "failed" }
+        default {
+            if ($normalizedStatus) {
+                return $normalizedStatus -replace "[-_]+", " "
+            }
+            return "unknown"
+        }
+    }
+}
+
+function Get-RuntimeSceneTriggerDisplayLabel {
+    param([string]$Trigger)
+
+    $normalized = ([string]$Trigger).Trim().ToLowerInvariant()
+    switch ($normalized) {
+        "start" { return "workbench start" }
+        "internal-start" { return "workbench start" }
+        "restart" { return "workbench restart" }
+        "internal-restart" { return "workbench restart" }
+        "open" { return "workbench open" }
+        "stop" { return "workbench stop" }
+        "shutdown" { return "workbench shutdown" }
+        default {
+            if ($normalized) {
+                return $normalized -replace "[-_]+", " "
+            }
+            return "workbench run"
+        }
+    }
+}
+
+function Get-RuntimeScenePackageIndex {
+    param(
+        [string]$SceneId,
+        [datetime]$StartedAt,
+        [string]$Trigger,
+        [string]$Status = "running",
+        [string]$Result = "",
+        [string]$StopReason = "",
+        [string]$EndedAt = ""
+    )
+
+    $localStarted = $StartedAt.ToLocalTime()
+    $startedDate = $localStarted.ToString("yyyy-MM-dd")
+    $startedTime = $localStarted.ToString("HH:mm:ss")
+    $triggerToken = Get-RuntimeSceneTriggerIndexToken -Trigger $Trigger
+    $statusToken = Get-RuntimeSceneStatusIndexToken -Status $Status -Result $Result -StopReason $StopReason
+    $displayName = "{0} {1} · {2} · {3}" -f $startedDate, $startedTime, (Get-RuntimeSceneTriggerDisplayLabel -Trigger $Trigger), (Get-RuntimeSceneStatusDisplayLabel -Status $Status -Result $Result -StopReason $StopReason)
+    $indexKey = "{0}_{1}_{2}_{3}" -f $startedDate, ($startedTime -replace ":", "-"), $triggerToken, $statusToken
+    $tags = @(
+        "runtime-scene",
+        "workbench-lifecycle",
+        $triggerToken,
+        $statusToken,
+        (ConvertTo-RuntimeSceneIndexToken -Value $Status -Default ""),
+        (ConvertTo-RuntimeSceneIndexToken -Value $Result -Default ""),
+        (ConvertTo-RuntimeSceneIndexToken -Value $Trigger -Default ""),
+        "managed"
+    ) | Where-Object { $_ } | Select-Object -Unique
+    $durationSeconds = $null
+    if ($EndedAt) {
+        try {
+            $endedDateTime = [datetime]$EndedAt
+            $durationSeconds = [Math]::Max(0, [Math]::Round(($endedDateTime.ToUniversalTime() - $StartedAt.ToUniversalTime()).TotalSeconds, 3))
+        } catch {
+            $durationSeconds = $null
+        }
+    }
+
+    $searchText = @(
+        $displayName,
+        $indexKey,
+        $SceneId,
+        $StartedAt.ToUniversalTime().ToString("o"),
+        $localStarted.ToString("o"),
+        $startedDate,
+        $startedTime,
+        $Trigger,
+        $Status,
+        $Result,
+        $StopReason,
+        $tags
+    ) | Where-Object { $_ }
+
+    return @{
+        schema_version = 1
+        package_id = $SceneId
+        display_name = $displayName
+        index_key = $indexKey
+        sortable_timestamp = $StartedAt.ToUniversalTime().ToString("o")
+        started_at = $StartedAt.ToUniversalTime().ToString("o")
+        started_at_local = $localStarted.ToString("o")
+        started_date = $startedDate
+        started_time = $startedTime
+        ended_at = $EndedAt
+        duration_seconds = $durationSeconds
+        search_text = ($searchText -join " ")
+        tags = @($tags)
+    }
 }
 
 function New-RuntimeSceneId {
@@ -215,6 +478,7 @@ function Get-RuntimeSceneRelativePaths {
         BackendStderr = "raw/backend.stderr.log"
         Supervisor = "raw/supervisor.log"
         Browser = "raw/browser.log"
+        LauncherControl = "raw/launcher-control.log"
     }
 }
 
@@ -258,7 +522,10 @@ function Ensure-CurrentRuntimeSceneSubdirs {
     foreach ($path in @(
         $script:currentRuntimeSceneDir,
         (Join-Path $script:currentRuntimeSceneDir "events"),
-        (Join-Path $script:currentRuntimeSceneDir "raw")
+        (Join-Path $script:currentRuntimeSceneDir "raw"),
+        (Join-Path $script:currentRuntimeSceneDir "conversations"),
+        (Join-Path $script:currentRuntimeSceneDir "agent"),
+        (Join-Path $script:currentRuntimeSceneDir "artifacts")
     )) {
         if (-not (Test-Path $path)) {
             New-Item -ItemType Directory -Path $path -Force | Out-Null
@@ -270,6 +537,42 @@ function Save-RuntimeSceneManifest {
     param([hashtable]$Manifest)
 
     Ensure-CurrentRuntimeSceneSubdirs
+    if ($Manifest.ContainsKey("started_at")) {
+        try {
+            $startedAt = [datetime]$Manifest.started_at
+            $status = [string]$Manifest.status
+            $result = [string]$Manifest.result
+            $stopReason = [string]$Manifest.stop_reason
+            $endedAt = [string]$Manifest.ended_at
+            $packageIndex = Get-RuntimeScenePackageIndex `
+                -SceneId ([string]$Manifest.runtime_scene_id) `
+                -StartedAt $startedAt `
+                -Trigger ([string]$Manifest.trigger) `
+                -Status $status `
+                -Result $result `
+                -StopReason $stopReason `
+                -EndedAt $endedAt
+            $package = @{}
+            if ($Manifest.ContainsKey("package") -and $Manifest.package -is [System.Collections.IDictionary]) {
+                $package = ConvertTo-PlainHashtable $Manifest.package
+            }
+            $package.index_schema_version = $packageIndex.schema_version
+            $package.package_id = $packageIndex.package_id
+            $package.display_name = $packageIndex.display_name
+            $package.index_key = $packageIndex.index_key
+            $package.sortable_timestamp = $packageIndex.sortable_timestamp
+            $package.started_at = $packageIndex.started_at
+            $package.started_at_local = $packageIndex.started_at_local
+            $package.started_date = $packageIndex.started_date
+            $package.started_time = $packageIndex.started_time
+            $package.ended_at = $packageIndex.ended_at
+            $package.duration_seconds = $packageIndex.duration_seconds
+            $package.search_text = $packageIndex.search_text
+            $package.tags = $packageIndex.tags
+            $Manifest.package = $package
+        } catch {
+        }
+    }
     $manifestPath = Get-CurrentRuntimeSceneFilePath "manifest.json"
     $Manifest | ConvertTo-Json -Depth 8 | Set-Content -Path $manifestPath -Encoding utf8
 }
@@ -336,6 +639,21 @@ function New-RuntimeSceneRawRef {
     }
 }
 
+function Test-RuntimeSceneLifecycleEvent {
+    param([hashtable]$Payload)
+
+    $phase = ([string]$Payload.phase).Trim().ToLowerInvariant()
+    $eventCode = ([string]$Payload.event_code).Trim()
+    $component = ([string]$Payload.component).Trim().ToLowerInvariant()
+    if ($eventCode.StartsWith("runtime.scene.")) {
+        return $true
+    }
+    if (@("session", "startup", "shutdown", "build", "health", "supervision") -contains $phase) {
+        return $true
+    }
+    return (@("launcher", "supervisor") -contains $component) -and (@("session", "shutdown") -contains $phase)
+}
+
 function Write-RuntimeSceneEvent {
     param(
         [string]$Component,
@@ -375,7 +693,12 @@ function Write-RuntimeSceneEvent {
     }
 
     $eventsPath = Get-CurrentRuntimeSceneFilePath ("events/{0}.jsonl" -f $sequenceKey)
-    $payload | ConvertTo-Json -Depth 8 -Compress | Add-Content -Path $eventsPath -Encoding utf8
+    $payloadJson = $payload | ConvertTo-Json -Depth 8 -Compress
+    $payloadJson | Add-Content -Path $eventsPath -Encoding utf8
+    $payloadJson | Add-Content -Path (Get-CurrentRuntimeSceneFilePath "timeline.jsonl") -Encoding utf8
+    if (Test-RuntimeSceneLifecycleEvent -Payload $payload) {
+        $payloadJson | Add-Content -Path (Get-CurrentRuntimeSceneFilePath "lifecycle.jsonl") -Encoding utf8
+    }
 }
 
 function Initialize-RuntimeScene {
@@ -391,6 +714,7 @@ function Initialize-RuntimeScene {
     $sceneDir = Join-Path $runtimeSceneRoot $directoryName
     Set-CurrentRuntimeSceneContext -SceneId $sceneId -SceneDir $sceneDir
     Ensure-CurrentRuntimeSceneSubdirs
+    $packageIndex = Get-RuntimeScenePackageIndex -SceneId $sceneId -StartedAt $startedAt -Trigger $Trigger -Status "running"
 
     $rawPaths = Get-RuntimeSceneRelativePaths
     foreach ($relativePath in $rawPaths.Values) {
@@ -406,6 +730,29 @@ function Initialize-RuntimeScene {
         schema_version = $sceneSchemaVersion
         runtime_scene_id = $sceneId
         title = "Managed workbench run $sceneId"
+        package = @{
+            schema_version = 2
+            index_schema_version = $packageIndex.schema_version
+            package_id = $packageIndex.package_id
+            display_name = $packageIndex.display_name
+            index_key = $packageIndex.index_key
+            sortable_timestamp = $packageIndex.sortable_timestamp
+            started_at = $packageIndex.started_at
+            started_at_local = $packageIndex.started_at_local
+            started_date = $packageIndex.started_date
+            started_time = $packageIndex.started_time
+            ended_at = $packageIndex.ended_at
+            duration_seconds = $packageIndex.duration_seconds
+            search_text = $packageIndex.search_text
+            tags = $packageIndex.tags
+            timeline_path = "timeline.jsonl"
+            lifecycle_path = "lifecycle.jsonl"
+            raw_dir = "raw"
+            conversations_dir = "conversations"
+            agent_dir = "agent"
+            artifacts_dir = "artifacts"
+            updated_at = $startedAt.ToString("o")
+        }
         started_at = $startedAt.ToString("o")
         ended_at = ""
         status = "running"
@@ -435,6 +782,10 @@ function Initialize-RuntimeScene {
             executable = ""
             launch_pid = 0
             window_pid = 0
+        }
+        launcher = @{
+            control_log_path = $rawPaths.LauncherControl
+            visible_monitor = "not_started"
         }
         supervisor = @{
             pid = 0
@@ -526,6 +877,80 @@ function Set-StoredStampValue {
     Set-Content -Path $Path -Value $Value -Encoding ascii
 }
 
+function Get-RuntimeManagerState {
+    if (-not (Test-Path $runtimeManagerStatePath)) {
+        return $null
+    }
+
+    try {
+        return Get-Content $runtimeManagerStatePath -Raw | ConvertFrom-Json
+    } catch {
+        Write-LauncherControlLog `
+            -Event "launcher.monitor.runtime_manager_state_unreadable" `
+            -Message "Runtime manager state file is unreadable." `
+            -Level "warning" `
+            -Fields @{ path = $runtimeManagerStatePath; error = $_.Exception.Message }
+        return $null
+    }
+}
+
+function Get-RuntimeManagerWorkbench {
+    $managerState = Get-RuntimeManagerState
+    if (-not $managerState) {
+        return $null
+    }
+
+    return Get-ObjectPropertyValue -Object $managerState -Name "workbench" -Default $null
+}
+
+function Get-RuntimeManagerWorkbenchReason {
+    param(
+        $Workbench,
+        [string]$Fallback = "workbench lifecycle closed"
+    )
+
+    $reason = [string](Get-ObjectPropertyValue -Object $Workbench -Name "lastReason" -Default "")
+    if ($reason) {
+        return $reason
+    }
+    return $Fallback
+}
+
+function Get-RuntimeManagerWorkbenchSource {
+    param(
+        $Workbench,
+        [string]$Fallback = "runtime_manager"
+    )
+
+    $source = [string](Get-ObjectPropertyValue -Object $Workbench -Name "lastSource" -Default "")
+    if ($source) {
+        return $source
+    }
+    return $Fallback
+}
+
+function Wait-ForRuntimeManagerWorkbenchOpen {
+    param([int]$TimeoutSeconds = 45)
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $workbench = Get-RuntimeManagerWorkbench
+        if ($workbench) {
+            $desiredState = [string](Get-ObjectPropertyValue -Object $workbench -Name "desiredState" -Default "")
+            $observedState = [string](Get-ObjectPropertyValue -Object $workbench -Name "observedState" -Default "")
+            $phase = [string](Get-ObjectPropertyValue -Object $workbench -Name "phase" -Default "")
+            if ($desiredState -eq "open" -and $observedState -eq "open" -and $phase -eq "steady") {
+                return $true
+            }
+            if ($phase -eq "failed") {
+                return $false
+            }
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
 function Get-LatestInputTimeUtc {
     param(
         [string[]]$Paths,
@@ -597,7 +1022,7 @@ function Get-WebDistTimeUtc {
 }
 
 function Acquire-LauncherMutex {
-    if ($Action -eq "supervise") {
+    if ($Action -eq "supervise" -or $Action -eq "monitor") {
         return
     }
 
@@ -609,7 +1034,7 @@ function Acquire-LauncherMutex {
 }
 
 function Release-LauncherMutex {
-    if ($Action -eq "supervise") {
+    if ($Action -eq "supervise" -or $Action -eq "monitor") {
         return
     }
 
@@ -1714,6 +2139,117 @@ function Stop-ManagedBackendProcesses {
     Stop-ProcessesById (Get-ManagedBackendCandidatePids)
 }
 
+function Get-ManagedSessionClosureSnapshot {
+    $snapshot = Get-SessionSnapshot
+    $workbench = Get-RuntimeManagerWorkbench
+    $desiredState = [string](Get-ObjectPropertyValue -Object $workbench -Name "desiredState" -Default "")
+    $observedState = [string](Get-ObjectPropertyValue -Object $workbench -Name "observedState" -Default "")
+    $phase = [string](Get-ObjectPropertyValue -Object $workbench -Name "phase" -Default "")
+    $failureMessage = [string](Get-ObjectPropertyValue -Object $workbench -Name "failureMessage" -Default "")
+    $portOwnerPid = Get-ListeningPid $port
+    $backendRunning = ($snapshot.BackendPids.Count -gt 0) -or [bool]$portOwnerPid -or (Test-WebHealthy)
+    $browserRunning = ($snapshot.BrowserPids.Count -gt 0) -or ($snapshot.BrowserWindowCount -gt 0)
+    $managerClosed = if ($workbench) {
+        $desiredState -eq "closed" -and $observedState -eq "closed" -and $phase -eq "steady"
+    } else {
+        -not $backendRunning -and -not $browserRunning
+    }
+
+    return [pscustomobject]@{
+        BackendStopped = -not $backendRunning
+        BrowserStopped = -not $browserRunning
+        ManagerClosed = [bool]$managerClosed
+        BackendPids = @($snapshot.BackendPids)
+        BrowserPids = @($snapshot.BrowserPids)
+        BrowserWindowCount = [int]$snapshot.BrowserWindowCount
+        PortOwnerPid = $portOwnerPid
+        DesiredState = $desiredState
+        ObservedState = $observedState
+        Phase = $phase
+        FailureMessage = $failureMessage
+    }
+}
+
+function Test-ManagedSessionClosureSucceeded {
+    param(
+        [pscustomobject]$Closure,
+        [bool]$RequireManagerClosed = $true
+    )
+
+    return [bool](
+        $Closure `
+        -and $Closure.BackendStopped `
+        -and $Closure.BrowserStopped `
+        -and ((-not $RequireManagerClosed) -or $Closure.ManagerClosed)
+    )
+}
+
+function Write-ManagedSessionClosureRecord {
+    param(
+        [pscustomobject]$Closure,
+        [string]$Reason,
+        [string]$Source,
+        [bool]$Success
+    )
+
+    $fields = @{
+        reason = $Reason
+        source = $Source
+        backend_stopped = [bool]$Closure.BackendStopped
+        browser_stopped = [bool]$Closure.BrowserStopped
+        manager_closed = [bool]$Closure.ManagerClosed
+        backend_pids = @($Closure.BackendPids)
+        browser_pids = @($Closure.BrowserPids)
+        browser_window_count = [int]$Closure.BrowserWindowCount
+        port_owner_pid = $Closure.PortOwnerPid
+        desired_state = [string]$Closure.DesiredState
+        observed_state = [string]$Closure.ObservedState
+        phase = [string]$Closure.Phase
+        failure_message = [string]$Closure.FailureMessage
+        control_log_path = $launcherControlLogPath
+    }
+
+    if ($script:currentRuntimeSceneId) {
+        $finalState = if ($Success) {
+            Get-RuntimeSceneFinalState -Reason $Reason
+        } else {
+            @{ status = "failed"; result = "shutdown_failed" }
+        }
+        Update-RuntimeSceneManifest @{
+            status = $finalState.status
+            result = $finalState.result
+            stop_reason = $Reason
+            ended_at = (Get-Date).ToUniversalTime().ToString("o")
+            backend = @{
+                health_status = if ($Closure.BackendStopped) { "stopped" } else { "failed_to_stop" }
+                remaining_pids = @($Closure.BackendPids)
+                port_owner_pid = $Closure.PortOwnerPid
+            }
+            browser = @{
+                status = if ($Closure.BrowserStopped) { "stopped" } else { "failed_to_stop" }
+                remaining_pids = @($Closure.BrowserPids)
+            }
+            launcher = @{
+                control_log_path = (Get-RuntimeSceneRelativePaths).LauncherControl
+                visible_monitor = if ($Source -eq "desktop_monitor") { if ($Success) { "closed" } else { "failed" } } else { "observed" }
+                last_shutdown_source = $Source
+            }
+            runtime_manager = @{
+                desired_state = [string]$Closure.DesiredState
+                observed_state = [string]$Closure.ObservedState
+                phase = [string]$Closure.Phase
+                failure_message = [string]$Closure.FailureMessage
+            }
+        }
+    }
+
+    Write-LauncherControlLog `
+        -Event $(if ($Success) { "launcher.shutdown.succeeded" } else { "launcher.shutdown.failed" }) `
+        -Message $(if ($Success) { "Managed workbench shutdown completed." } else { "Managed workbench shutdown failed." }) `
+        -Level $(if ($Success) { "info" } else { "error" }) `
+        -Fields $fields
+}
+
 function Stop-ManagedSession {
     param([string]$Reason = "user requested stop")
 
@@ -1762,38 +2298,26 @@ function Stop-ManagedSession {
         $browserStopped = Wait-ForBrowserStopped
     }
 
+    $closure = Get-ManagedSessionClosureSnapshot
     if ($script:currentRuntimeSceneId) {
-        $finalState = Get-RuntimeSceneFinalState -Reason $Reason
-        Update-RuntimeSceneManifest @{
-            status = $finalState.status
-            result = $finalState.result
-            stop_reason = $Reason
-            ended_at = (Get-Date).ToUniversalTime().ToString("o")
-            backend = @{
-                health_status = if ($backendStopped) { "stopped" } else { "failed_to_stop" }
-            }
-            browser = @{
-                status = if ($browserStopped) { "stopped" } else { "failed_to_stop" }
-            }
-            supervisor = @{
-                status = "stopped"
-            }
-        }
         Write-RuntimeSceneEvent `
             -Component "launcher" `
             -Phase "shutdown" `
             -EventCode "runtime.scene.stopped" `
             -Message "Managed session shutdown completed." `
-            -Level $(if ($browserStopped -and $backendStopped) { "info" } else { "warning" }) `
-            -Outcome $(if ($browserStopped -and $backendStopped) { "succeeded" } else { "partial" }) `
+            -Level $(if (Test-ManagedSessionClosureSucceeded -Closure $closure -RequireManagerClosed $false) { "info" } else { "warning" }) `
+            -Outcome $(if (Test-ManagedSessionClosureSucceeded -Closure $closure -RequireManagerClosed $false) { "succeeded" } else { "partial" }) `
             -Fields @{
                 reason = $Reason
-                backend_stopped = $backendStopped
-                browser_stopped = $browserStopped
+                backend_stopped = [bool]$closure.BackendStopped
+                browser_stopped = [bool]$closure.BrowserStopped
+                manager_closed = [bool]$closure.ManagerClosed
+                port_owner_pid = $closure.PortOwnerPid
             }
     }
+    Write-ManagedSessionClosureRecord -Closure $closure -Reason $Reason -Source "launcher_stop" -Success (Test-ManagedSessionClosureSucceeded -Closure $closure -RequireManagerClosed $false)
 
-    if ($browserStopped -and $backendStopped) {
+    if (Test-ManagedSessionClosureSucceeded -Closure $closure -RequireManagerClosed $false) {
         Remove-State
         Write-Note "Vibelution session stopped."
         return
@@ -2038,6 +2562,157 @@ function Run-SupervisorLoop {
     }
 }
 
+function Invoke-DesktopLifecycleMonitor {
+    param(
+        [int]$OpenTimeoutSeconds = 60,
+        [int]$CloseTimeoutSeconds = 120,
+        [int]$SuccessExitDelaySeconds = 2
+    )
+
+    Ensure-Directories
+    Sync-LauncherEndpointFromState
+    [void](Restore-RuntimeSceneContextFromState)
+
+    Write-Note "Launcher monitor attached. Close the workbench from the web UI or this window will report the final shutdown status."
+    if ($script:currentRuntimeSceneId) {
+        Update-RuntimeSceneManifest @{ launcher = @{ visible_monitor = "running"; control_log_path = (Get-RuntimeSceneRelativePaths).LauncherControl } }
+    }
+    Write-LauncherMonitorEvent `
+        -EventCode "launcher.monitor.started" `
+        -Message "Visible launcher monitor attached to the managed workbench lifecycle." `
+        -Outcome "started" `
+        -Fields @{ open_timeout_seconds = $OpenTimeoutSeconds; close_timeout_seconds = $CloseTimeoutSeconds; control_log_path = $launcherControlLogPath }
+
+    $opened = Wait-ForRuntimeManagerWorkbenchOpen -TimeoutSeconds $OpenTimeoutSeconds
+    if (-not $opened) {
+        [void](Restore-RuntimeSceneContextFromState)
+        $workbench = Get-RuntimeManagerWorkbench
+        $message = "Workbench did not reach open/steady before launcher monitor timeout."
+        $fields = @{
+            desired_state = [string](Get-ObjectPropertyValue -Object $workbench -Name "desiredState" -Default "")
+            observed_state = [string](Get-ObjectPropertyValue -Object $workbench -Name "observedState" -Default "")
+            phase = [string](Get-ObjectPropertyValue -Object $workbench -Name "phase" -Default "")
+            failure_message = [string](Get-ObjectPropertyValue -Object $workbench -Name "failureMessage" -Default "")
+        }
+        Write-LauncherMonitorEvent `
+            -EventCode "launcher.monitor.open_timeout" `
+            -Message $message `
+            -Level "error" `
+            -Outcome "failed" `
+            -Fields $fields
+        throw $message
+    }
+
+    [void](Restore-RuntimeSceneContextFromState)
+    Write-Note "Workbench is running. Waiting for shutdown request ..."
+    Write-LauncherMonitorEvent `
+        -EventCode "launcher.monitor.workbench_open" `
+        -Message "Workbench reached open/steady; waiting for lifecycle shutdown." `
+        -Outcome "succeeded"
+
+    $seenClosing = $false
+    $closeDeadline = $null
+    $lastPhase = ""
+    while ($true) {
+        [void](Restore-RuntimeSceneContextFromState)
+        $workbench = Get-RuntimeManagerWorkbench
+        $desiredState = [string](Get-ObjectPropertyValue -Object $workbench -Name "desiredState" -Default "")
+        $observedState = [string](Get-ObjectPropertyValue -Object $workbench -Name "observedState" -Default "")
+        $phase = [string](Get-ObjectPropertyValue -Object $workbench -Name "phase" -Default "")
+        $failureMessage = [string](Get-ObjectPropertyValue -Object $workbench -Name "failureMessage" -Default "")
+
+        if ($phase -and $phase -ne $lastPhase) {
+            $lastPhase = $phase
+            Write-LauncherControlLog `
+                -Event "launcher.monitor.phase" `
+                -Message "Runtime manager phase changed." `
+                -Fields @{ desired_state = $desiredState; observed_state = $observedState; phase = $phase }
+        }
+
+        if ($phase -eq "failed") {
+            $closure = Get-ManagedSessionClosureSnapshot
+            $closureReason = Get-RuntimeManagerWorkbenchReason -Workbench $workbench -Fallback "runtime manager failure"
+            $closureSource = Get-RuntimeManagerWorkbenchSource -Workbench $workbench -Fallback "desktop_monitor"
+            Write-ManagedSessionClosureRecord -Closure $closure -Reason $closureReason -Source $closureSource -Success $false
+            Write-LauncherMonitorEvent `
+                -EventCode "launcher.monitor.failed" `
+                -Message "Runtime manager reported a lifecycle failure." `
+                -Level "error" `
+                -Outcome "failed" `
+                -Fields @{
+                    desired_state = $desiredState
+                    observed_state = $observedState
+                    phase = $phase
+                    failure_message = $failureMessage
+                    backend_stopped = [bool]$closure.BackendStopped
+                    browser_stopped = [bool]$closure.BrowserStopped
+                    manager_closed = [bool]$closure.ManagerClosed
+                    port_owner_pid = $closure.PortOwnerPid
+                }
+            throw "Workbench lifecycle failed: $failureMessage"
+        }
+
+        if (-not $seenClosing -and $desiredState -eq "closed") {
+            $seenClosing = $true
+            $closeDeadline = (Get-Date).AddSeconds($CloseTimeoutSeconds)
+            Write-Note "Shutdown requested. Waiting for backend and browser to close ..."
+            Write-LauncherMonitorEvent `
+                -EventCode "launcher.monitor.shutdown_detected" `
+                -Message "Launcher monitor detected a workbench shutdown request." `
+                -Outcome "observed" `
+                -Fields @{ desired_state = $desiredState; observed_state = $observedState; phase = $phase }
+        }
+
+        if ($seenClosing) {
+            $closure = Get-ManagedSessionClosureSnapshot
+            if (Test-ManagedSessionClosureSucceeded -Closure $closure -RequireManagerClosed $true) {
+                $closureReason = Get-RuntimeManagerWorkbenchReason -Workbench $workbench -Fallback "workbench closed"
+                $closureSource = Get-RuntimeManagerWorkbenchSource -Workbench $workbench -Fallback "desktop_monitor"
+                Write-ManagedSessionClosureRecord -Closure $closure -Reason $closureReason -Source $closureSource -Success $true
+                Write-LauncherMonitorEvent `
+                    -EventCode "launcher.monitor.shutdown_confirmed" `
+                    -Message "Backend, browser, and runtime manager all report closed." `
+                    -Outcome "succeeded" `
+                    -Fields @{
+                        backend_stopped = [bool]$closure.BackendStopped
+                        browser_stopped = [bool]$closure.BrowserStopped
+                        manager_closed = [bool]$closure.ManagerClosed
+                        port_owner_pid = $closure.PortOwnerPid
+                    }
+                Write-Note "Backend stopped."
+                Write-Note "Browser stopped."
+                Write-Note "Workbench closed cleanly."
+                Write-Note "Launcher will close in $SuccessExitDelaySeconds seconds."
+                Start-Sleep -Seconds $SuccessExitDelaySeconds
+                return
+            }
+
+            if ($closeDeadline -and (Get-Date) -gt $closeDeadline) {
+                Write-ManagedSessionClosureRecord -Closure $closure -Reason "desktop monitor shutdown timeout" -Source "desktop_monitor" -Success $false
+                Write-LauncherMonitorEvent `
+                    -EventCode "launcher.monitor.shutdown_timeout" `
+                    -Message "Shutdown did not complete before launcher monitor timeout." `
+                    -Level "error" `
+                    -Outcome "failed" `
+                    -Fields @{
+                        backend_stopped = [bool]$closure.BackendStopped
+                        browser_stopped = [bool]$closure.BrowserStopped
+                        manager_closed = [bool]$closure.ManagerClosed
+                        backend_pids = @($closure.BackendPids)
+                        browser_pids = @($closure.BrowserPids)
+                        port_owner_pid = $closure.PortOwnerPid
+                        desired_state = [string]$closure.DesiredState
+                        observed_state = [string]$closure.ObservedState
+                        phase = [string]$closure.Phase
+                    }
+                throw "Workbench shutdown timed out. See $launcherControlLogPath for details."
+            }
+        }
+
+        Start-Sleep -Milliseconds 750
+    }
+}
+
 $runtimeManagerClientActions = @("toggle", "start", "stop", "restart", "status")
 if ($runtimeManagerClientActions -contains $Action) {
     switch ($Action) {
@@ -2087,6 +2762,9 @@ try {
         "internal-restart" {
             Stop-ManagedSession -Reason "runtime manager restart"
             Start-ManagedSession
+        }
+        "monitor" {
+            Invoke-DesktopLifecycleMonitor
         }
         "restart" {
             Stop-ManagedSession -Reason "restart"

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .constants import RUNTIME_MANAGER_DIR
+from .work_run_store import WorkRunStore, normalize_run_id
 
 
 EVOLUTION_DIR = RUNTIME_MANAGER_DIR / "evolution"
@@ -95,16 +96,39 @@ def _kind_paths(kind: str) -> tuple[Path, Path]:
     raise ValueError(f"Unsupported evolution store kind: {kind}")
 
 
+class _LegacyEvolutionWorkRunStore(WorkRunStore):
+    def runs_dir(self, run_kind: str) -> Path:
+        runs_dir, _ = _kind_paths(_legacy_kind(run_kind))
+        return runs_dir
+
+    def index_path(self, run_kind: str) -> Path:
+        _, index_path = _kind_paths(_legacy_kind(run_kind))
+        return index_path
+
+    def ensure_kind_dirs(self, run_kind: str) -> None:
+        ensure_evolution_store_dirs()
+
+
+def _legacy_kind(kind: str) -> str:
+    normalized = str(kind or "").strip().lower()
+    if normalized == "self_evolution_run":
+        return "self"
+    if normalized == "supervised_evolution_run":
+        return "supervised"
+    if normalized in {"self", "supervised"}:
+        return normalized
+    raise ValueError(f"Unsupported evolution store kind: {kind}")
+
+
+def _legacy_store() -> WorkRunStore:
+    return _LegacyEvolutionWorkRunStore(root=EVOLUTION_DIR)
+
+
 def _normalize_run_id(run_id: str) -> str:
-    normalized = str(run_id or "").strip()
-    if (
-        not normalized
-        or "/" in normalized
-        or "\\" in normalized
-        or normalized in {".", ".."}
-    ):
-        raise ValueError("Invalid evolution run id.")
-    return normalized
+    try:
+        return normalize_run_id(run_id)
+    except ValueError as exc:
+        raise ValueError("Invalid evolution run id.") from exc
 
 
 def _default_index() -> dict[str, Any]:
@@ -118,27 +142,11 @@ def _default_index() -> dict[str, Any]:
 
 
 def load_run_index(kind: str) -> dict[str, Any]:
-    _, index_path = _kind_paths(kind)
-    payload = _load_json(index_path)
-    if not payload:
-        return _default_index()
-    default = _default_index()
-    default.update(payload)
-    return default
+    return _legacy_store().load_run_index(kind)
 
 
 def save_run_index(kind: str, *, active_run_id: str = "", latest_run_id: str = "") -> dict[str, Any]:
-    _, index_path = _kind_paths(kind)
-    payload = load_run_index(kind)
-    payload.update(
-        {
-            "updatedAt": _now_iso(),
-            "activeRunId": str(active_run_id or "").strip(),
-            "latestRunId": str(latest_run_id or "").strip(),
-        }
-    )
-    _atomic_write_json(index_path, payload)
-    return payload
+    return _legacy_store().save_run_index(kind, active_run_id=active_run_id, latest_run_id=latest_run_id)
 
 
 def persist_run_snapshot(kind: str, snapshot: dict[str, Any], *, active_run_id: str = "") -> dict[str, Any]:
@@ -146,21 +154,15 @@ def persist_run_snapshot(kind: str, snapshot: dict[str, Any], *, active_run_id: 
         run_id = _normalize_run_id(str(snapshot.get("runId") or ""))
     except ValueError as exc:
         raise ValueError("Run snapshot is missing runId.") from exc
-    runs_dir, _ = _kind_paths(kind)
-    payload = json.loads(json.dumps(snapshot, ensure_ascii=False))
-    _atomic_write_json(runs_dir / f"{run_id}.json", payload)
-    save_run_index(kind, active_run_id=active_run_id, latest_run_id=run_id)
-    return payload
+    return _legacy_store().persist_snapshot(kind, snapshot, active_run_id=active_run_id)
 
 
 def load_run_snapshot(kind: str, run_id: str) -> dict[str, Any] | None:
     try:
-        normalized = _normalize_run_id(run_id)
+        _normalize_run_id(run_id)
     except ValueError:
         return None
-    runs_dir, _ = _kind_paths(kind)
-    payload = _load_json(runs_dir / f"{normalized}.json")
-    return payload or None
+    return _legacy_store().load_snapshot(kind, run_id)
 
 
 def _run_sort_key(payload: dict[str, Any]) -> tuple[str, str, str]:
@@ -172,71 +174,15 @@ def _run_sort_key(payload: dict[str, Any]) -> tuple[str, str, str]:
 
 
 def delete_run_snapshot(kind: str, run_id: str) -> dict[str, Any]:
-    normalized = _normalize_run_id(run_id)
-    runs_dir, _ = _kind_paths(kind)
-    target = runs_dir / f"{normalized}.json"
-    index = load_run_index(kind)
-    active_run_id = str(index.get("activeRunId") or "").strip()
-    latest_run_id = str(index.get("latestRunId") or "").strip()
-    existed = target.exists()
-
-    try:
-        target.unlink(missing_ok=True)
-    except OSError:
-        if target.exists():
-            raise
-
-    cleared_active = active_run_id == normalized
-    cleared_latest = latest_run_id == normalized
-    next_active_id = "" if cleared_active else active_run_id
-    next_latest_id = latest_run_id
-
-    if cleared_latest:
-        candidates: list[dict[str, Any]] = []
-        for path in sorted(runs_dir.glob("*.json")):
-            if path.name == target.name:
-                continue
-            payload = _load_json(path)
-            if payload:
-                candidates.append(payload)
-        next_latest_id = str(max(candidates, key=_run_sort_key).get("runId") or "") if candidates else ""
-
-    if existed or cleared_active or cleared_latest:
-        save_run_index(kind, active_run_id=next_active_id, latest_run_id=next_latest_id)
-
-    return {
-        "deleted": existed,
-        "runId": normalized,
-        "clearedActive": cleared_active,
-        "clearedLatest": cleared_latest,
-        "activeRunId": next_active_id,
-        "latestRunId": next_latest_id,
-    }
+    return _legacy_store().delete_snapshot(kind, run_id)
 
 
 def load_active_run_snapshot(kind: str) -> dict[str, Any] | None:
-    active_run_id = str(load_run_index(kind).get("activeRunId") or "").strip()
-    if not active_run_id:
-        return None
-    return load_run_snapshot(kind, active_run_id)
+    return _legacy_store().load_active_snapshot(kind)
 
 
 def load_latest_run_snapshot(kind: str) -> dict[str, Any] | None:
-    latest_run_id = str(load_run_index(kind).get("latestRunId") or "").strip()
-    if latest_run_id:
-        payload = load_run_snapshot(kind, latest_run_id)
-        if payload is not None:
-            return payload
-
-    runs_dir, _ = _kind_paths(kind)
-    candidates: list[dict[str, Any]] = []
-    for path in sorted(runs_dir.glob("*.json")):
-        payload = _load_json(path)
-        if payload:
-            candidates.append(payload)
-    if not candidates:
-        return None
-    return max(candidates, key=_run_sort_key)
+    return _legacy_store().load_latest_snapshot(kind)
 
 
 def build_evolution_summary() -> dict[str, Any]:

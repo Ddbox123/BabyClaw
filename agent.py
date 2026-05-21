@@ -189,6 +189,9 @@ class SelfEvolvingAgent:
         self.state_manager = get_state_manager()
         self.event_bus = get_event_bus()
         self.tool_executor = get_tool_executor()
+        set_cancel_checker = getattr(self.tool_executor, "set_cancel_checker", None)
+        if callable(set_cancel_checker):
+            set_cancel_checker(self._current_turn_stop_reason, owner=self)
         self.security_validator = get_security_validator(project_root)
         self.git_memory = get_git_memory_service()
         self.tool_lifecycle = ToolLifecycleBridge(
@@ -1254,7 +1257,6 @@ class SelfEvolvingAgent:
                 "stop_requested": True,
                 "stop_reason": str(stop_request or "").strip(),
             }
-            self._last_visible_response_text = ""
             ui.add_log("收到网页终止请求，本轮在安全点收束。", "WARN")
         except Exception as e:
             self._last_turn_failed = True
@@ -1753,6 +1755,9 @@ class SelfEvolvingAgent:
             self._single_turn_mode_active = False
             self._pending_supervised_case_id = None
             self._turn_interrupt_checker = None
+            set_cancel_checker = getattr(getattr(self, "tool_executor", None), "set_cancel_checker", None)
+            if callable(set_cancel_checker):
+                set_cancel_checker(None, owner=self)
             _debug_logger.info("单轮运行结束", tag=self.name)
             _debug_logger.end_session()
             logger.end_session({

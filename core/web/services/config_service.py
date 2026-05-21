@@ -72,8 +72,8 @@ def _config_sections(lang: str, editor_sections: list[dict[str, Any]] | None = N
             "title": text_for(lang, zh="工作台默认项", en="Workbench Defaults"),
             "summary": text_for(
                 lang,
-                zh="语言、intake mode 和当前工作台默认项可以先在这里快速改草稿。",
-                en="Language, intake mode, and current workbench defaults can be staged here first.",
+                zh="语言、intake mode 和当前工作台默认项可以先在这里快速修改。",
+                en="Language, intake mode, and current workbench defaults can be changed here.",
             ),
         },
         {
@@ -107,11 +107,11 @@ def _config_sections(lang: str, editor_sections: list[dict[str, Any]] | None = N
         [
             {
                 "id": "draft",
-                "title": text_for(lang, zh="草稿", en="Draft"),
+                "title": text_for(lang, zh="高级 JSON 编辑", en="Advanced JSON"),
                 "summary": text_for(
                     lang,
-                    zh="结构化操作之外，还可以直接校验整份 JSON 草稿；真正落盘时仍只写 config.toml。",
-                    en="Beyond structured controls, validate a full JSON draft here while persistence still writes only config.toml.",
+                    zh="结构化操作之外，还可以直接检查整份 JSON；保存时仍只写 config.toml。",
+                    en="Beyond structured controls, check the full JSON here while saving still writes only config.toml.",
                 ),
             },
             {
@@ -119,8 +119,8 @@ def _config_sections(lang: str, editor_sections: list[dict[str, Any]] | None = N
                 "title": text_for(lang, zh="诊断", en="Diagnostics"),
                 "summary": text_for(
                     lang,
-                    zh="阻塞问题、警告与 base hash 冲突保护会在应用前保持可见。",
-                    en="Blocking issues, warnings, and base-hash conflict protection remain visible before apply.",
+                    zh="阻塞问题、警告与保存冲突保护会在保存前保持可见。",
+                    en="Blocking issues, warnings, and save-conflict protection remain visible before saving.",
                 ),
             },
         ]
@@ -568,8 +568,8 @@ def _assert_base_hash_matches(base_hash: str, old_public: dict[str, Any], lang: 
         raise ConfigConflictError(
             text_for(
                 lang,
-                zh="当前配置已被其他页面或进程改动，请重新加载后再应用这份已确认草稿",
-                en="The saved config changed in another page or process. Reload before applying this confirmed draft.",
+                zh="当前配置已被其他页面或进程改动，请重新加载后再保存这次修改",
+                en="The saved config changed in another page or process. Reload before saving these changes.",
             )
         )
     return current_hash
@@ -625,8 +625,8 @@ def preview_config_workspace(public_config: dict[str, Any] | None, draft_meta: d
         base_hash=str(base_hash or public_config_hash(old_public)).strip(),
         message=text_for(
             _resolve_workspace_language(submitted),
-            zh="草稿已刷新，尚未应用到 config.toml。",
-            en="Draft refreshed and not yet applied to config.toml.",
+            zh="当前修改已刷新，尚未保存到 config.toml。",
+            en="Current changes refreshed and not yet saved to config.toml.",
         ),
     )
 
@@ -709,8 +709,8 @@ def draft_add_model(
         base_hash=str(base_hash or public_config_hash(old_public)).strip(),
         message=text_for(
             _resolve_workspace_language(updated),
-            zh="模型草稿已更新，尚未应用到 config.toml。",
-            en="Model draft updated and not yet applied to config.toml.",
+            zh="模型修改已更新，尚未保存到 config.toml。",
+            en="Model changes updated and not yet saved to config.toml.",
         ),
     )
 
@@ -759,8 +759,8 @@ def draft_update_model(
         base_hash=str(base_hash or public_config_hash(old_public)).strip(),
         message=text_for(
             _resolve_workspace_language(updated),
-            zh="模型草稿已更新，尚未应用到 config.toml。",
-            en="Model draft updated and not yet applied to config.toml.",
+            zh="模型修改已更新，尚未保存到 config.toml。",
+            en="Model changes updated and not yet saved to config.toml.",
         ),
     )
 
@@ -786,8 +786,8 @@ def draft_delete_model(
         base_hash=str(base_hash or public_config_hash(old_public)).strip(),
         message=text_for(
             _resolve_workspace_language(updated),
-            zh="模型草稿已更新，尚未应用到 config.toml。",
-            en="Model draft updated and not yet applied to config.toml.",
+            zh="模型修改已更新，尚未保存到 config.toml。",
+            en="Model changes updated and not yet saved to config.toml.",
         ),
     )
 
@@ -816,8 +816,8 @@ def draft_add_profile(
         base_hash=str(base_hash or public_config_hash(old_public)).strip(),
         message=text_for(
             _resolve_workspace_language(updated),
-            zh="配置档草稿已更新，尚未应用到 config.toml。",
-            en="Profile draft updated and not yet applied to config.toml.",
+            zh="配置档修改已更新，尚未保存到 config.toml。",
+            en="Profile changes updated and not yet saved to config.toml.",
         ),
     )
 
@@ -865,8 +865,8 @@ def apply_config_workspace(
         persisted,
         message=text_for(
             _resolve_workspace_language(persisted),
-            zh="配置已应用到 config.toml。",
-            en="Config applied to config.toml.",
+            zh="配置已保存到 config.toml。",
+            en="Config saved to config.toml.",
         ),
     )
 

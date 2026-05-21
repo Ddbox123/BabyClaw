@@ -1,4 +1,4 @@
-import type { ConfigModelOption, ConfigModelPresetOption } from "../api/types";
+import type { ConfigDraftMeta, ConfigModelOption, ConfigModelPresetOption } from "../api/types";
 
 export type PublicConfigShape = Record<string, unknown>;
 
@@ -46,6 +46,10 @@ export function collectModelDetailKeys(options: ConfigModelOption[]): string[] {
     }
   }
   return Array.from(keys);
+}
+
+export function hasPendingSecretChanges(draftMeta: ConfigDraftMeta): boolean {
+  return Boolean(Object.keys(draftMeta.pending_api_keys).length || draftMeta.pending_cleared_api_keys.length);
 }
 
 export function presetCategory(preset: ConfigModelPresetOption): ModelPresetGroupId {

@@ -146,6 +146,7 @@ export function SupervisedReviewRoute() {
 
   const decisionError = decisionMutation.error?.message ?? "";
   const pendingOnlyCount = reviewData?.pendingCount ?? 0;
+  const lifecycle = reviewData?.lifecycle;
 
   function levelLabel(level: string) {
     if (level === "high") {
@@ -256,6 +257,31 @@ export function SupervisedReviewRoute() {
           <span>{lang === "zh" ? "正例数据集" : "Positive dataset"}</span>
           <strong>{reviewData?.positiveDatasetName ?? "--"}</strong>
         </article>
+      </section>
+
+      <section className={styles.lifecyclePanel}>
+        <div>
+          <p className={styles.eyebrow}>{lang === "zh" ? "生命周期边界" : "Lifecycle boundary"}</p>
+          <h2 className={styles.sectionTitle}>
+            {lifecycle?.candidateStage || "pending_review"}{" -> "}{lifecycle?.reviewedCaseStage || "reviewed_chat_case"}
+          </h2>
+        </div>
+        <div className={styles.lifecyclePills}>
+          <span className={styles.secondaryPill}>
+            {lifecycle?.rawChatDirectTrainingAllowed
+              ? (lang === "zh" ? "raw chat 可直训" : "raw chat training allowed")
+              : (lang === "zh" ? "raw chat 不直训" : "no raw-chat training")}
+          </span>
+          <span className={styles.secondaryPill}>
+            {lang === "zh" ? "正例" : "positive"}: {lifecycle?.datasetTarget || reviewData?.positiveDatasetName || "--"}
+          </span>
+          <span className={styles.secondaryPill}>
+            {lang === "zh" ? "负例" : "negative"}: {lifecycle?.negativeTarget || reviewData?.negativeDatasetName || "--"}
+          </span>
+          {(lifecycle?.allowedDownstreamUses ?? []).map((use) => (
+            <span key={use} className={styles.signalPill}>{use}</span>
+          ))}
+        </div>
       </section>
 
       <div className={styles.workspace}>

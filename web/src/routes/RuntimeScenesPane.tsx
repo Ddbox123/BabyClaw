@@ -63,6 +63,13 @@ function filterRuntimeScenes(items: RuntimeSceneListItem[], query: string): Runt
       item.directoryName,
       item.title,
       item.displayName,
+      item.packageIndex?.displayName,
+      item.packageIndex?.indexKey,
+      item.packageIndex?.startedDate,
+      item.packageIndex?.startedTime,
+      item.packageIndex?.startedAtLocal,
+      item.packageIndex?.searchText,
+      ...(item.packageIndex?.tags ?? []),
       item.status,
       item.result,
       item.stopReason,
@@ -210,7 +217,41 @@ function formatTimestamp(value: string, lang: "zh" | "en") {
 
 function runtimeSceneDisplayName(scene: RuntimeSceneListItem | RuntimeSceneDetail) {
   const title = "title" in scene ? scene.title : "";
-  return scene.displayName || title || scene.directoryName || scene.runtimeSceneId;
+  return scene.packageIndex?.displayName || scene.displayName || title || scene.directoryName || scene.runtimeSceneId;
+}
+
+function runtimeSceneIndexLabel(scene: RuntimeSceneListItem | RuntimeSceneDetail) {
+  return scene.packageIndex?.indexKey || scene.directoryName || scene.runtimeSceneId;
+}
+
+function runtimeSceneStartedLabel(scene: RuntimeSceneListItem | RuntimeSceneDetail, lang: "zh" | "en") {
+  const date = scene.packageIndex?.startedDate || "";
+  const time = scene.packageIndex?.startedTime || "";
+  if (date && time) {
+    return `${date} ${time}`;
+  }
+  return formatTimestamp(scene.startedAt, lang);
+}
+
+function formatDuration(seconds: number | null | undefined, lang: "zh" | "en") {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) {
+    return lang === "zh" ? "未结束" : "Open";
+  }
+  if (seconds < 60) {
+    return lang === "zh" ? `${Math.round(seconds)} 秒` : `${Math.round(seconds)}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.round(seconds % 60);
+  return lang === "zh" ? `${minutes} 分 ${rest} 秒` : `${minutes}m ${rest}s`;
+}
+
+function runtimeScenePackageFiles(scene: RuntimeSceneDetail) {
+  return [
+    ...scene.rawFiles,
+    ...scene.conversationLogs,
+    ...scene.agentLogs,
+    ...scene.artifacts,
+  ];
 }
 
 function formatBytes(size: number) {
@@ -222,6 +263,36 @@ function formatBytes(size: number) {
     return `${(value / 1024).toFixed(1)} KB`;
   }
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function runtimeSceneSignal(scene: RuntimeSceneDetail, lang: "zh" | "en") {
+  const errors = scene.packageSummary?.errorCount ?? 0;
+  const warnings = scene.packageSummary?.warningCount ?? 0;
+  if (errors > 0) {
+    return {
+      severity: "error",
+      label: lang === "zh" ? `${errors} 个错误` : `${errors} errors`,
+    };
+  }
+  if (warnings > 0) {
+    return {
+      severity: "warning",
+      label: lang === "zh" ? `${warnings} 个警告` : `${warnings} warnings`,
+    };
+  }
+  return {
+    severity: "info",
+    label: lang === "zh" ? "未见明显异常" : "No obvious issues",
+  };
+}
+
+function runtimeSceneChildLogCount(scene: RuntimeSceneDetail) {
+  return (
+    (scene.packageSummary?.rawLogCount ?? scene.rawFiles.length) +
+    (scene.packageSummary?.conversationLogCount ?? scene.conversationLogs.length) +
+    (scene.packageSummary?.agentLogCount ?? scene.agentLogs.length) +
+    (scene.packageSummary?.artifactCount ?? scene.artifacts.length)
+  );
 }
 
 const runtimeSceneTokenZhMap: Record<string, string> = {
@@ -365,20 +436,23 @@ export function RuntimeScenesPane({ activeRoot, lang, t, statusLabel }: RuntimeS
   });
 
   const activeRawLogPath =
-    (activeSceneId ? openRawLogByScene[activeSceneId] : "") || sceneDetailQuery.data?.rawFiles[0]?.path || "";
+    (activeSceneId ? openRawLogByScene[activeSceneId] : "") ||
+    (sceneDetailQuery.data ? runtimeScenePackageFiles(sceneDetailQuery.data)[0]?.path : "") ||
+    "";
 
   useEffect(() => {
     if (!activeSceneId || !sceneDetailQuery.data) {
       return;
     }
-    const availablePaths = new Set(sceneDetailQuery.data.rawFiles.map((item) => item.path));
+    const packageFiles = runtimeScenePackageFiles(sceneDetailQuery.data);
+    const availablePaths = new Set(packageFiles.map((item) => item.path));
     const current = openRawLogByScene[activeSceneId] ?? "";
     if (current && availablePaths.has(current)) {
       return;
     }
     setOpenRawLogByScene((state) => ({
       ...state,
-      [activeSceneId]: sceneDetailQuery.data?.rawFiles[0]?.path ?? "",
+      [activeSceneId]: packageFiles[0]?.path ?? "",
     }));
   }, [activeSceneId, openRawLogByScene, sceneDetailQuery.data]);
 
@@ -685,6 +759,199 @@ export function RuntimeScenesPane({ activeRoot, lang, t, statusLabel }: RuntimeS
     setSidebarWidth(Math.round(nextWidth));
   }
 
+  function renderSceneDetail(scene: RuntimeSceneDetail) {
+    const signal = runtimeSceneSignal(scene, lang);
+    const filteredTimeline = scene.timeline.filter((event) =>
+      matchesSeverityFilter(classifyRuntimeSceneEvent(event), severityFilter),
+    );
+    const packageFiles = runtimeScenePackageFiles(scene);
+    return (
+      <div className={styles.sceneDetailSurface}>
+        <div className={styles.sceneDetailHeaderCompact}>
+          <div className={styles.sceneIdentityBlock}>
+            <p className={styles.eyebrow}>{t("logsRootRuntimeScenes")}</p>
+            <h2 className={styles.sceneDetailTitle}>{runtimeSceneDisplayName(scene)}</h2>
+            <div className={styles.sceneQuickFacts}>
+              <span className={severityClassName(signal.severity)}>{signal.label}</span>
+              <span>{runtimeSceneStartedLabel(scene, lang)}</span>
+              <span>{formatDuration(scene.packageIndex?.durationSeconds, lang)}</span>
+              <code>{runtimeSceneIndexLabel(scene)}</code>
+            </div>
+          </div>
+          <div className={styles.sceneHeaderControls}>
+            <span className={styles.metaPill}>{statusLabel(scene.status)}</span>
+            {previewActions}
+          </div>
+        </div>
+
+        <div className={styles.sceneEvidenceStrip}>
+          <span>
+            <strong>{scene.timeline.length}</strong>
+            {lang === "zh" ? " 时间线事件" : " timeline events"}
+          </span>
+          <span>
+            <strong>{runtimeSceneChildLogCount(scene)}</strong>
+            {lang === "zh" ? " 子日志" : " child logs"}
+          </span>
+          <span>
+            <strong>{scene.lifecycle.length}</strong>
+            {lang === "zh" ? " 生命周期事件" : " lifecycle events"}
+          </span>
+          <span>
+            <strong>{localizeRuntimeSceneText(scene.trigger || "start", lang)}</strong>
+            {lang === "zh" ? " 触发" : " trigger"}
+          </span>
+        </div>
+
+        <details className={styles.sceneTechnicalDetails}>
+          <summary>{lang === "zh" ? "技术索引与低频信息" : "Technical index and metadata"}</summary>
+          <div className={styles.sceneTechnicalGrid}>
+            <span>
+              <strong>ID</strong>
+              <code>{scene.runtimeSceneId}</code>
+            </span>
+            <span>
+              <strong>{lang === "zh" ? "索引 key" : "Index key"}</strong>
+              <code>{runtimeSceneIndexLabel(scene)}</code>
+            </span>
+            <span>
+              <strong>Manifest</strong>
+              <code>{scene.manifestPath}</code>
+            </span>
+            <span>
+              <strong>{lang === "zh" ? "模式" : "Mode"}</strong>
+              {localizeRuntimeSceneText(scene.sessionMode || "managed", lang)}
+            </span>
+          </div>
+        </details>
+
+        <div className={styles.sceneInfoGrid}>
+          <article className={styles.sceneInfoCard}>
+            <div className={styles.sceneCardHeaderRow}>
+              <h3>{t("runtimeSceneTimeline")}</h3>
+              {severityFilterControl}
+            </div>
+            <div className={styles.timelineList}>
+              {scene.timeline.length === 0 ? (
+                <div className={styles.panelState}>{t("runtimeSceneNoTimeline")}</div>
+              ) : filteredTimeline.length === 0 ? (
+                <div className={styles.panelState}>{t("logSeverityEmpty")}</div>
+              ) : (
+                filteredTimeline.map((event) => {
+                  const severity = classifyRuntimeSceneEvent(event);
+                  const timelineItemClassName =
+                    severity === "error"
+                      ? `${styles.timelineItem} ${styles.timelineItemError}`
+                      : severity === "warning"
+                        ? `${styles.timelineItem} ${styles.timelineItemWarning}`
+                        : styles.timelineItem;
+                  return (
+                    <div key={`${event.component}-${event.seq}-${event.timestamp}`} className={timelineItemClassName}>
+                      <div className={styles.timelineHeader}>
+                        <span>{formatTimestamp(event.timestamp, lang)}</span>
+                        <span>{localizeRuntimeSceneText(event.component, lang)}</span>
+                        <span>{localizeRuntimeSceneText(event.phase, lang)}</span>
+                        <span>{localizeRuntimeSceneText(event.level, lang)}</span>
+                      </div>
+                      <strong className={styles.timelineCode}>{event.eventCode}</strong>
+                      <p className={styles.timelineMessage}>{localizeRuntimeSceneText(event.message, lang)}</p>
+                      {summarizeFields(event.fields).length > 0 ? (
+                        <div className={styles.timelineFields}>
+                          {Object.entries(event.fields)
+                            .slice(0, 4)
+                            .map(([key, value]) => {
+                              const label = runtimeSceneFieldZhMap[key] ?? key;
+                              const rendered = Array.isArray(value) ? value.join(", ") : String(value);
+                              return (
+                                <span key={`${key}:${rendered}`} className={styles.timelineField}>
+                                  {`${label}: ${localizeRuntimeSceneText(rendered, lang)}`}
+                                </span>
+                              );
+                            })}
+                        </div>
+                      ) : null}
+                      {event.rawRefs.length > 0 ? (
+                        <div className={styles.timelineRawRefs}>
+                          {event.rawRefs.map((ref) => (
+                            <button
+                              key={`${event.eventCode}-${ref.path}`}
+                              type="button"
+                              className={styles.toolbarButton}
+                              onClick={() => handleOpenRawLog(scene.runtimeSceneId, ref.path)}
+                            >
+                              <span>{t("runtimeSceneOpenRaw")}</span>
+                              <span>{ref.path}</span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </article>
+
+          <article className={styles.sceneInfoCard}>
+            <div className={styles.sceneRawHeader}>
+              <div>
+                <h3>{t("runtimeSceneRawLogs")}</h3>
+                <p className={styles.sceneDetailSummary}>
+                  {lang === "zh" ? "选择一个子日志查看诊断摘要和原文" : "Choose a child log for diagnostics and raw content"}
+                </p>
+              </div>
+              <div className={styles.sceneHeaderControls}>{severityFilterControl}</div>
+            </div>
+
+            <div className={styles.rawFileTabs}>
+              {packageFiles.length === 0 ? (
+                <div className={styles.panelState}>{t("runtimeSceneNoRawLogs")}</div>
+              ) : (
+                packageFiles.map((item) => (
+                  <button
+                    key={item.path}
+                    type="button"
+                    className={
+                      activeRawLogPath === item.path
+                        ? `${styles.rawFileButton} ${styles.rawFileButtonActive}`
+                        : styles.rawFileButton
+                    }
+                    onClick={() => handleOpenRawLog(scene.runtimeSceneId, item.path)}
+                  >
+                    <span>{item.label}</span>
+                    <span>{formatBytes(item.size)}</span>
+                  </button>
+                ))
+              )}
+            </div>
+
+            <div className={styles.sceneRawPreview}>
+              {sceneContentQuery.isError ? (
+                <div className={styles.panelState}>{describeError(sceneContentQuery.error, t("loadFailed"))}</div>
+              ) : sceneContentQuery.isPending && !sceneContentQuery.data ? (
+                <div className={styles.panelState}>{t("loadingFilePreview")}</div>
+              ) : sceneContentQuery.data ? (
+                <div className={styles.logPreviewStack}>
+                  {renderDiagnosticsPanel(sceneContentQuery.data.diagnostics, lang)}
+                  <FilePreview
+                    file={sceneContentQuery.data}
+                    changed={false}
+                    sourceLabel={activeRoot.path}
+                    headerActions={null}
+                    highlightAsLog
+                    severityFilter={severityFilter}
+                  />
+                </div>
+              ) : (
+                <div className={styles.panelState}>{t("runtimeSceneNoRawLogs")}</div>
+              )}
+            </div>
+          </article>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div ref={layoutRef} className={styles.resizableLayout} style={layoutStyle}>
       <aside className={styles.sidebar}>
@@ -795,11 +1062,14 @@ export function RuntimeScenesPane({ activeRoot, lang, t, statusLabel }: RuntimeS
                         <strong title={scene.runtimeSceneId}>{displayName}</strong>
                         <span className={styles.sceneCardStatus}>{statusLabel(scene.status)}</span>
                       </div>
+                      <code className={styles.sceneIndexKey} title={runtimeSceneIndexLabel(scene)}>
+                        {runtimeSceneIndexLabel(scene)}
+                      </code>
                       <div className={styles.sceneCardMeta}>
-                        <span>ID {scene.runtimeSceneId}</span>
-                        <span>{formatTimestamp(scene.startedAt, lang)}</span>
+                        <span>{lang === "zh" ? "日期" : "Date"} {scene.packageIndex?.startedDate || "-"}</span>
+                        <span>{lang === "zh" ? "时间" : "Time"} {scene.packageIndex?.startedTime || "-"}</span>
                         <span>{scene.eventCount} 条事件</span>
-                        <span>{scene.rawLogCount} 个原始日志</span>
+                        <span>{scene.rawLogCount + scene.conversationCount + scene.agentLogCount + scene.artifactCount} 个子日志</span>
                       </div>
                       <p className={styles.sceneCardSummary}>
                         {localizeRuntimeSceneText(
@@ -844,183 +1114,7 @@ export function RuntimeScenesPane({ activeRoot, lang, t, statusLabel }: RuntimeS
         ) : sceneDetailQuery.isPending && !sceneDetailQuery.data ? (
           <div className={styles.emptySurface}>{t("loadingFilePreview")}</div>
         ) : sceneDetailQuery.data ? (
-          <div className={styles.sceneDetailSurface}>
-            <div className={styles.sceneDetailHeader}>
-              <div>
-                <p className={styles.eyebrow}>{t("logsRootRuntimeScenes")}</p>
-                <h2 className={styles.sceneDetailTitle}>{runtimeSceneDisplayName(sceneDetailQuery.data)}</h2>
-                <p className={styles.sceneDetailSummary}>
-                  {localizeRuntimeSceneText(
-                    sceneDetailQuery.data.stopReason ||
-                      sceneDetailQuery.data.result ||
-                      sceneDetailQuery.data.displayName ||
-                      sceneDetailQuery.data.directoryName,
-                    lang,
-                  )}
-                </p>
-                <p className={styles.sceneDetailSummary}>ID {sceneDetailQuery.data.runtimeSceneId}</p>
-              </div>
-              <div className={styles.scenePillRow}>
-                <span className={styles.metaPill}>{statusLabel(sceneDetailQuery.data.status)}</span>
-                <span className={styles.metaPill}>
-                  {localizeRuntimeSceneText(sceneDetailQuery.data.trigger || "start", lang)}
-                </span>
-                <span className={styles.metaPill}>
-                  {localizeRuntimeSceneText(sceneDetailQuery.data.sessionMode || "managed", lang)}
-                </span>
-              </div>
-            </div>
-
-            <div className={styles.sceneMetricGrid}>
-              <article className={styles.sceneMetricCard}>
-                <span>{t("runtimeSceneStartedAt")}</span>
-                <strong>{formatTimestamp(sceneDetailQuery.data.startedAt, lang)}</strong>
-              </article>
-              <article className={styles.sceneMetricCard}>
-                <span>{t("runtimeSceneEndedAt")}</span>
-                <strong>{formatTimestamp(sceneDetailQuery.data.endedAt, lang)}</strong>
-              </article>
-              <article className={styles.sceneMetricCard}>
-                <span>{t("runtimeSceneResult")}</span>
-                <strong>
-                  {localizeRuntimeSceneText(sceneDetailQuery.data.result || statusLabel(sceneDetailQuery.data.status), lang)}
-                </strong>
-              </article>
-              <article className={styles.sceneMetricCard}>
-                <span>{t("runtimeSceneTrigger")}</span>
-                <strong>{localizeRuntimeSceneText(sceneDetailQuery.data.trigger || "start", lang)}</strong>
-              </article>
-            </div>
-
-            <div className={styles.sceneInfoGrid}>
-              <article className={styles.sceneInfoCard}>
-                <div className={styles.sceneCardHeaderRow}>
-                  <h3>{t("runtimeSceneTimeline")}</h3>
-                  {severityFilterControl}
-                </div>
-                <div className={styles.timelineList}>
-                  {sceneDetailQuery.data.timeline.length === 0 ? (
-                    <div className={styles.panelState}>{t("runtimeSceneNoTimeline")}</div>
-                  ) : sceneDetailQuery.data.timeline.filter((event) =>
-                      matchesSeverityFilter(classifyRuntimeSceneEvent(event), severityFilter),
-                    ).length === 0 ? (
-                    <div className={styles.panelState}>{t("logSeverityEmpty")}</div>
-                  ) : (
-                    sceneDetailQuery.data.timeline
-                      .filter((event) => matchesSeverityFilter(classifyRuntimeSceneEvent(event), severityFilter))
-                      .map((event) => {
-                      const severity = classifyRuntimeSceneEvent(event);
-                      const timelineItemClassName =
-                        severity === "error"
-                          ? `${styles.timelineItem} ${styles.timelineItemError}`
-                          : severity === "warning"
-                            ? `${styles.timelineItem} ${styles.timelineItemWarning}`
-                            : styles.timelineItem;
-                      return (
-                        <div key={`${event.component}-${event.seq}-${event.timestamp}`} className={timelineItemClassName}>
-                          <div className={styles.timelineHeader}>
-                            <span>{formatTimestamp(event.timestamp, lang)}</span>
-                            <span>{localizeRuntimeSceneText(event.component, lang)}</span>
-                            <span>{localizeRuntimeSceneText(event.phase, lang)}</span>
-                            <span>{localizeRuntimeSceneText(event.level, lang)}</span>
-                          </div>
-                          <strong className={styles.timelineCode}>{event.eventCode}</strong>
-                          <p className={styles.timelineMessage}>{localizeRuntimeSceneText(event.message, lang)}</p>
-                          {summarizeFields(event.fields).length > 0 ? (
-                            <div className={styles.timelineFields}>
-                              {Object.entries(event.fields)
-                                .slice(0, 4)
-                                .map(([key, value]) => {
-                                  const label = runtimeSceneFieldZhMap[key] ?? key;
-                                  const rendered = Array.isArray(value) ? value.join(", ") : String(value);
-                                  return (
-                                    <span key={`${key}:${rendered}`} className={styles.timelineField}>
-                                      {`${label}: ${localizeRuntimeSceneText(rendered, lang)}`}
-                                    </span>
-                                  );
-                                })}
-                            </div>
-                          ) : null}
-                          {event.rawRefs.length > 0 ? (
-                            <div className={styles.timelineRawRefs}>
-                              {event.rawRefs.map((ref) => (
-                                <button
-                                  key={`${event.eventCode}-${ref.path}`}
-                                  type="button"
-                                  className={styles.toolbarButton}
-                                  onClick={() => handleOpenRawLog(sceneDetailQuery.data.runtimeSceneId, ref.path)}
-                                >
-                                  <span>{t("runtimeSceneOpenRaw")}</span>
-                                  <span>{ref.path}</span>
-                                </button>
-                              ))}
-                            </div>
-                          ) : null}
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-              </article>
-
-              <article className={styles.sceneInfoCard}>
-                <div className={styles.sceneRawHeader}>
-                  <div>
-                    <h3>{t("runtimeSceneRawLogs")}</h3>
-                    <p className={styles.sceneDetailSummary}>{sceneDetailQuery.data.manifestPath}</p>
-                  </div>
-                  <div className={styles.sceneHeaderControls}>
-                    {severityFilterControl}
-                    {previewActions}
-                  </div>
-                </div>
-
-                <div className={styles.rawFileTabs}>
-                  {sceneDetailQuery.data.rawFiles.length === 0 ? (
-                    <div className={styles.panelState}>{t("runtimeSceneNoRawLogs")}</div>
-                  ) : (
-                    sceneDetailQuery.data.rawFiles.map((item) => (
-                      <button
-                        key={item.path}
-                        type="button"
-                        className={
-                          activeRawLogPath === item.path
-                            ? `${styles.rawFileButton} ${styles.rawFileButtonActive}`
-                            : styles.rawFileButton
-                        }
-                        onClick={() => handleOpenRawLog(sceneDetailQuery.data.runtimeSceneId, item.path)}
-                      >
-                        <span>{item.label}</span>
-                        <span>{formatBytes(item.size)}</span>
-                      </button>
-                    ))
-                  )}
-                </div>
-
-                <div className={styles.sceneRawPreview}>
-                  {sceneContentQuery.isError ? (
-                    <div className={styles.panelState}>{describeError(sceneContentQuery.error, t("loadFailed"))}</div>
-                  ) : sceneContentQuery.isPending && !sceneContentQuery.data ? (
-                    <div className={styles.panelState}>{t("loadingFilePreview")}</div>
-                  ) : sceneContentQuery.data ? (
-                    <div className={styles.logPreviewStack}>
-                      {renderDiagnosticsPanel(sceneContentQuery.data.diagnostics, lang)}
-                      <FilePreview
-                        file={sceneContentQuery.data}
-                        changed={false}
-                        sourceLabel={activeRoot.path}
-                        headerActions={null}
-                        highlightAsLog
-                        severityFilter={severityFilter}
-                      />
-                    </div>
-                  ) : (
-                    <div className={styles.panelState}>{t("runtimeSceneNoRawLogs")}</div>
-                  )}
-                </div>
-              </article>
-            </div>
-          </div>
+          renderSceneDetail(sceneDetailQuery.data)
         ) : (
           <div className={styles.emptySurface}>{t("loadingFilePreview")}</div>
         )}

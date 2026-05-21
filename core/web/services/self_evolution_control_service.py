@@ -25,13 +25,22 @@ from core.runtime_manager.evolution_store import (
     load_run_snapshot as load_manager_run_snapshot,
     persist_run_snapshot as persist_manager_run_snapshot,
 )
+from core.runtime_manager.work_run_leases import (
+    EVOLUTION_TRANSACTION_LEASE,
+    MEMORY_WRITE_LEASE,
+    WORKTREE_WRITE_LEASE,
+    WorkRunLeaseRequest,
+    check_lease_conflicts,
+)
 
 from .i18n import get_web_language, text_for
 from .session_service import (
     SessionBusyError,
     SessionNotFoundError,
+    active_session_has_write_leases,
     get_active_session_detail,
     has_running_sessions,
+    list_active_session_work_runs,
     submit_session_message,
 )
 from .supervised_control_service import get_active_supervised_run
@@ -236,14 +245,15 @@ def start_self_evolution_run(payload: dict[str, Any]) -> dict[str, Any]:
         )
 
     goal = str(payload.get("goal") or DEFAULT_SELF_EVOLUTION_GOAL).strip() or DEFAULT_SELF_EVOLUTION_GOAL
-    if has_running_sessions():
+    if active_session_has_write_leases():
         raise SelfEvolutionRunBusyError(
             text_for(
                 lang,
-                zh="当前有网页会话还在运行，请等这一轮结束后再启动自进化。",
-                en="A web chat turn is still running. Wait for it to finish before launching self evolution.",
+                zh="当前有写入型网页会话还在运行，请等这一轮结束后再启动自进化。",
+                en="A write-capable web chat turn is still running. Wait for it to finish before launching self evolution.",
             )
         )
+    _raise_if_self_lease_conflict(lang=lang)
 
     active_supervised = get_active_supervised_run()
     if active_supervised is not None and str(active_supervised.get("status") or "").strip().lower() in {"queued", "running"}:
@@ -271,6 +281,8 @@ def start_self_evolution_run(payload: dict[str, Any]) -> dict[str, Any]:
     preflight = _capture_preflight_state(run_id)
     state = {
         "runId": run_id,
+        "runKind": "self_evolution_run",
+        "leases": [EVOLUTION_TRANSACTION_LEASE, WORKTREE_WRITE_LEASE, MEMORY_WRITE_LEASE],
         "goal": goal,
         "status": "queued",
         "phase": "queued",
@@ -453,14 +465,15 @@ def resume_self_evolution_run(run_id: str) -> dict[str, Any]:
         raise SelfEvolutionRunValidationError(
             text_for(lang, zh="缺少自进化 run id。", en="Missing self-evolution run id.")
         )
-    if has_running_sessions():
+    if active_session_has_write_leases():
         raise SelfEvolutionRunBusyError(
             text_for(
                 lang,
-                zh="当前有网页会话还在运行，请等这一轮结束后再继续自进化。",
-                en="A web chat turn is still running. Wait for it to finish before resuming self evolution.",
+                zh="当前有写入型网页会话还在运行，请等这一轮结束后再继续自进化。",
+                en="A write-capable web chat turn is still running. Wait for it to finish before resuming self evolution.",
             )
         )
+    _raise_if_self_lease_conflict(lang=lang)
     active_supervised = get_active_supervised_run()
     if active_supervised is not None and str(active_supervised.get("status") or "").strip().lower() in {"queued", "running"}:
         raise SelfEvolutionRunBusyError(
@@ -1214,6 +1227,39 @@ def _merge_run_state(run_id: str, payload: dict[str, Any], *, clear_active: bool
         persist_manager_run_snapshot("self", file_only_snapshot, active_run_id=active_run_id)
         return
     _publish_run_snapshot(normalized, terminal=terminal)
+
+
+def _raise_if_self_lease_conflict(*, lang: str) -> None:
+    active_runs = list_active_session_work_runs()
+    supervised_active = _load_active_work_run_snapshot("supervised")
+    if supervised_active is not None:
+        active_runs.append(supervised_active)
+    decision = check_lease_conflicts(
+        WorkRunLeaseRequest(
+            run_kind="self_evolution_run",
+            leases=[EVOLUTION_TRANSACTION_LEASE, WORKTREE_WRITE_LEASE, MEMORY_WRITE_LEASE],
+        ),
+        active_runs,
+    )
+    if not decision.allowed:
+        raise SelfEvolutionRunBusyError(_localize_lease_conflict(decision.reason, lang=lang))
+
+
+def _load_active_work_run_snapshot(kind: str) -> dict[str, Any] | None:
+    try:
+        snapshot = load_manager_active_run_snapshot(kind)
+    except Exception:
+        return None
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+def _localize_lease_conflict(reason: str, *, lang: str) -> str:
+    fallback = str(reason or "").strip()
+    return text_for(
+        lang,
+        zh=f"当前资源正在被另一条运行占用，请等待它收束后再启动自进化。{fallback}",
+        en=f"Another active run holds a conflicting resource lease. Wait for it to finish before starting self evolution. {fallback}",
+    ).strip()
 
 
 def _get_run_internal(run_id: str) -> dict[str, Any]:
@@ -2419,14 +2465,15 @@ def start_self_evolution_run(payload: dict[str, Any]) -> dict[str, Any]:
                     en="The current config does not enable self_evolution, so the web surface cannot launch this pass.",
                 )
             )
-        if has_running_sessions():
+        if active_session_has_write_leases():
             raise SelfEvolutionRunBusyError(
                 text_for(
                     lang,
-                    zh="当前有网页会话还在运行，请等这一轮结束后再启动自进化。",
-                    en="A web chat turn is still running. Wait for it to finish before launching self evolution.",
+                    zh="当前有写入型网页会话还在运行，请等这一轮结束后再启动自进化。",
+                    en="A write-capable web chat turn is still running. Wait for it to finish before launching self evolution.",
                 )
             )
+        _raise_if_self_lease_conflict(lang=lang)
         active_supervised = get_active_supervised_run()
         if active_supervised is not None and str(active_supervised.get("status") or "").strip().lower() in {"queued", "running", "paused", "stopping"}:
             raise SelfEvolutionRunBusyError(
@@ -2448,14 +2495,15 @@ def request_pause_self_evolution_run(run_id: str) -> dict[str, Any]:
 
 def resume_self_evolution_run(run_id: str) -> dict[str, Any]:
     if _runtime_manager_live_control_enabled():
-        if has_running_sessions():
+        if active_session_has_write_leases():
             raise SelfEvolutionRunBusyError(
                 text_for(
                     get_web_language(),
-                    zh="当前有网页会话还在运行，请等这一轮结束后再继续自进化。",
-                    en="A web chat turn is still running. Wait for it to finish before resuming self evolution.",
+                    zh="当前有写入型网页会话还在运行，请等这一轮结束后再继续自进化。",
+                    en="A write-capable web chat turn is still running. Wait for it to finish before resuming self evolution.",
                 )
             )
+        _raise_if_self_lease_conflict(lang=get_web_language())
         return _submit_self_runtime_manager_command("resume_self_evolution_run", run_id=run_id)
     return _LOCAL_RESUME_SELF_EVOLUTION_RUN(run_id)
 

@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from core.infrastructure.workspace_manager import get_workspace
 
+from .chat_case_lifecycle import chat_reviewed_dataset_metadata
 from .supervised_evolution import (
     DEFAULT_BUNDLE_NAME,
     resolve_supervised_bundle_path,
@@ -34,10 +35,17 @@ class DatasetSpec:
     runnable: bool = True
     adapter_status: str = "ready"
     tags: List[str] = None
+    review_required: bool = False
+    source_track: str = ""
+    allowed_downstream_uses: List[str] = None
+    holdout_allowed: bool = True
+    raw_chat_direct_training_allowed: bool = True
 
     def __post_init__(self) -> None:
         if self.tags is None:
             self.tags = []
+        if self.allowed_downstream_uses is None:
+            self.allowed_downstream_uses = []
 
 
 @dataclass
@@ -107,6 +115,7 @@ def _default_registry_payload() -> Dict[str, Any]:
                 "runnable": True,
                 "adapter_status": "ready",
                 "tags": ["chat", "multiturn", "reviewed"],
+                **chat_reviewed_dataset_metadata(),
             },
             {
                 "name": "swe_bench_lite",
@@ -167,15 +176,26 @@ def _default_registry_payload() -> Dict[str, Any]:
 def _merge_registry_payload(existing: Dict[str, Any]) -> Dict[str, Any]:
     defaults = list(_default_registry_payload().get("datasets") or [])
     merged = list(existing.get("datasets") or [])
-    existing_names = {
-        str(item.get("name") or "").strip()
+    existing_by_name = {
+        str(item.get("name") or "").strip(): item
         for item in merged
         if isinstance(item, dict) and str(item.get("name") or "").strip()
     }
     for default_item in defaults:
         name = str(default_item.get("name") or "").strip()
-        if name and name not in existing_names:
+        if not name:
+            continue
+        existing_item = existing_by_name.get(name)
+        if existing_item is None:
             merged.append(default_item)
+            continue
+        changed = False
+        for key, value in default_item.items():
+            if key not in existing_item:
+                existing_item[key] = value
+                changed = True
+        if changed:
+            existing_by_name[name] = existing_item
     return {
         "version": int(existing.get("version") or 1),
         "datasets": merged,
@@ -227,6 +247,15 @@ def _dataset_specs_from_payload(payload: Dict[str, Any]) -> List[DatasetSpec]:
                 runnable=bool(item.get("runnable", True)),
                 adapter_status=str(item.get("adapter_status") or "ready"),
                 tags=list(item.get("tags") or []),
+                review_required=bool(item.get("review_required", False)),
+                source_track=str(item.get("source_track") or "").strip(),
+                allowed_downstream_uses=[
+                    str(use).strip()
+                    for use in list(item.get("allowed_downstream_uses") or [])
+                    if str(use).strip()
+                ],
+                holdout_allowed=bool(item.get("holdout_allowed", True)),
+                raw_chat_direct_training_allowed=bool(item.get("raw_chat_direct_training_allowed", True)),
             )
         )
     return [item for item in specs if item.name and item.kind and item.bundle_name]
@@ -276,6 +305,11 @@ def list_dataset_status(project_root: Optional[Path] = None) -> List[Dict[str, A
                 "bundle_exists": bundle_path.exists(),
                 "description": spec.description,
                 "tags": spec.tags,
+                "review_required": spec.review_required,
+                "source_track": spec.source_track,
+                "allowed_downstream_uses": spec.allowed_downstream_uses,
+                "holdout_allowed": spec.holdout_allowed,
+                "raw_chat_direct_training_allowed": spec.raw_chat_direct_training_allowed,
             }
         )
     return rows
@@ -503,6 +537,11 @@ def materialize_dataset_bundle(
             "source_path": str(source),
             "adapter_status": spec.adapter_status,
             "runnable": spec.runnable,
+            "review_required": spec.review_required,
+            "source_track": spec.source_track,
+            "allowed_downstream_uses": spec.allowed_downstream_uses,
+            "holdout_allowed": spec.holdout_allowed,
+            "raw_chat_direct_training_allowed": spec.raw_chat_direct_training_allowed,
         },
         "default_timeout_seconds": spec.timeout_seconds,
         "cases": cases,

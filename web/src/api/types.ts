@@ -54,6 +54,7 @@ export type RuntimeSceneListItem = {
   directoryName: string;
   title: string;
   displayName: string;
+  packageIndex: RuntimeScenePackageIndex;
   startedAt: string;
   endedAt: string;
   status: string;
@@ -66,6 +67,9 @@ export type RuntimeSceneListItem = {
   browserStatus: string;
   eventCount: number;
   rawLogCount: number;
+  conversationCount: number;
+  agentLogCount: number;
+  artifactCount: number;
 };
 
 export type RuntimeSceneEvent = {
@@ -90,12 +94,42 @@ export type RuntimeSceneRawFile = {
   label: string;
   size: number;
   language: string;
+  updatedAt?: string;
+};
+
+export type RuntimeScenePackageSummary = {
+  schemaVersion: number;
+  eventCount: number;
+  lifecycleEventCount: number;
+  rawLogCount: number;
+  conversationLogCount: number;
+  agentLogCount: number;
+  artifactCount: number;
+  errorCount: number;
+  warningCount: number;
+};
+
+export type RuntimeScenePackageIndex = {
+  schemaVersion: number;
+  packageId: string;
+  displayName: string;
+  indexKey: string;
+  sortableTimestamp: string;
+  startedAt: string;
+  startedAtLocal: string;
+  startedDate: string;
+  startedTime: string;
+  endedAt: string;
+  durationSeconds: number | null;
+  searchText: string;
+  tags: string[];
 };
 
 export type RuntimeSceneDetail = {
   runtimeSceneId: string;
   directoryName: string;
   displayName: string;
+  packageIndex: RuntimeScenePackageIndex;
   manifestPath: string;
   manifest: Record<string, unknown>;
   startedAt: string;
@@ -113,7 +147,12 @@ export type RuntimeSceneDetail = {
   browser: Record<string, unknown>;
   supervisor: Record<string, unknown>;
   timeline: RuntimeSceneEvent[];
+  lifecycle: RuntimeSceneEvent[];
   rawFiles: RuntimeSceneRawFile[];
+  conversationLogs: RuntimeSceneRawFile[];
+  agentLogs: RuntimeSceneRawFile[];
+  artifacts: RuntimeSceneRawFile[];
+  packageSummary: RuntimeScenePackageSummary;
 };
 
 export type RuntimeSceneDeleteResponse = {
@@ -213,6 +252,34 @@ export type LogDeleteResponse = {
   deletedCount: number;
 };
 
+export type WorkRunSnapshot = {
+  runId: string;
+  runKind: "chat_turn" | "self_evolution_run" | "supervised_evolution_run" | string;
+  status: string;
+  leases: string[];
+  sessionId?: string;
+  track?: string;
+  currentPhase?: string;
+  summary?: string;
+  startedAt?: string;
+  updatedAt?: string;
+  finishedAt?: string;
+  [key: string]: unknown;
+};
+
+export type WorkRunSummary = {
+  active: {
+    chat_turn: WorkRunSnapshot | null;
+    self_evolution_run: WorkRunSnapshot | null;
+    supervised_evolution_run: WorkRunSnapshot | null;
+  };
+  latest: {
+    chat_turn: WorkRunSnapshot | null;
+    self_evolution_run: WorkRunSnapshot | null;
+    supervised_evolution_run: WorkRunSnapshot | null;
+  };
+};
+
 export type RuntimeSummary = {
   status: string;
   mode: string;
@@ -266,6 +333,7 @@ export type RuntimeSummary = {
     statusLine: string;
     failureMessage: string;
   };
+  workRuns: WorkRunSummary;
 };
 
 export type BackendHealth = {
@@ -276,6 +344,12 @@ export type ShutdownResponse = {
   accepted: boolean;
   mode: string;
   message: string;
+  chatTurns: Array<{
+    sessionId: string;
+    runId: string;
+    status: string;
+    error?: string;
+  }>;
 };
 
 export type SessionSummary = {
@@ -483,6 +557,11 @@ export type EvolutionDatasetOption = {
   sourcePath: string;
   sourceExists: boolean;
   tags: string[];
+  reviewRequired: boolean;
+  sourceTrack: string;
+  allowedDownstreamUses: string[];
+  holdoutAllowed: boolean;
+  rawChatDirectTrainingAllowed: boolean;
 };
 
 export type EvolutionActiveRunEvent = {
@@ -676,8 +755,22 @@ export type EvolutionChatReviewQueue = {
   positiveCount: number;
   negativeCount: number;
   discardCount: number;
+  countsByStatus: {
+    pending: number;
+    positive: number;
+    negative: number;
+    discard: number;
+  };
   approvedCount: number;
   rejectedCount: number;
+  lifecycle: {
+    rawChatDirectTrainingAllowed: boolean;
+    candidateStage: string;
+    reviewedCaseStage: string;
+    datasetTarget: string;
+    negativeTarget: string;
+    allowedDownstreamUses: string[];
+  };
   items: EvolutionChatReviewCandidate[];
 };
 

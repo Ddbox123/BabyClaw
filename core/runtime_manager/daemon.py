@@ -527,6 +527,7 @@ class RuntimeManagerDaemon:
                 "desiredState": "open",
                 "phase": "opening",
                 "lastReason": str(args.get("reason") or "explicit_open"),
+                "lastSource": str(args.get("source") or "").strip(),
                 "lastTransitionAt": now_iso(),
                 "failureMessage": "",
             }
@@ -553,6 +554,7 @@ class RuntimeManagerDaemon:
                 "desiredState": "closed",
                 "phase": "closing",
                 "lastReason": str(args.get("reason") or "explicit_close"),
+                "lastSource": str(args.get("source") or "").strip(),
                 "lastTransitionAt": now_iso(),
                 "failureMessage": "",
             }
@@ -571,6 +573,7 @@ class RuntimeManagerDaemon:
                 "desiredState": "open",
                 "phase": "opening",
                 "lastReason": str(args.get("reason") or "explicit_restart"),
+                "lastSource": str(args.get("source") or "").strip(),
                 "lastTransitionAt": now_iso(),
                 "failureMessage": "",
             }

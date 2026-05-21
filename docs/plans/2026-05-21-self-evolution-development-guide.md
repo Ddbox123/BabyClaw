@@ -34,6 +34,23 @@
 - 直接修改冻结评测集或监督 policy。
 - 绕过 risky write transaction gate。
 
+## 共享底座边界
+
+无监督进化线必须遵守横向计划：[WorkRun Substrate And Chat Case Loop Implementation Plan](./2026-05-21-workrun-substrate-and-chat-case-loop.md)。
+
+统一边界：
+
+- 每次自进化运行登记为 `WorkRun(self_evolution_run)`。
+- 自进化运行的 `active` 与 `latest` 只在 `self_evolution_run` kind 下生效，不应吞掉 chat 或 supervised 的状态。
+- 自进化默认申请 `evolution_transaction`、`worktree_write`、`memory_write` 等严格 lease；只有 lease policy 允许时才能与其他 run 并行。
+- 自进化可以生成候选 case、候选策略、候选修改，但不能直接写入冻结验收标准或 accepted baseline。
+- 自进化成功经验必须作为 proposal、dataset candidate 或 generated case 回到监督线验收。
+
+无监督线向共享底座提供：
+
+- `self_evolution_run` 的 lifecycle snapshot、event tail、事务证据和 rollback/handoff 信息。
+- 候选增量的来源、provenance、事务 ID 和是否可回滚。
+
 ## 关键文件
 
 核心服务：

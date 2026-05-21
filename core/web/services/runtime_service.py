@@ -13,9 +13,19 @@ from config.public_config import load_public_config
 from core.infrastructure.mental_model import get_mental_model
 from core.mental_model_flags import is_mental_model_enabled
 from core.runtime_manager import ensure_daemon_running, load_runtime_snapshot, submit_command
+from core.runtime_manager.evolution_store import (
+    load_active_run_snapshot as load_evolution_active_run_snapshot,
+    load_latest_run_snapshot as load_evolution_latest_run_snapshot,
+)
+from core.runtime_manager.work_run_leases import leases_for_snapshot
 
 from .i18n import get_web_language, text_for
-from .session_service import get_active_session_detail
+from .session_service import (
+    get_active_session_detail,
+    list_active_session_work_runs,
+    load_chat_turn_work_run_summary,
+    request_stop_session_turn,
+)
 from .workbench_contract_service import get_workbench_contract
 
 
@@ -67,6 +77,7 @@ def get_runtime_summary() -> dict:
     active_tools = _active_tools(active_session, runtime_state)
     context_usage = _context_usage(runtime_state)
     runtime_manager = _load_runtime_manager_snapshot()
+    work_runs = _work_run_summary()
     workbench = _workbench_payload(lang, runtime_manager)
     task_summary = (
         active_session.get("taskSummary")
@@ -115,6 +126,7 @@ def get_runtime_summary() -> dict:
             "stateVersion": int(runtime_manager.get("stateVersion") or 0),
         },
         "workbench": workbench,
+        "workRuns": work_runs,
     }
 
 
@@ -122,12 +134,13 @@ def request_runtime_shutdown() -> dict[str, object]:
     """Request the local workbench backend to stop."""
 
     lang = get_web_language()
+    stopped_chat_turns = _stop_active_chat_turns_before_shutdown()
     if _can_use_managed_launcher_shutdown():
         try:
             ensure_daemon_running()
             submit_command(
                 "close_workbench",
-                args={"reason": "web_close_button"},
+                args={"reason": "web_close_button", "source": "web_ui"},
                 requested_by="web_ui",
             )
             return {
@@ -138,6 +151,7 @@ def request_runtime_shutdown() -> dict[str, object]:
                     zh="正在关闭工作台，窗口会在后端停稳后自动关闭。",
                     en="Closing the workbench. The app window will close after the backend stops.",
                 ),
+                "chatTurns": stopped_chat_turns,
             }
         except Exception:
             _spawn_managed_launcher_shutdown()
@@ -149,6 +163,7 @@ def request_runtime_shutdown() -> dict[str, object]:
                     zh="正在关闭工作台，窗口会在后端停稳后自动关闭。",
                     en="Closing the workbench. The app window will close after the backend stops.",
                 ),
+                "chatTurns": stopped_chat_turns,
             }
 
     _schedule_local_backend_exit()
@@ -160,6 +175,7 @@ def request_runtime_shutdown() -> dict[str, object]:
             zh="正在关闭本地后端服务。",
             en="Shutting down the local backend.",
         ),
+        "chatTurns": stopped_chat_turns,
     }
 
 
@@ -215,6 +231,99 @@ def _load_runtime_manager_snapshot() -> dict:
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _stop_active_chat_turns_before_shutdown() -> list[dict[str, object]]:
+    """Persist active chat partials before the backend/launcher is closed."""
+
+    try:
+        active_runs = list_active_session_work_runs()
+    except Exception as exc:
+        return [
+            {
+                "sessionId": "",
+                "runId": "",
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        ]
+
+    stopped: list[dict[str, object]] = []
+    seen_session_ids: set[str] = set()
+    for run in active_runs:
+        if not isinstance(run, dict):
+            continue
+        session_id = str(run.get("sessionId") or "").strip()
+        if not session_id or session_id in seen_session_ids:
+            continue
+        seen_session_ids.add(session_id)
+        run_id = str(run.get("runId") or "").strip()
+        try:
+            request_stop_session_turn(session_id)
+        except Exception as exc:
+            stopped.append(
+                {
+                    "sessionId": session_id,
+                    "runId": run_id,
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            continue
+        stopped.append(
+            {
+                "sessionId": session_id,
+                "runId": run_id,
+                "status": "stopped",
+            }
+        )
+    return stopped
+
+
+def _work_run_summary() -> dict[str, dict[str, dict | None]]:
+    chat = load_chat_turn_work_run_summary()
+    self_active = _safe_load_evolution_work_run("self", active=True)
+    self_latest = _safe_load_evolution_work_run("self", active=False)
+    supervised_active = _safe_load_evolution_work_run("supervised", active=True)
+    supervised_latest = _safe_load_evolution_work_run("supervised", active=False)
+    return {
+        "active": {
+            "chat_turn": chat.get("active"),
+            "self_evolution_run": self_active,
+            "supervised_evolution_run": supervised_active,
+        },
+        "latest": {
+            "chat_turn": chat.get("latest"),
+            "self_evolution_run": self_latest,
+            "supervised_evolution_run": supervised_latest,
+        },
+    }
+
+
+def _safe_load_evolution_work_run(kind: str, *, active: bool) -> dict | None:
+    try:
+        payload = (
+            load_evolution_active_run_snapshot(kind)
+            if active
+            else load_evolution_latest_run_snapshot(kind)
+        )
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return _decorate_evolution_work_run_snapshot(payload, kind=kind)
+
+
+def _decorate_evolution_work_run_snapshot(payload: dict, *, kind: str) -> dict:
+    decorated = dict(payload)
+    if kind == "self":
+        decorated.setdefault("runKind", "self_evolution_run")
+    elif kind == "supervised":
+        decorated.setdefault("runKind", "supervised_evolution_run")
+    leases = leases_for_snapshot(decorated)
+    if leases:
+        decorated["leases"] = leases
+    return decorated
 
 
 def _workbench_payload(lang: str, runtime_manager: dict) -> dict[str, object]:

@@ -484,15 +484,47 @@ def test_runtime_manager_active_self_evolution_run_keeps_current_owner(monkeypat
     assert persisted == []
 
 
-def test_runtime_manager_start_self_evolution_still_blocks_running_sessions(monkeypatch):
+def test_runtime_manager_start_self_evolution_allows_readonly_chat_session(monkeypatch):
+    calls: list[object] = []
+    snapshot = {"runId": "web-self-managed", "status": "queued"}
+
     monkeypatch.setattr(service, "_runtime_manager_live_control_enabled", lambda: True)
     monkeypatch.setattr(
         service,
         "get_workbench_contract",
         lambda: {"modeAvailability": {"self_evolution": True}},
     )
-    monkeypatch.setattr(service, "has_running_sessions", lambda: True)
+    monkeypatch.setattr(service, "active_session_has_write_leases", lambda: False)
     monkeypatch.setattr(service, "get_active_supervised_run", lambda: None)
+    monkeypatch.setattr(service, "_ensure_runtime_manager_daemon", lambda: calls.append("ensure"))
+    monkeypatch.setattr(
+        service,
+        "submit_command",
+        lambda command_type, args=None, requested_by="unknown": calls.append((command_type, args, requested_by)) or {"commandId": "cmd-1"},
+    )
+    monkeypatch.setattr(service, "wait_for_result", lambda command_id: {"ok": True, "snapshot": snapshot})
+
+    result = service.start_self_evolution_run({"goal": "managed"})
+
+    assert result == snapshot
+    assert calls == [
+        "ensure",
+        (
+            "start_self_evolution_run",
+            {"payload": {"goal": "managed"}},
+            "web_ui",
+        ),
+    ]
+
+
+def test_runtime_manager_start_self_evolution_blocks_write_chat_session(monkeypatch):
+    monkeypatch.setattr(service, "_runtime_manager_live_control_enabled", lambda: True)
+    monkeypatch.setattr(
+        service,
+        "get_workbench_contract",
+        lambda: {"modeAvailability": {"self_evolution": True}},
+    )
+    monkeypatch.setattr(service, "active_session_has_write_leases", lambda: True)
 
     with pytest.raises(service.SelfEvolutionRunBusyError):
         service.start_self_evolution_run({"goal": "managed"})

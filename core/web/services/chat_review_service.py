@@ -6,6 +6,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from core.evaluation.chat_case_lifecycle import (
+    NEGATIVE_DATASET_BUNDLE_NAME,
+    NEGATIVE_DATASET_NAME,
+    POSITIVE_DATASET_BUNDLE_NAME,
+    POSITIVE_DATASET_NAME,
+    chat_case_lifecycle_payload,
+)
 from core.evaluation.chat_dataset_capture import (
     approve_chat_candidate,
     discard_chat_candidate,
@@ -19,10 +26,6 @@ from .i18n import get_web_language, text_for
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-POSITIVE_DATASET_NAME = "chat_reviewed_multiturn"
-POSITIVE_DATASET_BUNDLE_NAME = "chat_reviewed_multiturn_v1"
-NEGATIVE_DATASET_NAME = "chat_negative_multiturn"
-NEGATIVE_DATASET_BUNDLE_NAME = "chat_negative_multiturn_v1"
 PROMPT_PREVIEW_LIMIT = 1200
 VALID_DECISIONS = {"positive", "negative", "discard"}
 
@@ -47,6 +50,12 @@ def get_chat_review_queue(*, project_root: Path | None = None) -> dict[str, Any]
     positive_count = sum(1 for item in items if _status(item) == "positive")
     negative_count = sum(1 for item in items if _status(item) == "negative")
     discard_count = sum(1 for item in items if _status(item) == "discard")
+    counts_by_status = {
+        "pending": pending_count,
+        "positive": positive_count,
+        "negative": negative_count,
+        "discard": discard_count,
+    }
     return {
         "datasetName": POSITIVE_DATASET_NAME,
         "bundleName": POSITIVE_DATASET_BUNDLE_NAME,
@@ -65,8 +74,10 @@ def get_chat_review_queue(*, project_root: Path | None = None) -> dict[str, Any]
         "positiveCount": positive_count,
         "negativeCount": negative_count,
         "discardCount": discard_count,
+        "countsByStatus": counts_by_status,
         "approvedCount": positive_count,
         "rejectedCount": discard_count,
+        "lifecycle": chat_case_lifecycle_payload(),
         "items": [_review_item_payload(item) for item in items],
     }
 

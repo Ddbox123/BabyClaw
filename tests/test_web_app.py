@@ -1,8 +1,10 @@
 import copy
 import json
+import shutil
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,6 +21,7 @@ from core.gym.promotion import (
 )
 from core.web import app as web_app
 from core.ui.chat_state import load_chat_state, save_chat_state
+from core.runtime_manager import constants as runtime_manager_constants
 from fastapi.testclient import TestClient
 
 from core.web.app import create_app
@@ -66,6 +69,26 @@ def _read_first_sse_event(response):
                     "data": "\n".join(data_lines),
                 }
     raise AssertionError("Expected at least one SSE event")
+
+
+def _real_runtime_manager_evolution_paths(kind: str, run_id: str) -> tuple[Path, Path]:
+    root = runtime_manager_constants.PROJECT_ROOT / ".runtime" / "runtime-manager" / "evolution" / kind
+    return root / "runs" / f"{run_id}.json", root / "index.json"
+
+
+def _read_optional_text(path: Path) -> str | None:
+    return path.read_text(encoding="utf-8") if path.exists() else None
+
+
+def _restore_real_runtime_index_if_touched(kind: str, run_id: str, original_index_text: str | None) -> None:
+    run_path, index_path = _real_runtime_manager_evolution_paths(kind, run_id)
+    if run_path.exists():
+        run_path.unlink()
+    if index_path.exists() and run_id in index_path.read_text(encoding="utf-8"):
+        if original_index_text is None:
+            index_path.unlink()
+        else:
+            index_path.write_text(original_index_text, encoding="utf-8")
 
 
 def test_web_control_token_endpoint_is_local_and_required_for_mutations():
@@ -164,8 +187,17 @@ def _seed_runtime_scene_bundle(project_root: Path, scene_id: str = "scene-1", st
                 "schema_version": 1,
                 "runtime_scene_id": scene_id,
                 "title": f"Managed workbench run {scene_id}",
+                "package": {
+                    "schema_version": 2,
+                    "timeline_path": "timeline.jsonl",
+                    "lifecycle_path": "lifecycle.jsonl",
+                    "raw_dir": "raw",
+                    "conversations_dir": "conversations",
+                    "agent_dir": "agent",
+                    "artifacts_dir": "artifacts",
+                },
                 "started_at": "2026-05-18T12:00:00Z",
-                "ended_at": "2026-05-18T12:03:00Z",
+                "ended_at": "" if status == "running" else "2026-05-18T12:03:00Z",
                 "status": status,
                 "result": "" if status == "running" else "explicit_stop",
                 "stop_reason": "" if status == "running" else "explicit stop",
@@ -266,7 +298,20 @@ def _seed_runtime_scene_bundle(project_root: Path, scene_id: str = "scene-1", st
     (raw_dir / "backend.stderr.log").write_text("", encoding="utf-8")
     (raw_dir / "supervisor.log").write_text("supervisor ok\n", encoding="utf-8")
     (raw_dir / "browser.log").write_text("browser open\n", encoding="utf-8")
+    timeline_payloads = [
+        line
+        for path in sorted(events_dir.glob("*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    (scene_dir / "timeline.jsonl").write_text("\n".join(timeline_payloads) + "\n", encoding="utf-8")
+    (scene_dir / "lifecycle.jsonl").write_text("\n".join(timeline_payloads) + "\n", encoding="utf-8")
     return scene_dir
+
+
+def _runtime_scene_local_index_parts(iso_value: str) -> tuple[str, str, str]:
+    parsed = datetime.fromisoformat(iso_value.replace("Z", "+00:00")).astimezone()
+    return parsed.strftime("%Y-%m-%d"), parsed.strftime("%H:%M:%S"), parsed.strftime("%H-%M-%S")
 
 
 def test_runtime_summary_shape():
@@ -328,6 +373,7 @@ def test_runtime_shutdown_queues_runtime_manager_when_state_exists(tmp_path, mon
     monkeypatch.setattr(runtime_service, "LAUNCHER_SCRIPT_PATH", script_path)
     monkeypatch.setattr(runtime_service, "LAUNCHER_STATE_PATH", state_path)
     monkeypatch.setattr(runtime_service.os, "name", "nt", raising=False)
+    monkeypatch.setattr(runtime_service, "list_active_session_work_runs", lambda: [])
     monkeypatch.setattr(runtime_service, "ensure_daemon_running", lambda: calls.append("ensure"))
     monkeypatch.setattr(
         runtime_service,
@@ -340,8 +386,117 @@ def test_runtime_shutdown_queues_runtime_manager_when_state_exists(tmp_path, mon
     assert response.status_code == 202
     assert response.json()["accepted"] is True
     assert response.json()["mode"] == "runtime_manager"
+    assert response.json()["chatTurns"] == []
     assert calls[0] == "ensure"
-    assert calls[1] == ("close_workbench", {"reason": "web_close_button"}, "web_ui")
+    assert calls[1] == ("close_workbench", {"reason": "web_close_button", "source": "web_ui"}, "web_ui")
+
+
+def test_runtime_shutdown_stops_active_chat_turn_before_manager_close(tmp_path, monkeypatch):
+    _seed_chat_state(tmp_path, task_status="done")
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(session_service, "_schedule_session_turn", lambda context: None)
+    script_path = tmp_path / "vibelution_launcher.ps1"
+    script_path.write_text("Write-Host managed\n", encoding="utf-8")
+    state_path = tmp_path / "state.json"
+    state_path.write_text("{}", encoding="utf-8")
+    calls: list[object] = []
+
+    monkeypatch.setattr(runtime_service, "LAUNCHER_SCRIPT_PATH", script_path)
+    monkeypatch.setattr(runtime_service, "LAUNCHER_STATE_PATH", state_path)
+    monkeypatch.setattr(runtime_service.os, "name", "nt", raising=False)
+    monkeypatch.setattr(runtime_service, "ensure_daemon_running", lambda: calls.append("ensure"))
+    monkeypatch.setattr(
+        runtime_service,
+        "submit_command",
+        lambda command_type, args=None, requested_by="unknown": calls.append((command_type, args, requested_by)),
+    )
+
+    try:
+        submit_response = client.post(
+            "/api/sessions/session-live/messages",
+            json={"content": "关闭前保存当前对话现场"},
+        )
+        assert submit_response.status_code == 202
+        turn_control = session_service._get_session_turn_control("session-live")
+        assert turn_control is not None
+        session_service._set_session_live_output(
+            "session-live",
+            turn_id=turn_control.turn_id,
+            thought="关闭前已经捕获到思考片段。",
+            content="当前回答已经输出了一半。",
+            tool_calls=[{"name": "read_file_tool", "status": "done", "summary": "runtime_service.py"}],
+        )
+
+        response = client.post("/api/runtime/shutdown")
+
+        assert response.status_code == 202
+        payload = response.json()
+        assert payload["accepted"] is True
+        assert payload["mode"] == "runtime_manager"
+        assert payload["chatTurns"] == [
+            {"sessionId": "session-live", "runId": turn_control.turn_id, "status": "stopped"}
+        ]
+        assert calls == [
+            "ensure",
+            ("close_workbench", {"reason": "web_close_button", "source": "web_ui"}, "web_ui"),
+        ]
+
+        detail_response = client.get("/api/sessions/session-live")
+        assert detail_response.status_code == 200
+        detail = detail_response.json()
+        assert detail["currentPhase"] == "ready"
+        assert detail["messages"][-1]["role"] == "assistant"
+        assert "当前回答已经输出了一半" in detail["messages"][-1]["content"]
+        assert "本轮已按请求停止" in detail["messages"][-1]["content"]
+        assert detail["messages"][-1]["thought"] == "关闭前已经捕获到思考片段。"
+        assert detail["messages"][-1]["toolCalls"][0]["name"] == "read_file_tool"
+        assert session_service.load_chat_turn_work_run_summary()["active"] is None
+    finally:
+        session_service._set_session_running("session-live", False)
+        session_service._clear_session_turn_control("session-live")
+        session_service._clear_session_live_output("session-live")
+
+
+def test_runtime_shutdown_continues_when_chat_stop_fails(tmp_path, monkeypatch):
+    script_path = tmp_path / "vibelution_launcher.ps1"
+    script_path.write_text("Write-Host managed\n", encoding="utf-8")
+    state_path = tmp_path / "state.json"
+    state_path.write_text("{}", encoding="utf-8")
+    calls: list[object] = []
+
+    def fail_stop(session_id):
+        raise RuntimeError(f"stop failed for {session_id}")
+
+    monkeypatch.setattr(runtime_service, "LAUNCHER_SCRIPT_PATH", script_path)
+    monkeypatch.setattr(runtime_service, "LAUNCHER_STATE_PATH", state_path)
+    monkeypatch.setattr(runtime_service.os, "name", "nt", raising=False)
+    monkeypatch.setattr(
+        runtime_service,
+        "list_active_session_work_runs",
+        lambda: [{"sessionId": "session-live", "runId": "chat-turn-live", "status": "running"}],
+    )
+    monkeypatch.setattr(runtime_service, "request_stop_session_turn", fail_stop)
+    monkeypatch.setattr(runtime_service, "ensure_daemon_running", lambda: calls.append("ensure"))
+    monkeypatch.setattr(
+        runtime_service,
+        "submit_command",
+        lambda command_type, args=None, requested_by="unknown": calls.append((command_type, args, requested_by)),
+    )
+
+    response = client.post("/api/runtime/shutdown")
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["accepted"] is True
+    assert payload["mode"] == "runtime_manager"
+    assert payload["chatTurns"][0]["sessionId"] == "session-live"
+    assert payload["chatTurns"][0]["runId"] == "chat-turn-live"
+    assert payload["chatTurns"][0]["status"] == "failed"
+    assert "RuntimeError" in payload["chatTurns"][0]["error"]
+    assert calls == [
+        "ensure",
+        ("close_workbench", {"reason": "web_close_button", "source": "web_ui"}, "web_ui"),
+    ]
 
 
 def test_runtime_shutdown_falls_back_to_launcher_stop_when_manager_queue_fails(tmp_path, monkeypatch):
@@ -354,6 +509,7 @@ def test_runtime_shutdown_falls_back_to_launcher_stop_when_manager_queue_fails(t
     monkeypatch.setattr(runtime_service, "LAUNCHER_SCRIPT_PATH", script_path)
     monkeypatch.setattr(runtime_service, "LAUNCHER_STATE_PATH", state_path)
     monkeypatch.setattr(runtime_service.os, "name", "nt", raising=False)
+    monkeypatch.setattr(runtime_service, "list_active_session_work_runs", lambda: [])
     monkeypatch.setattr(runtime_service, "ensure_daemon_running", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
     monkeypatch.setattr(runtime_service, "_spawn_managed_launcher_shutdown", lambda: calls.append("fallback"))
 
@@ -362,6 +518,7 @@ def test_runtime_shutdown_falls_back_to_launcher_stop_when_manager_queue_fails(t
     assert response.status_code == 202
     assert response.json()["accepted"] is True
     assert response.json()["mode"] == "managed_fallback"
+    assert response.json()["chatTurns"] == []
     assert calls == ["fallback"]
 
 
@@ -371,6 +528,7 @@ def test_runtime_shutdown_falls_back_to_local_exit_when_not_managed(monkeypatch)
     monkeypatch.setattr(runtime_service, "LAUNCHER_SCRIPT_PATH", Path("missing-launcher.ps1"))
     monkeypatch.setattr(runtime_service, "LAUNCHER_STATE_PATH", Path("missing-state.json"))
     monkeypatch.setattr(runtime_service.os, "name", "nt", raising=False)
+    monkeypatch.setattr(runtime_service, "list_active_session_work_runs", lambda: [])
     monkeypatch.setattr(runtime_service, "_schedule_local_backend_exit", lambda delay_seconds=0.35: calls.append("local"))
 
     response = client.post("/api/runtime/shutdown")
@@ -378,6 +536,7 @@ def test_runtime_shutdown_falls_back_to_local_exit_when_not_managed(monkeypatch)
     assert response.status_code == 202
     assert response.json()["accepted"] is True
     assert response.json()["mode"] == "local"
+    assert response.json()["chatTurns"] == []
     assert calls == ["local"]
 
 
@@ -760,7 +919,17 @@ def test_runtime_scene_endpoints_list_detail_content_and_delete(tmp_path, monkey
     scenes = list_response.json()
     assert {item["runtimeSceneId"] for item in scenes} == {"scene-a", "scene-b"}
     scene_a = next(item for item in scenes if item["runtimeSceneId"] == "scene-a")
+    local_date, local_time, local_time_key = _runtime_scene_local_index_parts("2026-05-18T12:00:00Z")
     assert scene_a["displayName"] != "scene-a"
+    assert scene_a["packageIndex"]["packageId"] == "scene-a"
+    assert scene_a["packageIndex"]["displayName"] == scene_a["displayName"]
+    assert scene_a["packageIndex"]["startedDate"] == local_date
+    assert scene_a["packageIndex"]["startedTime"] == local_time
+    assert scene_a["packageIndex"]["durationSeconds"] == 180
+    assert scene_a["packageIndex"]["indexKey"] == f"{local_date}_{local_time_key}_workbench-start_manual-stop"
+    assert "scene-a" in scene_a["packageIndex"]["searchText"]
+    assert local_date in scene_a["packageIndex"]["searchText"]
+    assert "workbench-lifecycle" in scene_a["packageIndex"]["tags"]
     assert "工作台启动" in scene_a["displayName"]
     assert "手动停止" in scene_a["displayName"]
     assert scenes[0]["eventCount"] >= 3
@@ -771,11 +940,15 @@ def test_runtime_scene_endpoints_list_detail_content_and_delete(tmp_path, monkey
     detail = detail_response.json()
     assert detail["runtimeSceneId"] == "scene-a"
     assert detail["displayName"] == scene_a["displayName"]
+    assert detail["packageIndex"] == scene_a["packageIndex"]
     assert detail["status"] == "stopped"
     assert detail["frontend"]["build_status"] == "success"
     assert detail["timeline"][0]["eventCode"] == "frontend.build.started"
     assert detail["timeline"][-1]["eventCode"] == "backend.health.succeeded"
     assert any(item["path"] == "raw/backend.stdout.log" for item in detail["rawFiles"])
+    assert detail["packageSummary"]["schemaVersion"] == 2
+    assert detail["packageSummary"]["lifecycleEventCount"] >= 3
+    assert detail["lifecycle"][0]["eventCode"] == "backend.health.succeeded" or detail["lifecycle"][0]["eventCode"].startswith("frontend.")
 
     content_response = client.get(
         "/api/logs/runtime-scenes/scene-a/content",
@@ -799,6 +972,77 @@ def test_runtime_scene_endpoints_list_detail_content_and_delete(tmp_path, monkey
     assert delete_payload["deletedSceneIds"] == ["scene-a"]
     assert not (tmp_path / "logs" / "runtime_scenes" / "20260518T120000Z__scene-a").exists()
     assert (tmp_path / "logs" / "runtime_scenes" / "20260518T120000Z__scene-b").exists()
+
+
+def test_runtime_scene_endpoints_read_timeline_package_without_legacy_events(tmp_path, monkeypatch):
+    scene_dir = _seed_runtime_scene_bundle(tmp_path, scene_id="scene-package-only")
+    shutil.rmtree(scene_dir / "events")
+    monkeypatch.setattr(runtime_scene_service, "PROJECT_ROOT", tmp_path)
+
+    list_response = client.get("/api/logs/runtime-scenes")
+    assert list_response.status_code == 200
+    [summary] = list_response.json()
+    local_date, _, local_time_key = _runtime_scene_local_index_parts("2026-05-18T12:00:00Z")
+    assert summary["runtimeSceneId"] == "scene-package-only"
+    assert summary["eventCount"] >= 3
+    assert summary["packageIndex"]["startedDate"] == local_date
+    assert summary["packageIndex"]["indexKey"] == f"{local_date}_{local_time_key}_workbench-start_manual-stop"
+
+    detail_response = client.get("/api/logs/runtime-scenes/scene-package-only")
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    assert detail["timeline"][0]["eventCode"] == "frontend.build.started"
+    assert detail["timeline"][-1]["eventCode"] == "backend.health.succeeded"
+    assert detail["packageSummary"]["eventCount"] >= 3
+    assert detail["packageSummary"]["lifecycleEventCount"] >= 3
+    assert "scene-package-only" in detail["packageIndex"]["searchText"]
+
+
+def test_runtime_scene_package_records_conversation_as_child_log(tmp_path, monkeypatch):
+    scene_dir = _seed_runtime_scene_bundle(tmp_path, scene_id="scene-chat", status="running")
+    launcher_state_path = tmp_path / ".runtime" / "launcher" / "state.json"
+    launcher_state_path.parent.mkdir(parents=True, exist_ok=True)
+    launcher_state_path.write_text(
+        json.dumps(
+            {
+                "runtimeSceneId": "scene-chat",
+                "runtimeSceneDir": str(scene_dir),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime_scene_service, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(runtime_scene_service, "LAUNCHER_STATE_PATH", launcher_state_path)
+
+    payload = runtime_scene_service.record_runtime_scene_conversation_event(
+        "session-demo",
+        "user",
+        "帮我分析这个周期日志",
+        event="user_message",
+        status="running",
+        tool_calls=[{"name": "inspect_logs", "status": "done", "summary": "read package"}],
+    )
+
+    assert payload["accepted"] is True
+    conversation_log = scene_dir / "conversations" / "session-demo.jsonl"
+    assert conversation_log.exists()
+    assert "帮我分析这个周期日志" in conversation_log.read_text(encoding="utf-8")
+    assert (scene_dir / "agent" / "turns.jsonl").exists()
+    assert (scene_dir / "agent" / "tool_calls.jsonl").exists()
+    timeline_text = (scene_dir / "timeline.jsonl").read_text(encoding="utf-8")
+    assert "conversation.user_message" in timeline_text
+
+    detail_response = client.get("/api/logs/runtime-scenes/scene-chat")
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    local_date, _, local_time_key = _runtime_scene_local_index_parts("2026-05-18T12:00:00Z")
+    assert detail["packageIndex"]["indexKey"] == f"{local_date}_{local_time_key}_workbench-start_running"
+    assert detail["packageIndex"]["durationSeconds"] is None
+    assert detail["packageSummary"]["conversationLogCount"] == 1
+    assert detail["packageSummary"]["agentLogCount"] == 2
+    assert detail["timeline"][-1]["eventCode"] == "conversation.user_message"
+    assert detail["timeline"][-1]["rawRefs"] == [{"path": "conversations/session-demo.jsonl", "tail_lines": 80}]
+    assert detail["conversationLogs"][0]["path"] == "conversations/session-demo.jsonl"
 
 
 def test_runtime_browser_telemetry_records_into_active_scene(tmp_path, monkeypatch):
@@ -1341,6 +1585,87 @@ def test_submit_session_message_runs_turn_and_persists_reply(tmp_path, monkeypat
     assert "activeTask" not in payload
 
 
+def test_chat_turn_registers_as_work_run_until_finished(tmp_path, monkeypatch):
+    _seed_chat_state(tmp_path, task_status="done")
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(session_service, "_schedule_session_turn", lambda context: None)
+
+    response = client.post(
+        "/api/sessions/session-live/messages",
+        json={"content": "解释当前状态"},
+    )
+
+    assert response.status_code == 202
+    running_summary = runtime_service.get_runtime_summary()
+    active_chat = running_summary["workRuns"]["active"]["chat_turn"]
+    assert active_chat["runKind"] == "chat_turn"
+    assert active_chat["status"] == "running"
+    assert active_chat["sessionId"] == "session-live"
+    assert active_chat["leases"] == ["readonly_chat"]
+
+    turn_id = active_chat["runId"]
+    session_service._persist_session_turn_result(
+        "session-live",
+        {
+            "status": "completed",
+            "summary": "已解释当前状态。",
+            "raw_output": "已解释当前状态。",
+            "outcome": "done",
+            "tool_call_count": 0,
+            "tool_trace": [],
+        },
+        turn_id=turn_id,
+    )
+    session_service._set_session_running("session-live", False, turn_id=turn_id)
+
+    finished_summary = runtime_service.get_runtime_summary()
+    assert finished_summary["workRuns"]["active"]["chat_turn"] is None
+    latest_chat = finished_summary["workRuns"]["latest"]["chat_turn"]
+    assert latest_chat["runId"] == turn_id
+    assert latest_chat["status"] == "completed"
+
+
+def test_runtime_summary_exposes_three_work_run_kinds(monkeypatch):
+    monkeypatch.setattr(runtime_service, "get_active_session_detail", lambda: {})
+    monkeypatch.setattr(runtime_service, "_load_runtime_state", lambda: {})
+    self_evolution_control_service.persist_manager_run_snapshot(
+        "self",
+        {
+            "runId": "self-work-run",
+            "status": "running",
+            "startedAt": "2026-05-21T00:00:00",
+            "updatedAt": "2026-05-21T00:00:00",
+        },
+        active_run_id="self-work-run",
+    )
+    supervised_control_service.persist_manager_run_snapshot(
+        "supervised",
+        {
+            "runId": "supervised-work-run",
+            "status": "done",
+            "startedAt": "2026-05-21T00:00:00",
+            "updatedAt": "2026-05-21T00:01:00",
+        },
+        active_run_id="",
+    )
+
+    payload = runtime_service.get_runtime_summary()
+
+    assert set(payload["workRuns"]["active"]) == {
+        "chat_turn",
+        "self_evolution_run",
+        "supervised_evolution_run",
+    }
+    assert payload["workRuns"]["active"]["self_evolution_run"]["runKind"] == "self_evolution_run"
+    assert payload["workRuns"]["active"]["self_evolution_run"]["leases"] == [
+        "evolution_transaction",
+        "worktree_write",
+        "memory_write",
+    ]
+    assert payload["workRuns"]["latest"]["supervised_evolution_run"]["runKind"] == "supervised_evolution_run"
+    assert payload["workRuns"]["latest"]["supervised_evolution_run"]["leases"] == ["evaluation"]
+
+
 def test_submit_session_message_captures_chat_review_candidate(tmp_path, monkeypatch):
     _seed_chat_state(tmp_path, task_status="done")
     monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
@@ -1400,7 +1725,39 @@ def test_submit_session_message_rejects_busy_session(tmp_path, monkeypatch):
     assert "运行" in response.json()["detail"] or "running" in response.json()["detail"].lower()
 
 
-def test_request_stop_session_turn_marks_session_stopping(tmp_path, monkeypatch):
+def test_submit_session_message_write_intent_rejects_self_evolution_lease(tmp_path, monkeypatch):
+    _seed_chat_state(tmp_path, task_status="done")
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(session_service, "_schedule_session_turn", lambda context: None)
+    self_snapshot = {
+        "runId": "web-self-active-for-chat",
+        "runKind": "self_evolution_run",
+        "status": "running",
+        "leases": ["evolution_transaction", "worktree_write", "memory_write"],
+        "startedAt": "2026-05-21T00:00:00",
+        "updatedAt": "2026-05-21T00:00:00",
+    }
+    self_evolution_control_service.persist_manager_run_snapshot("self", self_snapshot, active_run_id=self_snapshot["runId"])
+
+    readonly = client.post(
+        "/api/sessions/session-live/messages",
+        json={"content": "解释当前状态"},
+    )
+
+    assert readonly.status_code == 202
+    session_service._set_session_running("session-live", False)
+    session_service._clear_session_turn_control("session-live")
+
+    write_response = client.post(
+        "/api/sessions/session-live/messages",
+        json={"content": "继续修复这个 bug", "writeIntent": True},
+    )
+
+    assert write_response.status_code == 409
+    assert "resource" in write_response.json()["detail"].lower() or "资源" in write_response.json()["detail"]
+
+
+def test_request_stop_session_turn_persists_stop_snapshot_and_releases_session(tmp_path, monkeypatch):
     _seed_chat_state(tmp_path, task_status="done")
     monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(session_service, "_schedule_session_turn", lambda context: None)
@@ -1420,9 +1777,17 @@ def test_request_stop_session_turn_marks_session_stopping(tmp_path, monkeypatch)
 
         assert stop_response.status_code == 202
         payload = stop_response.json()
-        assert payload["currentPhase"] == "stopping"
-        assert payload["stopRequested"] is True
-        assert payload["stopReason"]
+        assert payload["currentPhase"] == "ready"
+        assert payload["stopRequested"] is False
+        assert payload["messages"][-1]["role"] == "assistant"
+        assert "本轮已按请求停止" in payload["messages"][-1]["content"]
+
+        continue_response = client.post(
+            "/api/sessions/session-live/messages",
+            json={"content": "继续"},
+        )
+        assert continue_response.status_code == 202
+        assert continue_response.json()["currentPhase"] == "running"
     finally:
         session_service._set_session_running("session-live", False)
         session_service._clear_session_turn_control("session-live")
@@ -1495,7 +1860,7 @@ def test_stop_requested_turn_persists_visible_stop_message(tmp_path, monkeypatch
     stop_response = client.post("/api/sessions/session-live/stop")
 
     assert stop_response.status_code == 202
-    assert stop_response.json()["currentPhase"] == "stopping"
+    assert stop_response.json()["currentPhase"] == "ready"
     assert finished.wait(2.0), "expected the stopped turn to finish"
 
     for thread in worker_threads:
@@ -1507,7 +1872,179 @@ def test_stop_requested_turn_persists_visible_stop_message(tmp_path, monkeypatch
     assert payload["currentPhase"] == "ready"
     assert payload["stopRequested"] is False
     assert payload["messages"][-1]["role"] == "assistant"
-    assert payload["messages"][-1]["content"] == "本轮已按请求停止。"
+    assert "本轮已按请求停止" in payload["messages"][-1]["content"]
+
+
+def test_stop_session_turn_persists_partial_snapshot_and_allows_immediate_continue(tmp_path, monkeypatch):
+    _seed_chat_state(
+        tmp_path,
+        task_status="reading",
+        active_task={
+            "task_id": "chat-stop-resume",
+            "kind": "coding",
+            "status": "reading",
+            "title": "修复 Web Chat 停止恢复",
+            "goal": "修复 Web Chat 停止恢复",
+            "read_files": ["tests/prompt_debugger.py"],
+            "latest_summary": "已定位停止按钮问题。",
+            "updated_at": "2026-05-20T16:24:53",
+        },
+    )
+    (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tests" / "prompt_debugger.py").write_text("pass\n", encoding="utf-8")
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(session_service, "_schedule_session_turn", lambda context: None)
+
+    submit_response = client.post(
+        "/api/sessions/session-live/messages",
+        json={"content": "继续修复停止恢复"},
+    )
+    assert submit_response.status_code == 202
+    old_control = session_service._get_session_turn_control("session-live")
+    assert old_control is not None
+
+    session_service._set_session_live_output(
+        "session-live",
+        thought="我已经定位到 stop checker。",
+        content="已完成一部分：停止请求进入后会设置 stop flag。",
+        tool_calls=[{"name": "read_file_tool", "status": "done", "summary": "session_service.py"}],
+    )
+
+    stop_response = client.post("/api/sessions/session-live/stop")
+    assert stop_response.status_code == 202
+    stopped_payload = stop_response.json()
+    assert stopped_payload["currentPhase"] == "ready"
+    assert stopped_payload["stopRequested"] is False
+    assert "已完成一部分" in stopped_payload["messages"][-1]["content"]
+    assert "本轮已按请求停止" in stopped_payload["messages"][-1]["content"]
+    assert stopped_payload["messages"][-1]["thought"] == "我已经定位到 stop checker。"
+    assert stopped_payload["messages"][-1]["toolCalls"][0]["name"] == "read_file_tool"
+
+    continue_response = client.post(
+        "/api/sessions/session-live/messages",
+        json={"content": "继续"},
+    )
+    assert continue_response.status_code == 202
+    new_control = session_service._get_session_turn_control("session-live")
+    assert new_control is not None
+    assert new_control.turn_id != old_control.turn_id
+
+    session_service._clear_session_turn_control("session-live", turn_id=old_control.turn_id)
+    assert session_service._get_session_turn_control("session-live").turn_id == new_control.turn_id
+
+    session_service._set_session_running("session-live", False, turn_id=old_control.turn_id)
+    assert session_service._is_session_running("session-live") is True
+
+    session_service._set_session_running("session-live", False, turn_id=new_control.turn_id)
+    session_service._clear_session_turn_control("session-live", turn_id=new_control.turn_id)
+
+
+def test_stale_stopped_turn_does_not_run_after_immediate_continue(tmp_path, monkeypatch):
+    _seed_chat_state(tmp_path, task_status="done")
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+    scheduled_contexts = []
+    stale_agent_called = False
+
+    class StaleAgent:
+        def seed_chat_history(self, messages):
+            self.messages = list(messages)
+
+        def set_turn_interrupt_checker(self, checker):
+            self.stop_checker = checker
+
+        def run_single_turn(self, initial_prompt=None):
+            nonlocal stale_agent_called
+            stale_agent_called = True
+            return {
+                "status": "completed",
+                "summary": "旧轮结果不应该写入当前会话。",
+                "raw_output": "旧轮结果不应该写入当前会话。",
+                "tool_call_count": 0,
+                "tool_trace": [],
+            }
+
+    monkeypatch.setattr(session_service, "_schedule_session_turn", lambda context: scheduled_contexts.append(dict(context)))
+    monkeypatch.setattr(session_service, "create_chat_agent", lambda: StaleAgent())
+
+    try:
+        first_response = client.post(
+            "/api/sessions/session-live/messages",
+            json={"content": "第一轮需要停止"},
+        )
+        assert first_response.status_code == 202
+        assert len(scheduled_contexts) == 1
+
+        stop_response = client.post("/api/sessions/session-live/stop")
+        assert stop_response.status_code == 202
+
+        continue_response = client.post(
+            "/api/sessions/session-live/messages",
+            json={"content": "第二轮已经开始"},
+        )
+        assert continue_response.status_code == 202
+        assert continue_response.json()["currentPhase"] == "running"
+        assert len(scheduled_contexts) == 2
+
+        session_service._run_session_turn(scheduled_contexts[0])
+
+        detail_response = client.get("/api/sessions/session-live")
+        assert detail_response.status_code == 200
+        payload = detail_response.json()
+        assert stale_agent_called is False
+        assert payload["currentPhase"] == "running"
+        assert payload["messages"][-1]["role"] == "user"
+        assert payload["messages"][-1]["content"] == "第二轮已经开始"
+    finally:
+        session_service._set_session_running("session-live", False)
+        session_service._clear_session_turn_control("session-live")
+        session_service._clear_session_live_output("session-live")
+
+
+def test_stale_turn_live_output_does_not_overwrite_new_turn(tmp_path, monkeypatch):
+    _seed_chat_state(tmp_path, task_status="done")
+    monkeypatch.setattr(session_service, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(session_service, "_schedule_session_turn", lambda context: None)
+
+    try:
+        first_response = client.post(
+            "/api/sessions/session-live/messages",
+            json={"content": "第一轮需要停止"},
+        )
+        assert first_response.status_code == 202
+        old_control = session_service._get_session_turn_control("session-live")
+        assert old_control is not None
+
+        stop_response = client.post("/api/sessions/session-live/stop")
+        assert stop_response.status_code == 202
+
+        continue_response = client.post(
+            "/api/sessions/session-live/messages",
+            json={"content": "第二轮已经开始"},
+        )
+        assert continue_response.status_code == 202
+        new_control = session_service._get_session_turn_control("session-live")
+        assert new_control is not None
+
+        session_service._set_session_live_output(
+            "session-live",
+            turn_id=new_control.turn_id,
+            content="新轮正在输出。",
+        )
+        session_service._set_session_live_output(
+            "session-live",
+            turn_id=old_control.turn_id,
+            content="旧轮迟到输出，不应该可见。",
+        )
+
+        detail_response = client.get("/api/sessions/session-live")
+        assert detail_response.status_code == 200
+        payload = detail_response.json()
+        assert payload["messages"][-1]["streaming"] is True
+        assert payload["messages"][-1]["content"] == "新轮正在输出。"
+    finally:
+        session_service._set_session_running("session-live", False)
+        session_service._clear_session_turn_control("session-live")
+        session_service._clear_session_live_output("session-live")
 
 
 def test_session_detail_includes_live_thought_draft(tmp_path, monkeypatch):
@@ -3509,6 +4046,18 @@ def test_chat_review_routes_list_and_approve_candidate(tmp_path, monkeypatch):
     assert queue_payload["positiveCount"] == 0
     assert queue_payload["negativeCount"] == 0
     assert queue_payload["discardCount"] == 0
+    assert queue_payload["countsByStatus"] == {
+        "pending": 1,
+        "positive": 0,
+        "negative": 0,
+        "discard": 0,
+    }
+    assert queue_payload["lifecycle"]["rawChatDirectTrainingAllowed"] is False
+    assert queue_payload["lifecycle"]["candidateStage"] == "pending_review"
+    assert queue_payload["lifecycle"]["reviewedCaseStage"] == "reviewed_chat_case"
+    assert queue_payload["lifecycle"]["datasetTarget"] == "chat_reviewed_multiturn"
+    assert queue_payload["lifecycle"]["negativeTarget"] == "chat_negative_multiturn"
+    assert "supervised_evaluation" in queue_payload["lifecycle"]["allowedDownstreamUses"]
     candidate_id = queue_payload["items"][0]["candidateId"]
 
     decision_response = client.post(
@@ -3535,6 +4084,11 @@ def test_chat_review_routes_list_and_approve_candidate(tmp_path, monkeypatch):
         item for item in workbench_response.json()["datasets"] if item["name"] == "chat_reviewed_multiturn"
     )
     assert dataset_entry["available"] is True
+    assert dataset_entry["reviewRequired"] is True
+    assert dataset_entry["sourceTrack"] == "dialogue"
+    assert dataset_entry["holdoutAllowed"] is False
+    assert dataset_entry["rawChatDirectTrainingAllowed"] is False
+    assert "gym_candidate_case" in dataset_entry["allowedDownstreamUses"]
 
 
 def test_workbench_dataset_list_backfills_new_builtin_datasets(tmp_path, monkeypatch):
@@ -3565,7 +4119,10 @@ def test_workbench_dataset_list_backfills_new_builtin_datasets(tmp_path, monkeyp
     assert response.status_code == 200
     rows = response.json()["datasets"]
     assert any(item["name"] == "generated_cases" for item in rows)
-    assert any(item["name"] == "chat_reviewed_multiturn" for item in rows)
+    chat_row = next(item for item in rows if item["name"] == "chat_reviewed_multiturn")
+    assert chat_row["reviewRequired"] is True
+    assert chat_row["sourceTrack"] == "dialogue"
+    assert chat_row["holdoutAllowed"] is False
 
 
 def test_start_supervised_run_from_dataset_exposes_active_snapshot_and_sse(tmp_path, monkeypatch):
@@ -3631,6 +4188,47 @@ def test_start_supervised_run_from_dataset_exposes_active_snapshot_and_sse(tmp_p
     _reset_supervised_live_state()
 
 
+def test_start_supervised_run_from_web_does_not_write_real_runtime_manager_store(tmp_path, monkeypatch):
+    bundle_path = tmp_path / "workspace" / "evaluation" / "bundles" / "manual_bundle.json"
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    bundle_path.write_text(
+        json.dumps({"bundle_name": "manual_bundle", "cases": [{"case_id": "case_1"}]}),
+        encoding="utf-8",
+    )
+    _reset_supervised_live_state()
+    monkeypatch.setattr(supervised_control_service, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        supervised_control_service._RUN_EXECUTOR,
+        "submit",
+        lambda fn, *args, **kwargs: object(),
+    )
+
+    response = client.post(
+        "/api/evolution/runs",
+        json={
+            "sourceKind": "bundle",
+            "bundleName": "manual_bundle",
+            "keepWorktree": False,
+        },
+    )
+    assert response.status_code == 202
+    run_id = response.json()["runId"]
+    run_path, index_path = _real_runtime_manager_evolution_paths("supervised", run_id)
+    original_index_text = _read_optional_text(index_path)
+
+    try:
+        active_response = client.get("/api/evolution/active-run")
+
+        assert active_response.status_code == 200
+        assert active_response.json()["runId"] == run_id
+        assert not run_path.exists()
+        current_index_text = _read_optional_text(index_path)
+        assert current_index_text is None or run_id not in current_index_text
+    finally:
+        _restore_real_runtime_index_if_touched("supervised", run_id, original_index_text)
+        _reset_supervised_live_state()
+
+
 def test_start_supervised_run_rejects_second_active_run(tmp_path, monkeypatch):
     bundle_path = tmp_path / "workspace" / "evaluation" / "bundles" / "manual_bundle.json"
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3664,6 +4262,39 @@ def test_start_supervised_run_rejects_second_active_run(tmp_path, monkeypatch):
     assert second.status_code == 409
 
     _reset_supervised_live_state()
+
+
+def test_start_supervised_run_rejects_when_self_evolution_lease_active(tmp_path, monkeypatch):
+    bundle_path = tmp_path / "workspace" / "evaluation" / "bundles" / "manual_bundle.json"
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    bundle_path.write_text(json.dumps({"bundle_name": "manual_bundle", "cases": [{"case_id": "case_1"}]}), encoding="utf-8")
+    _reset_supervised_live_state()
+    _reset_self_evolution_live_state()
+    monkeypatch.setattr(supervised_control_service, "PROJECT_ROOT", tmp_path)
+    self_snapshot = {
+        "runId": "web-self-active-lease",
+        "runKind": "self_evolution_run",
+        "status": "running",
+        "leases": ["evolution_transaction", "worktree_write", "memory_write"],
+        "startedAt": "2026-05-21T00:00:00",
+        "updatedAt": "2026-05-21T00:00:00",
+    }
+    self_evolution_control_service.persist_manager_run_snapshot("self", self_snapshot, active_run_id=self_snapshot["runId"])
+
+    response = client.post(
+        "/api/evolution/runs",
+        json={
+            "sourceKind": "bundle",
+            "bundleName": "manual_bundle",
+            "keepWorktree": False,
+        },
+    )
+
+    assert response.status_code == 409
+    assert "resource" in response.json()["detail"].lower() or "资源" in response.json()["detail"]
+
+    _reset_supervised_live_state()
+    _reset_self_evolution_live_state()
 
 
 def test_supervised_run_control_routes_pause_resume_and_terminate(tmp_path, monkeypatch):
@@ -4216,6 +4847,103 @@ def test_start_self_evolution_run_from_web_exposes_active_snapshot(monkeypatch):
     assert active_payload["runId"] == payload["runId"]
     assert active_payload["status"] == "queued"
     assert active_payload["actionStates"]["resume"]["enabled"] is False
+
+    _reset_self_evolution_live_state()
+
+
+def test_start_self_evolution_run_from_web_does_not_write_real_runtime_manager_store(monkeypatch):
+    _reset_self_evolution_live_state()
+    monkeypatch.setattr(
+        self_evolution_control_service,
+        "get_workbench_contract",
+        lambda: {
+            "defaultMode": "self_evolution",
+            "defaultRoute": "/evolution",
+            "intakeMode": "manual_review",
+            "modeAvailability": {
+                "chat": True,
+                "self_evolution": True,
+                "supervised_evolution": True,
+            },
+            "domainAvailability": {
+                "chat": True,
+                "evolution": True,
+                "config": True,
+            },
+        },
+    )
+    monkeypatch.setattr(self_evolution_control_service, "has_running_sessions", lambda: False)
+    monkeypatch.setattr(self_evolution_control_service, "get_active_supervised_run", lambda: None)
+    monkeypatch.setattr(
+        self_evolution_control_service._RUN_EXECUTOR,
+        "submit",
+        lambda fn, *args, **kwargs: object(),
+    )
+
+    response = client.post("/api/evolution/self/runs", json={"goal": "隔离真实 runtime store"})
+    assert response.status_code == 202
+    run_id = response.json()["runId"]
+    run_path, index_path = _real_runtime_manager_evolution_paths("self", run_id)
+    original_index_text = _read_optional_text(index_path)
+
+    try:
+        active_response = client.get("/api/evolution/self/active-run")
+
+        assert active_response.status_code == 200
+        assert active_response.json()["runId"] == run_id
+        assert not run_path.exists()
+        current_index_text = _read_optional_text(index_path)
+        assert current_index_text is None or run_id not in current_index_text
+    finally:
+        _restore_real_runtime_index_if_touched("self", run_id, original_index_text)
+        _reset_self_evolution_live_state()
+
+
+def test_start_self_evolution_run_allows_readonly_chat_but_blocks_write_chat(monkeypatch):
+    _reset_self_evolution_live_state()
+    monkeypatch.setattr(
+        self_evolution_control_service,
+        "get_workbench_contract",
+        lambda: {
+            "defaultMode": "self_evolution",
+            "defaultRoute": "/evolution",
+            "intakeMode": "manual_review",
+            "modeAvailability": {
+                "chat": True,
+                "self_evolution": True,
+                "supervised_evolution": True,
+            },
+            "domainAvailability": {
+                "chat": True,
+                "evolution": True,
+                "config": True,
+            },
+        },
+    )
+    monkeypatch.setattr(self_evolution_control_service, "get_active_supervised_run", lambda: None)
+    monkeypatch.setattr(
+        self_evolution_control_service._RUN_EXECUTOR,
+        "submit",
+        lambda fn, *args, **kwargs: object(),
+    )
+
+    session_service._set_session_running("session-readonly", True, turn_id="chat-turn-readonly", leases=["readonly_chat"])
+    try:
+        response = client.post("/api/evolution/self/runs", json={"goal": "允许只读 chat 并行"})
+    finally:
+        session_service._set_session_running("session-readonly", False, turn_id="chat-turn-readonly")
+
+    assert response.status_code == 202
+    _reset_self_evolution_live_state()
+
+    session_service._set_session_running("session-write", True, turn_id="chat-turn-write", leases=["worktree_write"])
+    try:
+        blocked = client.post("/api/evolution/self/runs", json={"goal": "阻止写入型 chat 并行"})
+    finally:
+        session_service._set_session_running("session-write", False, turn_id="chat-turn-write")
+
+    assert blocked.status_code == 409
+    assert "写入" in blocked.json()["detail"] or "write" in blocked.json()["detail"].lower()
 
     _reset_self_evolution_live_state()
 

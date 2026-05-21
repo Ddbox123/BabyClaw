@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import os
 import re
+import threading
+import time
 from typing import Dict, Callable, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
@@ -36,6 +38,9 @@ class ToolExecutor:
         self._timeout_map: Dict[str, int] = {}
         self._retryable_tools: set = set()
         self._event_bus = get_event_bus()
+        self._cancel_checker: Optional[Callable[[], str]] = None
+        self._cancel_checker_owner: Any = None
+        self._cancel_checker_lock = threading.Lock()
         self._register_default_tools()
 
     _READ_ONLY_BLOCKED_TOOLS = {
@@ -159,6 +164,37 @@ class ToolExecutor:
         self._tool_map[name] = func
         self._timeout_map[name] = timeout
 
+    def set_cancel_checker(
+        self,
+        checker: Optional[Callable[[], str]] = None,
+        *,
+        owner: Any = None,
+    ) -> None:
+        """Attach the current turn cancellation checker to tool execution."""
+
+        with self._cancel_checker_lock:
+            if checker is None:
+                if owner is None or self._cancel_checker_owner is owner:
+                    self._cancel_checker = None
+                    self._cancel_checker_owner = None
+                return
+            self._cancel_checker = checker
+            self._cancel_checker_owner = owner if owner is not None else checker
+
+    def _snapshot_cancel_checker(self) -> Optional[Callable[[], str]]:
+        with self._cancel_checker_lock:
+            return self._cancel_checker
+
+    def _current_cancel_reason(self, checker: Optional[Callable[[], str]] = None) -> str:
+        if checker is None:
+            checker = self._snapshot_cancel_checker()
+        if not callable(checker):
+            return ""
+        try:
+            return str(checker() or "").strip()
+        except Exception:
+            return ""
+
     def execute(self, tool_name: str, tool_args: dict) -> tuple:
         """
         执行工具
@@ -211,13 +247,53 @@ class ToolExecutor:
         call_args = dict(tool_args or {})
         # 内部治理哨兵只用于执行权限判断，不能透传给真实工具函数。
         call_args.pop("_internal_delegate", None)
+        cancel_checker = self._snapshot_cancel_checker()
+        if tool_name == "spawn_agent_tool" and "_cancel_checker" not in call_args:
+            call_args["_cancel_checker"] = lambda: self._current_cancel_reason(cancel_checker)
 
         executor = ThreadPoolExecutor(max_workers=1)
         future = None
 
         try:
+            cancel_reason = self._current_cancel_reason(cancel_checker)
+            if cancel_reason:
+                error_msg = f"[取消] {tool_name} 已因停止请求跳过执行：{cancel_reason}"
+                self._event_bus.publish(EventNames.TOOL_ERROR, {
+                    "name": tool_name,
+                    "error": error_msg,
+                })
+                return (error_msg, None)
             future = executor.submit(func, **call_args)
-            result = future.result(timeout=timeout)
+            deadline = time.monotonic() + max(float(timeout), 0.1)
+            while True:
+                cancel_reason = self._current_cancel_reason(cancel_checker)
+                if cancel_reason:
+                    future.cancel()
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    error_msg = f"[取消] {tool_name} 已因停止请求中断：{cancel_reason}"
+                    self._event_bus.publish(EventNames.TOOL_ERROR, {
+                        "name": tool_name,
+                        "error": error_msg,
+                    })
+                    self._record_runtime_signals(tool_name, tool_args, error_msg)
+                    return (error_msg, None)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError()
+                try:
+                    result = future.result(timeout=min(0.2, remaining))
+                    cancel_reason = self._current_cancel_reason(cancel_checker)
+                    if cancel_reason:
+                        error_msg = f"[取消] {tool_name} 已因停止请求中断：{cancel_reason}"
+                        self._event_bus.publish(EventNames.TOOL_ERROR, {
+                            "name": tool_name,
+                            "error": error_msg,
+                        })
+                        self._record_runtime_signals(tool_name, tool_args, error_msg)
+                        return (error_msg, None)
+                    break
+                except TimeoutError:
+                    continue
 
             # 发布工具成功事件
             self._event_bus.publish(EventNames.TOOL_SUCCESS, {
@@ -809,5 +885,3 @@ def get_tool_executor() -> ToolExecutor:
     if _tool_executor is None:
         _tool_executor = ToolExecutor()
     return _tool_executor
-
-

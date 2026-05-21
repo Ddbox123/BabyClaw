@@ -195,7 +195,7 @@ function describeError(error: unknown, fallback: string) {
 
 function isRunningPhase(value: string | null | undefined) {
   const phase = String(value ?? "").trim().toLowerCase();
-  return phase === "running";
+  return ["running", "thinking", "tooling", "answering", "planning", "reading", "editing", "verifying"].includes(phase);
 }
 
 function isStoppingPhase(value: string | null | undefined) {
@@ -205,7 +205,7 @@ function isStoppingPhase(value: string | null | undefined) {
 
 function isBusyPhase(value: string | null | undefined) {
   const phase = String(value ?? "").trim().toLowerCase();
-  return phase === "running" || phase === "stopping";
+  return isRunningPhase(phase) || phase === "stopping";
 }
 
 function readStoredMentalModelToggle(): boolean | null {
@@ -876,7 +876,7 @@ export function ChatCodingRoute() {
   }
 
   function handleStopTurn() {
-    if (!activeSessionId || !sessionRunning || sessionStopping) {
+    if (!activeSessionId || !sessionBusy || sessionStopping) {
       return;
     }
     stopTurnMutation.mutate({

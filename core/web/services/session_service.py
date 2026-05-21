@@ -28,6 +28,16 @@ from core.orchestration.output_boundary import (
     sanitize_assistant_thought_text,
     sanitize_assistant_visible_text,
 )
+from core.runtime_manager.evolution_store import load_active_run_snapshot as load_evolution_active_run_snapshot
+from core.runtime_manager.work_run_leases import (
+    MEMORY_WRITE_LEASE,
+    WORKTREE_WRITE_LEASE,
+    WorkRunLeaseRequest,
+    check_lease_conflicts,
+    infer_chat_turn_leases,
+    leases_for_snapshot,
+)
+from core.runtime_manager.work_run_store import WorkRunStore
 from core.ui.chat_state import (
     CHAT_STATE_VERSION,
     DEFAULT_CHAT_CONVERSATION_ID,
@@ -39,12 +49,15 @@ from core.ui.chat_state import (
 )
 
 from .i18n import get_web_language, text_for
+from .runtime_scene_service import record_runtime_scene_conversation_event
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _CHAT_STATE_LOCK = threading.Lock()
 _RUNNING_SESSIONS_LOCK = threading.Lock()
 _RUNNING_SESSION_IDS: set[str] = set()
+_SESSION_ACTIVE_TURN_IDS: dict[str, str] = {}
+_SESSION_ACTIVE_TURN_LEASES: dict[str, list[str]] = {}
 _SESSION_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="web-chat-turn")
 _SESSION_STREAM_SUBSCRIBERS_LOCK = threading.Lock()
 _SESSION_STREAM_SUBSCRIBERS: dict[str, set[queue.Queue[dict[str, Any]]]] = {}
@@ -56,6 +69,7 @@ _SESSION_LIVE_OUTPUTS_LOCK = threading.Lock()
 _SESSION_LIVE_OUTPUTS: dict[str, "SessionLiveOutputState"] = {}
 _SESSION_UI_CAPTURE_LOCK = threading.Lock()
 _UNSET = object()
+_WORK_RUN_STORE = WorkRunStore()
 
 
 class SessionNotFoundError(ValueError):
@@ -75,6 +89,7 @@ class SessionTurnControl:
     """Ephemeral runtime control surface for one active web chat turn."""
 
     session_id: str
+    turn_id: str = ""
     stop_requested: bool = False
     stop_requested_at: str = ""
     stop_reason: str = ""
@@ -93,6 +108,7 @@ class SessionTurnControl:
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {
+                "turnId": self.turn_id,
                 "stopRequested": self.stop_requested,
                 "stopRequestedAt": self.stop_requested_at,
                 "stopReason": self.stop_reason,
@@ -104,6 +120,7 @@ class SessionLiveOutputState:
     """Ephemeral live assistant output for one active web chat turn."""
 
     session_id: str
+    turn_id: str = ""
     thought: str = ""
     content: str = ""
     mental_snapshot: dict[str, Any] | None = None
@@ -116,6 +133,7 @@ class SessionTurnCapture:
     """Collect live UI breadcrumbs so the web session can replay them."""
 
     session_id: str
+    turn_id: str = ""
     thought: str = ""
     content: str = ""
     mental_state: dict[str, str] = field(default_factory=dict)
@@ -342,7 +360,7 @@ def delete_chat_session(session_id: str) -> dict:
 
 
 def request_stop_session_turn(session_id: str) -> dict:
-    """Request a graceful stop for one active web chat turn."""
+    """Interrupt one active web chat turn and persist the partial run surface."""
 
     lang = get_web_language()
     conversation_id = str(session_id or "").strip()
@@ -359,6 +377,7 @@ def request_stop_session_turn(session_id: str) -> dict:
     controller = _get_session_turn_control(conversation_id)
     if controller is None:
         controller = _create_session_turn_control(conversation_id)
+        _set_session_running(conversation_id, True, turn_id=controller.turn_id)
 
     controller.request_stop(
         text_for(
@@ -367,13 +386,14 @@ def request_stop_session_turn(session_id: str) -> dict:
             en="The operator requested this turn to stop.",
         )
     )
-    with _CHAT_STATE_LOCK:
-        payload = load_chat_state(PROJECT_ROOT)
-        conversation = _find_conversation_entry(payload, conversation_id)
-        if conversation is not None:
-            conversation["last_turn_status"] = "stopping"
-            payload["updated_at"] = _now_timestamp()
-            save_chat_state(PROJECT_ROOT, payload)
+    stop_snapshot = controller.snapshot()
+    _persist_session_interrupted_snapshot(
+        conversation_id,
+        stop_snapshot,
+        lang=lang,
+    )
+    _set_session_running(conversation_id, False, turn_id=controller.turn_id)
+    _clear_session_turn_control(conversation_id, turn_id=controller.turn_id)
     _publish_session_detail_snapshot(conversation_id)
     return get_session_detail(conversation_id) or detail
 
@@ -414,7 +434,14 @@ def stream_session_events(session_id: str, initial_detail: dict[str, Any] | None
         _unregister_session_stream_subscriber(conversation_id, subscriber)
 
 
-def submit_session_message(session_id: str, content: str, mental_model_enabled: bool | None = None) -> dict:
+def submit_session_message(
+    session_id: str,
+    content: str,
+    mental_model_enabled: bool | None = None,
+    *,
+    turn_mode: str = "",
+    write_intent: bool | None = None,
+) -> dict:
     """Persist a user message and start a single web chat turn."""
 
     lang = get_web_language()
@@ -426,7 +453,6 @@ def submit_session_message(session_id: str, content: str, mental_model_enabled: 
         raise SessionValidationError(
             text_for(lang, zh="请输入本轮消息后再发送。", en="Enter a message before sending.")
         )
-
     with _CHAT_STATE_LOCK:
         payload = load_chat_state(PROJECT_ROOT)
         conversation = _find_conversation_entry(payload, conversation_id)
@@ -442,6 +468,19 @@ def submit_session_message(session_id: str, content: str, mental_model_enabled: 
                 )
             )
 
+        active_task = _normalize_session_active_task(conversation.get("active_task") or conversation.get("activeTask"))
+        requested_leases = infer_chat_turn_leases(
+            {
+                "content": message,
+                "mode": turn_mode,
+                "writeIntent": write_intent,
+                "activeTask": active_task,
+            }
+        )
+        lease_decision = _check_chat_turn_lease_decision(requested_leases)
+        if not lease_decision.allowed:
+            raise SessionBusyError(_localize_lease_conflict(lease_decision.reason, lang=lang))
+
         previous_messages = normalize_chat_messages(conversation.get("messages") or [])
         user_entry = _make_chat_message("user", message)
         conversation["messages"] = previous_messages + [user_entry]
@@ -450,12 +489,29 @@ def submit_session_message(session_id: str, content: str, mental_model_enabled: 
         payload["active_conversation_id"] = conversation_id
         payload["updated_at"] = user_entry["timestamp"]
         save_chat_state(PROJECT_ROOT, payload)
-        _set_session_running(conversation_id, True)
-        _create_session_turn_control(conversation_id)
+        turn_control = _create_session_turn_control(conversation_id)
+        _set_session_running(conversation_id, True, turn_id=turn_control.turn_id, leases=requested_leases)
+        _persist_chat_turn_work_run(
+            session_id=conversation_id,
+            turn_id=turn_control.turn_id,
+            status="running",
+            leases=requested_leases,
+            user_message=message,
+            started_at=user_entry["timestamp"],
+            updated_at=user_entry["timestamp"],
+        )
+    _record_session_cycle_message(
+        conversation_id,
+        user_entry,
+        event="user_message",
+        status="running",
+    )
     _publish_session_detail_snapshot(conversation_id)
 
     context = {
         "session_id": conversation_id,
+        "turn_id": turn_control.turn_id,
+        "turn_control": turn_control,
         "user_message": message,
         "history_messages": previous_messages,
         "mental_model_enabled": mental_model_enabled,
@@ -463,6 +519,14 @@ def submit_session_message(session_id: str, content: str, mental_model_enabled: 
     try:
         _schedule_session_turn(context)
     except Exception as exc:
+        _persist_chat_turn_work_run(
+            session_id=conversation_id,
+            turn_id=turn_control.turn_id,
+            status="failed",
+            leases=requested_leases,
+            user_message=message,
+            summary=f"{type(exc).__name__}: {exc}",
+        )
         _set_session_running(conversation_id, False)
         _clear_session_turn_control(conversation_id)
         _persist_session_turn_failure(conversation_id, context, exc)
@@ -900,12 +964,134 @@ def has_running_sessions() -> bool:
         return bool(_RUNNING_SESSION_IDS)
 
 
-def _set_session_running(session_id: str, is_running: bool) -> None:
+def list_active_session_work_runs() -> list[dict[str, Any]]:
+    """Return active web chat turns as lightweight WorkRun lease snapshots."""
+
+    with _RUNNING_SESSIONS_LOCK:
+        session_ids = sorted(_RUNNING_SESSION_IDS)
+        active_turn_ids = dict(_SESSION_ACTIVE_TURN_IDS)
+        active_leases = {key: list(value) for key, value in _SESSION_ACTIVE_TURN_LEASES.items()}
+    return [
+        {
+            "runId": active_turn_ids.get(session_id) or f"chat-turn-{session_id}",
+            "runKind": "chat_turn",
+            "sessionId": session_id,
+            "status": "running",
+            "leases": active_leases.get(session_id) or ["readonly_chat"],
+        }
+        for session_id in session_ids
+    ]
+
+
+def active_session_has_write_leases() -> bool:
+    for run in list_active_session_work_runs():
+        leases = set(leases_for_snapshot(run))
+        if leases.intersection({WORKTREE_WRITE_LEASE, MEMORY_WRITE_LEASE}):
+            return True
+    return False
+
+
+def load_chat_turn_work_run_summary() -> dict[str, Any]:
+    return {
+        "active": _WORK_RUN_STORE.load_active_snapshot("chat_turn"),
+        "latest": _WORK_RUN_STORE.load_latest_snapshot("chat_turn"),
+    }
+
+
+def _check_chat_turn_lease_decision(leases: list[str]):
+    active_runs = [
+        snapshot
+        for snapshot in (
+            load_evolution_active_run_snapshot("self"),
+            load_evolution_active_run_snapshot("supervised"),
+        )
+        if isinstance(snapshot, dict)
+    ]
+    return check_lease_conflicts(
+        WorkRunLeaseRequest(run_kind="chat_turn", leases=leases),
+        active_runs,
+    )
+
+
+def _localize_lease_conflict(reason: str, *, lang: str) -> str:
+    fallback = str(reason or "").strip()
+    return text_for(
+        lang,
+        zh=f"当前资源正在被另一条运行占用，请等待它收束后再继续。{fallback}",
+        en=f"Another active run holds a conflicting resource lease. Wait for it to finish before continuing. {fallback}",
+    ).strip()
+
+
+def _persist_chat_turn_work_run(
+    *,
+    session_id: str,
+    turn_id: str,
+    status: str,
+    leases: list[str] | None = None,
+    user_message: str = "",
+    summary: str = "",
+    started_at: str = "",
+    updated_at: str = "",
+    finished_at: str = "",
+) -> None:
+    normalized_turn_id = str(turn_id or "").strip()
+    if not normalized_turn_id:
+        return
+    now = _now_timestamp()
+    previous = _WORK_RUN_STORE.load_snapshot("chat_turn", normalized_turn_id) or {}
+    started = str(started_at or previous.get("startedAt") or now).strip()
+    finished = str(finished_at or previous.get("finishedAt") or "").strip()
+    normalized_status = str(status or previous.get("status") or "running").strip().lower() or "running"
+    active_run_id = normalized_turn_id if normalized_status in {"queued", "running", "stopping", "paused"} else ""
+    payload = {
+        **previous,
+        "runId": normalized_turn_id,
+        "runKind": "chat_turn",
+        "track": "dialogue",
+        "sessionId": str(session_id or previous.get("sessionId") or "").strip(),
+        "status": normalized_status,
+        "currentPhase": normalized_status,
+        "leases": list(leases or previous.get("leases") or ["readonly_chat"]),
+        "userMessage": str(user_message or previous.get("userMessage") or "").strip(),
+        "summary": str(summary or previous.get("summary") or "").strip(),
+        "startedAt": started,
+        "updatedAt": str(updated_at or now).strip(),
+        "finishedAt": finished if normalized_status in {"completed", "failed", "stopped", "cancelled"} else "",
+    }
+    _WORK_RUN_STORE.persist_snapshot("chat_turn", payload, active_run_id=active_run_id)
+
+
+def _set_session_running(
+    session_id: str,
+    is_running: bool,
+    *,
+    turn_id: str = "",
+    leases: list[str] | None = None,
+) -> None:
     with _RUNNING_SESSIONS_LOCK:
         if is_running:
             _RUNNING_SESSION_IDS.add(session_id)
+            if turn_id:
+                _SESSION_ACTIVE_TURN_IDS[session_id] = turn_id
+            if leases is not None:
+                _SESSION_ACTIVE_TURN_LEASES[session_id] = list(leases)
         else:
-            _RUNNING_SESSION_IDS.discard(session_id)
+            if not turn_id:
+                _RUNNING_SESSION_IDS.discard(session_id)
+                _SESSION_ACTIVE_TURN_IDS.pop(session_id, None)
+                _SESSION_ACTIVE_TURN_LEASES.pop(session_id, None)
+                return
+            if _SESSION_ACTIVE_TURN_IDS.get(session_id) == turn_id:
+                _RUNNING_SESSION_IDS.discard(session_id)
+                _SESSION_ACTIVE_TURN_IDS.pop(session_id, None)
+                _SESSION_ACTIVE_TURN_LEASES.pop(session_id, None)
+
+
+def _is_session_turn_current(session_id: str, turn_id: str) -> bool:
+    if not turn_id:
+        return True
+    with _RUNNING_SESSIONS_LOCK:
+        return _SESSION_ACTIVE_TURN_IDS.get(session_id) == turn_id
 
 
 def _schedule_session_turn(context: dict[str, Any]) -> None:
@@ -914,16 +1100,23 @@ def _schedule_session_turn(context: dict[str, Any]) -> None:
 
 def _run_session_turn(context: dict[str, Any]) -> None:
     session_id = str(context.get("session_id") or "").strip()
-    turn_capture = SessionTurnCapture(session_id=session_id)
+    turn_id = str(context.get("turn_id") or "").strip()
+    if turn_id and not _is_session_turn_current(session_id, turn_id):
+        return
+    turn_control = context.get("turn_control")
+    if not isinstance(turn_control, SessionTurnControl):
+        turn_control = _get_session_turn_control(session_id)
+    turn_capture = SessionTurnCapture(session_id=session_id, turn_id=turn_id)
     mental_model_enabled = _normalize_optional_bool(context.get("mental_model_enabled"))
     try:
         with mental_model_enabled_override(mental_model_enabled):
-            initial_stop_reason = _get_session_stop_reason(session_id)
+            initial_stop_reason = _get_turn_control_stop_reason(turn_control)
             if initial_stop_reason:
                 _persist_session_turn_result(
                     session_id,
                     _build_stopped_turn_result(initial_stop_reason),
                     mental_model_enabled=mental_model_enabled,
+                    turn_id=turn_id,
                 )
                 return
 
@@ -935,17 +1128,18 @@ def _run_session_turn(context: dict[str, Any]) -> None:
                 restore = getattr(agent, "seed_chat_history", None)
                 stop_configurer = getattr(agent, "set_turn_interrupt_checker", None)
                 if callable(stop_configurer):
-                    stop_configurer(lambda: _get_session_stop_reason(session_id))
+                    stop_configurer(lambda: _get_turn_control_stop_reason(turn_control))
                 history_messages = list(context.get("history_messages") or [])
                 if callable(restore) and history_messages:
                     restore(history_messages)
 
-                preflight_stop_reason = _get_session_stop_reason(session_id)
+                preflight_stop_reason = _get_turn_control_stop_reason(turn_control)
                 if preflight_stop_reason:
                     _persist_session_turn_result(
                         session_id,
                         _build_stopped_turn_result(preflight_stop_reason),
                         mental_model_enabled=mental_model_enabled,
+                        turn_id=turn_id,
                     )
                     return
 
@@ -953,6 +1147,7 @@ def _run_session_turn(context: dict[str, Any]) -> None:
                 result = _run_session_continuation_loop(
                     agent,
                     session_id=session_id,
+                    turn_control=turn_control,
                     initial_prompt=user_message,
                     history_messages=history_messages,
                 )
@@ -961,12 +1156,18 @@ def _run_session_turn(context: dict[str, Any]) -> None:
                 turn_capture,
                 mental_model_enabled=mental_model_enabled,
             )
-            _persist_session_turn_result(session_id, result, mental_model_enabled=mental_model_enabled)
+            _persist_session_turn_result(
+                session_id,
+                result,
+                mental_model_enabled=mental_model_enabled,
+                turn_id=turn_id,
+            )
     except Exception as exc:
-        _persist_session_turn_failure(session_id, context, exc)
+        if _is_session_turn_current(session_id, turn_id):
+            _persist_session_turn_failure(session_id, context, exc)
     finally:
-        _set_session_running(session_id, False)
-        _clear_session_turn_control(session_id)
+        _set_session_running(session_id, False, turn_id=turn_id)
+        _clear_session_turn_control(session_id, turn_id=turn_id)
         _publish_session_detail_snapshot(session_id)
 
 
@@ -980,6 +1181,7 @@ def _run_session_continuation_loop(
     agent: Any,
     *,
     session_id: str,
+    turn_control: SessionTurnControl | None = None,
     initial_prompt: str,
     history_messages: list[dict[str, Any]],
 ) -> Any:
@@ -992,7 +1194,7 @@ def _run_session_continuation_loop(
 
     result: Any = None
     for turn_index in range(1, max_turns + 1):
-        stop_reason = _get_session_stop_reason(session_id)
+        stop_reason = _get_turn_control_stop_reason(turn_control) or _get_session_stop_reason(session_id)
         if stop_reason:
             return _build_stopped_turn_result(stop_reason)
 
@@ -1019,6 +1221,7 @@ def _persist_session_turn_result(
     result: Any,
     *,
     mental_model_enabled: bool | None = None,
+    turn_id: str = "",
 ) -> None:
     lang = get_web_language()
     capture_messages: list[dict[str, Any]] | None = None
@@ -1028,7 +1231,18 @@ def _persist_session_turn_result(
         conversation = _find_conversation_entry(payload, session_id)
         if conversation is None:
             return
+        if turn_id and not _is_session_turn_current(session_id, turn_id):
+            return
         messages = normalize_chat_messages(conversation.get("messages") or [])
+        if _latest_assistant_message_is_stop(messages):
+            _persist_chat_turn_work_run(
+                session_id=session_id,
+                turn_id=turn_id,
+                status="stopped",
+                summary=text_for(lang, zh="本轮已按请求停止。", en="This turn was stopped as requested."),
+                finished_at=_now_timestamp(),
+            )
+            return
         result_status = str(result.get("status") or "").strip().lower() if isinstance(result, dict) else ""
         result_stop_requested = bool(result.get("stop_requested")) if isinstance(result, dict) else False
         stop_requested = result_stop_requested and runtime_stop_requested
@@ -1069,6 +1283,23 @@ def _persist_session_turn_result(
         _clear_session_live_output(session_id)
         if result_status == "completed" and not stop_requested:
             capture_messages = list(conversation["messages"])
+        cycle_active_task = next_active_task
+        final_status = "stopped" if stop_requested else ("completed" if result_status == "completed" else (result_status or "completed"))
+        _persist_chat_turn_work_run(
+            session_id=session_id,
+            turn_id=turn_id,
+            status=final_status,
+            summary=assistant_text,
+            finished_at=assistant_entry["timestamp"],
+            updated_at=assistant_entry["timestamp"],
+        )
+    _record_session_cycle_message(
+        session_id,
+        assistant_entry,
+        event="assistant_result",
+        status="stopped" if stop_requested else (result_status or "ready"),
+        active_task=cycle_active_task,
+    )
     if capture_messages:
         _capture_session_chat_candidate(session_id, capture_messages)
 
@@ -1097,6 +1328,20 @@ def _persist_session_turn_failure(session_id: str, context: dict[str, Any], exc:
         payload["updated_at"] = assistant_entry["timestamp"]
         save_chat_state(PROJECT_ROOT, payload)
         _clear_session_live_output(session_id)
+        _persist_chat_turn_work_run(
+            session_id=session_id,
+            turn_id=str(context.get("turn_id") or ""),
+            status="failed",
+            summary=summary,
+            finished_at=assistant_entry["timestamp"],
+            updated_at=assistant_entry["timestamp"],
+        )
+    _record_session_cycle_message(
+        session_id,
+        assistant_entry,
+        event="assistant_failure",
+        status="failed",
+    )
 
 
 def _make_chat_message(
@@ -1122,6 +1367,36 @@ def _make_chat_message(
     if normalized_tool_calls:
         message["tool_calls"] = normalized_tool_calls
     return message
+
+
+def _record_session_cycle_message(
+    session_id: str,
+    message: dict[str, Any],
+    *,
+    event: str,
+    status: str,
+    active_task: dict[str, Any] | None = None,
+) -> None:
+    try:
+        role = str(message.get("role") or "").strip() or "message"
+        content = _sanitize_message_content(role, message.get("content") or "")
+        record_runtime_scene_conversation_event(
+            session_id,
+            role,
+            content,
+            message=message,
+            event=event,
+            status=status,
+            tool_calls=_normalize_message_tool_calls(
+                message.get("tool_calls") or message.get("toolCalls") or []
+            ),
+            active_task=active_task,
+        )
+    except Exception as exc:
+        _debug_logger.warning(
+            f"runtime scene conversation log skipped: {type(exc).__name__}: {exc}",
+            tag="LOGS",
+        )
 
 
 def _now_timestamp() -> str:
@@ -1570,16 +1845,28 @@ def _build_live_output_message(session_id: str) -> dict[str, Any] | None:
 def _set_session_live_output(
     session_id: str,
     *,
+    turn_id: str = "",
     thought: Any = _UNSET,
     content: Any = _UNSET,
     mental_snapshot: Any = _UNSET,
     tool_calls: Any = _UNSET,
 ) -> None:
+    requested_turn_id = str(turn_id or "").strip()
+    with _RUNNING_SESSIONS_LOCK:
+        current_turn_id = _SESSION_ACTIVE_TURN_IDS.get(session_id, "")
+    if requested_turn_id and current_turn_id and requested_turn_id != current_turn_id:
+        return
+    output_turn_id = requested_turn_id or current_turn_id
     with _SESSION_LIVE_OUTPUTS_LOCK:
         state = _SESSION_LIVE_OUTPUTS.get(session_id)
         if state is None:
-            state = SessionLiveOutputState(session_id=session_id)
+            state = SessionLiveOutputState(session_id=session_id, turn_id=output_turn_id)
             _SESSION_LIVE_OUTPUTS[session_id] = state
+        elif output_turn_id and state.turn_id and state.turn_id != output_turn_id:
+            state = SessionLiveOutputState(session_id=session_id, turn_id=output_turn_id)
+            _SESSION_LIVE_OUTPUTS[session_id] = state
+        elif output_turn_id and not state.turn_id:
+            state.turn_id = output_turn_id
         if thought is not _UNSET:
             state.thought = _sanitize_thought_text(thought)
         if content is not _UNSET:
@@ -1597,6 +1884,124 @@ def _set_session_live_output(
 def _clear_session_live_output(session_id: str) -> None:
     with _SESSION_LIVE_OUTPUTS_LOCK:
         _SESSION_LIVE_OUTPUTS.pop(session_id, None)
+
+
+def _snapshot_session_live_output(session_id: str) -> SessionLiveOutputState | None:
+    with _SESSION_LIVE_OUTPUTS_LOCK:
+        state = _SESSION_LIVE_OUTPUTS.get(session_id)
+        if state is None:
+            return None
+        return SessionLiveOutputState(
+            session_id=session_id,
+            turn_id=state.turn_id,
+            thought=state.thought,
+            content=state.content,
+            mental_snapshot=dict(state.mental_snapshot or {}) if isinstance(state.mental_snapshot, dict) else None,
+            tool_calls=list(state.tool_calls or []),
+            updated_at=state.updated_at,
+        )
+
+
+def _persist_session_interrupted_snapshot(
+    session_id: str,
+    stop_snapshot: dict[str, Any],
+    *,
+    lang: str,
+) -> None:
+    reason = str(stop_snapshot.get("stopReason") or "").strip()
+    turn_id = str(stop_snapshot.get("turnId") or "").strip()
+    live_state = _snapshot_session_live_output(session_id)
+    live_content = _sanitize_message_content("assistant", getattr(live_state, "content", "") if live_state else "")
+    live_thought = _sanitize_thought_text(getattr(live_state, "thought", "") if live_state else "")
+    live_tools = _normalize_message_tool_calls(getattr(live_state, "tool_calls", []) if live_state else [])
+    live_mental = _normalize_mental_snapshot(getattr(live_state, "mental_snapshot", None) if live_state else None)
+    stop_text = text_for(
+        lang,
+        zh="本轮已按请求停止。可发送“继续”恢复这次未完成的任务。",
+        en='This turn was stopped as requested. Send "continue" to resume the unfinished task.',
+    )
+    assistant_text = f"{live_content}\n\n{stop_text}".strip() if live_content else stop_text
+
+    with _CHAT_STATE_LOCK:
+        payload = load_chat_state(PROJECT_ROOT)
+        conversation = _find_conversation_entry(payload, session_id)
+        if conversation is None:
+            return
+        messages = normalize_chat_messages(conversation.get("messages") or [])
+        if _latest_assistant_message_is_stop(messages):
+            conversation["last_turn_status"] = "ready"
+            payload["updated_at"] = conversation.get("updated_at") or _now_timestamp()
+            save_chat_state(PROJECT_ROOT, payload)
+            _clear_session_live_output(session_id)
+            return
+        existing_active_task = _normalize_session_active_task(
+            conversation.get("active_task") or conversation.get("activeTask")
+        )
+        stopped_result = {
+            "status": "stopped",
+            "summary": assistant_text,
+            "raw_output": assistant_text,
+            "thought": live_thought,
+            "stop_requested": True,
+            "stop_reason": reason,
+            "outcome": "progress",
+            "recommended_next_action": text_for(
+                lang,
+                zh="发送“继续”以恢复停止前的现场。",
+                en='Send "continue" to resume from the stopped point.',
+            ),
+            "tool_call_count": len(live_tools),
+            "tool_trace": live_tools,
+        }
+        assistant_entry = _make_chat_message(
+            "assistant",
+            assistant_text,
+            live_tools,
+            thought=live_thought,
+            mental_snapshot=live_mental,
+        )
+        if live_tools:
+            assistant_entry["toolCalls"] = live_tools
+        conversation["messages"] = messages + [assistant_entry]
+        next_active_task = _build_session_active_task(
+            session_id,
+            stopped_result,
+            conversation["messages"],
+            existing_task=existing_active_task,
+        )
+        if next_active_task is not None:
+            conversation["active_task"] = next_active_task
+        conversation["last_turn_status"] = "ready"
+        conversation["updated_at"] = assistant_entry["timestamp"]
+        payload["updated_at"] = assistant_entry["timestamp"]
+        save_chat_state(PROJECT_ROOT, payload)
+        _persist_chat_turn_work_run(
+            session_id=session_id,
+            turn_id=turn_id,
+            status="stopped",
+            summary=assistant_text,
+            finished_at=assistant_entry["timestamp"],
+            updated_at=assistant_entry["timestamp"],
+        )
+    _clear_session_live_output(session_id)
+    _record_session_cycle_message(
+        session_id,
+        assistant_entry,
+        event="assistant_interrupted",
+        status="stopped",
+        active_task=next_active_task,
+    )
+
+
+def _latest_assistant_message_is_stop(messages: list[dict[str, Any]]) -> bool:
+    latest_messages = list(messages or [])[-1:]
+    message = latest_messages[0] if latest_messages else None
+    if not isinstance(message, dict):
+        return False
+    if str(message.get("role") or "").strip().lower() != "assistant":
+        return False
+    content = str(message.get("content") or "")
+    return "本轮已按请求停止" in content or "stopped as requested" in content
 
 
 def _attach_turn_capture_to_result(
@@ -1648,13 +2053,13 @@ def _capture_session_ui_stream(
             cleaned = _sanitize_thought_text(text)
             if cleaned and not done:
                 capture.note_thought(cleaned)
-                _set_session_live_output(session_id, thought=cleaned)
+                _set_session_live_output(session_id, turn_id=capture.turn_id, thought=cleaned)
 
         def clear_thought_stream_proxy():
             if callable(original_clear_thought_stream):
                 original_clear_thought_stream()
             capture.clear_thought()
-            _set_session_live_output(session_id, thought="")
+            _set_session_live_output(session_id, turn_id=capture.turn_id, thought="")
 
         def stream_response_proxy(text: str, done: bool = False):
             if callable(original_stream_response):
@@ -1662,13 +2067,13 @@ def _capture_session_ui_stream(
             cleaned = _sanitize_message_content("assistant", text)
             if cleaned:
                 capture.note_content(cleaned)
-                _set_session_live_output(session_id, content=cleaned)
+                _set_session_live_output(session_id, turn_id=capture.turn_id, content=cleaned)
 
         def clear_response_stream_proxy():
             if callable(original_clear_response_stream):
                 original_clear_response_stream()
             capture.clear_content()
-            _set_session_live_output(session_id, content="")
+            _set_session_live_output(session_id, turn_id=capture.turn_id, content="")
 
         def set_pet_mental_state_proxy(mood: str = "", feeling: str = "", whisper: str = ""):
             if callable(original_set_pet_mental_state):
@@ -1678,7 +2083,7 @@ def _capture_session_ui_stream(
             capture.note_mental_state(mood=mood, feeling=feeling, whisper=whisper)
             snapshot = _live_mental_snapshot(capture.mental_state, get_web_language())
             if snapshot is not None:
-                _set_session_live_output(session_id, mental_snapshot=snapshot)
+                _set_session_live_output(session_id, turn_id=capture.turn_id, mental_snapshot=snapshot)
 
         def tool_event_proxy(event):
             data = event.data or {}
@@ -1692,7 +2097,7 @@ def _capture_session_ui_stream(
             }.get(event.name, "running")
             summary = str(data.get("result") or data.get("error") or "").strip()
             capture.note_tool_event(name, status, summary)
-            _set_session_live_output(session_id, tool_calls=capture.tool_calls)
+            _set_session_live_output(session_id, turn_id=capture.turn_id, tool_calls=capture.tool_calls)
 
         setattr(ui, "stream_thought", stream_thought_proxy)
         setattr(ui, "clear_thought_stream", clear_thought_stream_proxy)
@@ -2141,7 +2546,10 @@ def _task_status_from_result_contract(
 
 def _create_session_turn_control(session_id: str) -> SessionTurnControl:
     with _SESSION_TURN_CONTROLS_LOCK:
-        control = SessionTurnControl(session_id=session_id)
+        control = SessionTurnControl(
+            session_id=session_id,
+            turn_id=f"{session_id}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
+        )
         _SESSION_TURN_CONTROLS[session_id] = control
         return control
 
@@ -2151,9 +2559,11 @@ def _get_session_turn_control(session_id: str) -> SessionTurnControl | None:
         return _SESSION_TURN_CONTROLS.get(session_id)
 
 
-def _clear_session_turn_control(session_id: str) -> None:
+def _clear_session_turn_control(session_id: str, *, turn_id: str = "") -> None:
     with _SESSION_TURN_CONTROLS_LOCK:
-        _SESSION_TURN_CONTROLS.pop(session_id, None)
+        current = _SESSION_TURN_CONTROLS.get(session_id)
+        if not turn_id or (current is not None and current.turn_id == turn_id):
+            _SESSION_TURN_CONTROLS.pop(session_id, None)
 
 
 def _is_session_stop_requested(session_id: str) -> bool:
@@ -2165,6 +2575,10 @@ def _is_session_stop_requested(session_id: str) -> bool:
 
 def _get_session_stop_reason(session_id: str) -> str:
     controller = _get_session_turn_control(session_id)
+    return _get_turn_control_stop_reason(controller)
+
+
+def _get_turn_control_stop_reason(controller: SessionTurnControl | None) -> str:
     if controller is None:
         return ""
     snapshot = controller.snapshot()

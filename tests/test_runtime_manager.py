@@ -5,6 +5,7 @@ import pytest
 
 from core.runtime_manager import cli as runtime_cli
 from core.runtime_manager import daemon
+from core.runtime_manager import constants
 from core.runtime_manager import evolution_store
 from core.runtime_manager import state_store
 from core.runtime_manager import workbench_controller
@@ -375,7 +376,14 @@ def test_load_launcher_state_supports_utf8_bom(tmp_path, monkeypatch):
 
 def test_handle_open_workbench_restarts_headless_session(monkeypatch):
     runtime_daemon = daemon.RuntimeManagerDaemon()
-    state = {"command": {}, "workbench": {"observedState": "open", "phase": "steady"}}
+    state = {
+        "command": {},
+        "workbench": {
+            "desiredState": "open",
+            "observedState": "open",
+            "phase": "steady",
+        },
+    }
 
     monkeypatch.setattr(daemon, "load_state", lambda: state)
     monkeypatch.setattr(daemon, "save_state", lambda next_state: next_state)
@@ -441,7 +449,14 @@ def test_run_launcher_action_uses_devnull_stdio(monkeypatch):
 
 def test_handle_restart_workbench_surfaces_launcher_error(monkeypatch):
     runtime_daemon = daemon.RuntimeManagerDaemon()
-    state = {"command": {}, "workbench": {"observedState": "open", "phase": "steady"}}
+    state = {
+        "command": {},
+        "workbench": {
+            "desiredState": "open",
+            "observedState": "open",
+            "phase": "steady",
+        },
+    }
 
     monkeypatch.setattr(daemon, "load_state", lambda: state)
     monkeypatch.setattr(daemon, "save_state", lambda next_state: next_state)
@@ -470,6 +485,53 @@ def test_handle_restart_workbench_surfaces_launcher_error(monkeypatch):
 
     with pytest.raises(RuntimeError, match="launcher failed"):
         runtime_daemon._handle_restart_workbench(command_id="cmd-restart", args={})
+
+
+def test_handle_close_workbench_records_shutdown_source(monkeypatch):
+    runtime_daemon = daemon.RuntimeManagerDaemon()
+    saved_states: list[dict] = []
+    state = {
+        "command": {"activeCommandId": "cmd-close"},
+        "workbench": {
+            "desiredState": "open",
+            "observedState": "open",
+            "phase": "steady",
+        },
+    }
+
+    monkeypatch.setattr(daemon, "load_state", lambda: state)
+    monkeypatch.setattr(daemon, "save_state", lambda next_state: saved_states.append(json.loads(json.dumps(next_state))) or next_state)
+    monkeypatch.setattr(daemon, "now_iso", lambda: "2026-05-19T09:00:00+00:00")
+    monkeypatch.setattr(
+        daemon,
+        "observe_workbench",
+        lambda: {
+            "observedState": "open",
+            "launcherStatePresent": True,
+            "browserManaged": True,
+            "browserWindowAlive": True,
+            "backendPid": 28888,
+            "browserLaunchPid": 29999,
+            "browserWindowPid": 29999,
+            "sessionId": "managed-session",
+            "url": "http://127.0.0.1:8000",
+        },
+    )
+    monkeypatch.setattr(daemon, "build_evolution_summary", lambda: {"self": {}, "supervised": {}})
+    monkeypatch.setattr(
+        daemon,
+        "close_workbench",
+        lambda: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+    )
+
+    result = runtime_daemon._handle_close_workbench(
+        command_id="cmd-close",
+        args={"reason": "web_close_button", "source": "web_ui"},
+    )
+
+    assert result["ok"] is True
+    assert saved_states[0]["workbench"]["lastReason"] == "web_close_button"
+    assert saved_states[0]["workbench"]["lastSource"] == "web_ui"
 
 
 def test_atomic_write_text_retries_permission_error(tmp_path, monkeypatch):
@@ -589,6 +651,36 @@ def test_evolution_store_atomic_write_retries_permission_error(tmp_path, monkeyp
     assert json.loads(target_path.read_text(encoding="utf-8")) == {"ok": True}
     assert replace_calls["count"] == 4
     assert sleep_calls == [0.05, 0.1, 0.15000000000000002]
+
+
+def test_evolution_store_is_isolated_from_real_runtime_during_pytest():
+    real_runtime_root = constants.PROJECT_ROOT / ".runtime" / "runtime-manager"
+    run_id = "pytest-runtime-store-isolation-sentinel"
+    original_index = evolution_store.load_run_index("self")
+    target_path = real_runtime_root / "evolution" / "self" / "runs" / f"{run_id}.json"
+    assert not target_path.exists()
+
+    try:
+        evolution_store.persist_run_snapshot(
+            "self",
+            {
+                "runId": run_id,
+                "status": "queued",
+                "startedAt": "2026-05-21T00:00:00Z",
+                "updatedAt": "2026-05-21T00:00:00Z",
+            },
+            active_run_id=run_id,
+        )
+
+        assert not target_path.exists()
+    finally:
+        if target_path.exists():
+            target_path.unlink()
+        evolution_store.save_run_index(
+            "self",
+            active_run_id=str(original_index.get("activeRunId") or ""),
+            latest_run_id=str(original_index.get("latestRunId") or ""),
+        )
 
 
 def test_evolution_store_delete_snapshot_clears_active_and_repoints_latest(tmp_path, monkeypatch):

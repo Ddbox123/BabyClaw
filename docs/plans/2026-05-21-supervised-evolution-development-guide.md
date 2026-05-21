@@ -35,6 +35,23 @@
 - 直接改写 runtime prompt、代码或模型配置。
 - 自动把 PROMOTE 变成线上生效。
 
+## 共享底座边界
+
+监督进化线必须遵守横向计划：[WorkRun Substrate And Chat Case Loop Implementation Plan](./2026-05-21-workrun-substrate-and-chat-case-loop.md)。
+
+统一边界：
+
+- 每次监督运行登记为 `WorkRun(supervised_evolution_run)`。
+- 监督运行的 `active` 与 `latest` 只在 `supervised_evolution_run` kind 下生效，不应作为全局 active lock。
+- 监督运行默认申请 `evaluation` lease；proposal action 需要单独申请 `policy_write` 等写资源。
+- 监督线可以消费 `ReviewedChatCase` 和 `GeneratedCase`，但不能读取 raw chat 作为正式评测样本。
+- 监督线是 `V_ref` / 冻结验收面的主要承载者；无监督进化和对话产生的候选增量必须回到这里验收。
+
+监督线向共享底座提供：
+
+- `supervised_evolution_run` 的 lifecycle snapshot、event tail、decision/proposal 关联路径。
+- dataset/bundle 的 review 边界提示，例如 `chat_reviewed_multiturn` 只代表人工审核后的多轮对话 case。
+
 ## 关键文件
 
 核心评测：

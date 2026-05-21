@@ -51,6 +51,7 @@
 }
 
 .summaryCard,
+.lifecyclePanel,
 .queuePanel,
 .detailPanel,
 .metricCard,
@@ -79,6 +80,21 @@
 
 .summaryCard strong {
   font-size: 19px;
+}
+
+.lifecyclePanel {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px;
+}
+
+.lifecyclePills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .workspace {
@@ -527,6 +543,14 @@
   .signalColumns,
   .formGrid {
     grid-template-columns: 1fr;
+  }
+
+  .lifecyclePanel {
+    flex-direction: column;
+  }
+
+  .lifecyclePills {
+    justify-content: flex-start;
   }
 }
 

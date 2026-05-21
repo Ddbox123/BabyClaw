@@ -12,6 +12,7 @@
 import os
 import sys
 import pytest
+import threading
 import time
 from types import SimpleNamespace
 from pathlib import Path
@@ -218,6 +219,43 @@ class TestToolExecutorTimeout:
         assert action is None
         assert str(result) == "ok"
         assert "_internal_delegate" not in captured
+
+    def test_execute_interrupts_running_tool_when_cancel_requested(self, executor):
+        cancel_requested = threading.Event()
+        tool_started = threading.Event()
+
+        def slow_tool():
+            tool_started.set()
+            while not cancel_requested.is_set():
+                time.sleep(0.01)
+            time.sleep(0.1)
+            return "late result"
+
+        executor.register_tool("slow_tool", slow_tool, timeout=5)
+        executor.set_cancel_checker(lambda: "stop now" if cancel_requested.is_set() else "")
+
+        def trigger_cancel():
+            assert tool_started.wait(1.0)
+            cancel_requested.set()
+
+        threading.Thread(target=trigger_cancel, daemon=True).start()
+        result, action = executor.execute("slow_tool", {})
+
+        assert action is None
+        assert "[取消] slow_tool 已因停止请求中断" in str(result)
+
+    def test_cancel_checker_owner_prevents_stale_turn_clear(self, executor):
+        owner_a = object()
+        owner_b = object()
+
+        executor.set_cancel_checker(lambda: "old stop", owner=owner_a)
+        executor.set_cancel_checker(lambda: "new stop", owner=owner_b)
+        executor.set_cancel_checker(None, owner=owner_a)
+
+        assert executor._current_cancel_reason() == "new stop"
+
+        executor.set_cancel_checker(None, owner=owner_b)
+        assert executor._current_cancel_reason() == ""
 
 
 class TestToolExecutorEvents:

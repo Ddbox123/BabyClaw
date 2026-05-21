@@ -22,6 +22,11 @@ def test_default_dataset_registry_lists_builtin_and_swe(tmp_path: Path):
 
     assert by_name["supervised_dry_run"]["runnable"] is True
     assert by_name["chat_reviewed_multiturn"]["runnable"] is True
+    assert by_name["chat_reviewed_multiturn"]["review_required"] is True
+    assert by_name["chat_reviewed_multiturn"]["source_track"] == "dialogue"
+    assert by_name["chat_reviewed_multiturn"]["holdout_allowed"] is False
+    assert by_name["chat_reviewed_multiturn"]["raw_chat_direct_training_allowed"] is False
+    assert "supervised_evaluation" in by_name["chat_reviewed_multiturn"]["allowed_downstream_uses"]
     assert by_name["swe_bench_lite"]["runnable"] is False
     assert by_name["swe_bench_lite"]["adapter_status"] == "requires_swe_harness"
 
@@ -55,6 +60,45 @@ def test_ensure_dataset_registry_backfills_missing_builtin_datasets(tmp_path: Pa
     assert "generated_cases" in names
     assert "chat_reviewed_multiturn" in names
     assert "custom_prompt_jsonl" in names
+
+
+def test_dataset_registry_backfills_chat_review_boundary_metadata(tmp_path: Path):
+    registry_path = tmp_path / "workspace" / "evaluation" / "datasets" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "datasets": [
+                    {
+                        "name": "chat_reviewed_multiturn",
+                        "kind": "prompt_jsonl",
+                        "description": "legacy chat cases",
+                        "source_path": "workspace/evaluation/datasets/chat_reviewed_multiturn.jsonl",
+                        "bundle_name": "chat_reviewed_multiturn_v1",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    ensure_dataset_registry(tmp_path)
+    rows = list_dataset_status(tmp_path)
+    row = next(item for item in rows if item["name"] == "chat_reviewed_multiturn")
+
+    assert row["review_required"] is True
+    assert row["source_track"] == "dialogue"
+    assert row["holdout_allowed"] is False
+    assert row["raw_chat_direct_training_allowed"] is False
+    assert row["allowed_downstream_uses"] == [
+        "supervised_evaluation",
+        "gym_candidate_case",
+        "future_training_export",
+    ]
 
 
 def test_ensure_dataset_registry_bootstraps_generated_and_chat_sources(tmp_path: Path):

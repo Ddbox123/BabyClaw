@@ -4,6 +4,7 @@ import {
   applyModelOptionToProfileDraft,
   collectModelDetailKeys,
   groupModelPresets,
+  hasPendingSecretChanges,
   presetCategory,
   type PublicConfigShape,
 } from "./configRouteLogic";
@@ -128,5 +129,21 @@ describe("configRouteLogic", () => {
 
     const profile = (publicConfig.llm as Record<string, unknown>).profiles as Record<string, Record<string, unknown>>;
     expect(profile.primary.api_key_env).toBeUndefined();
+  });
+
+  it("treats pending secret writes and clears as unsaved user changes", () => {
+    expect(hasPendingSecretChanges({ pending_api_keys: {}, pending_cleared_api_keys: [] })).toBe(false);
+    expect(
+      hasPendingSecretChanges({
+        pending_api_keys: { VIBELUTION_LLM_TEST_API_KEY: "pending-secret:token" },
+        pending_cleared_api_keys: [],
+      }),
+    ).toBe(true);
+    expect(
+      hasPendingSecretChanges({
+        pending_api_keys: {},
+        pending_cleared_api_keys: ["VIBELUTION_LLM_TEST_API_KEY"],
+      }),
+    ).toBe(true);
   });
 });

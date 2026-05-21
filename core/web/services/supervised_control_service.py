@@ -31,9 +31,15 @@ from core.runtime_manager.evolution_store import (
     load_run_snapshot as load_manager_run_snapshot,
     persist_run_snapshot as persist_manager_run_snapshot,
 )
+from core.runtime_manager.work_run_leases import (
+    EVALUATION_LEASE,
+    WorkRunLeaseRequest,
+    check_lease_conflicts,
+)
 
 from .evolution_service import get_run, get_workbench_state_payload
 from .i18n import get_web_language, text_for
+from .session_service import list_active_session_work_runs
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -194,6 +200,8 @@ def start_supervised_run(payload: dict[str, Any]) -> dict[str, Any]:
             )
         dataset_name = ""
         dataset_limit = None
+
+    _raise_if_supervised_lease_conflict(lang=lang)
 
     context = {
         "runId": f"web-supervised-{uuid4().hex[:12]}",
@@ -1024,6 +1032,8 @@ def _initial_run_state(context: dict[str, Any]) -> dict[str, Any]:
         "currentPhase": "queued",
         "runtimeStatus": "queued",
         "sourceKind": context["sourceKind"],
+        "runKind": "supervised_evolution_run",
+        "leases": [EVALUATION_LEASE],
         "sessionId": "",
         "bundleName": context["bundleName"],
         "datasetName": dataset_name,
@@ -1195,6 +1205,36 @@ def _require_run_locked(run_id: str, *, lang: str) -> dict[str, Any]:
     if state is None:
         raise SupervisedRunNotFoundError(text_for(lang, zh="未找到监督记录。", en="Supervised run not found."))
     return state
+
+
+def _raise_if_supervised_lease_conflict(*, lang: str) -> None:
+    active_runs = list_active_session_work_runs()
+    self_active = _load_active_work_run_snapshot("self")
+    if self_active is not None:
+        active_runs.append(self_active)
+    decision = check_lease_conflicts(
+        WorkRunLeaseRequest(run_kind="supervised_evolution_run", leases=[EVALUATION_LEASE]),
+        active_runs,
+    )
+    if not decision.allowed:
+        raise SupervisedRunBusyError(_localize_lease_conflict(decision.reason, lang=lang))
+
+
+def _load_active_work_run_snapshot(kind: str) -> dict[str, Any] | None:
+    try:
+        snapshot = load_manager_active_run_snapshot(kind)
+    except Exception:
+        return None
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+def _localize_lease_conflict(reason: str, *, lang: str) -> str:
+    fallback = str(reason or "").strip()
+    return text_for(
+        lang,
+        zh=f"当前资源正在被另一条运行占用，请等待它收束后再启动监督运行。{fallback}",
+        en=f"Another active run holds a conflicting resource lease. Wait for it to finish before starting supervised evolution. {fallback}",
+    ).strip()
 
 
 def _require_controller_locked(run_id: str, *, lang: str) -> _SupervisedRunController:
@@ -1432,6 +1472,15 @@ def _dataset_payload(item: dict[str, Any]) -> dict[str, Any]:
         "sourcePath": str(item.get("source_path") or "").strip(),
         "sourceExists": bool(item.get("source_exists")),
         "tags": [str(tag) for tag in list(item.get("tags") or []) if str(tag).strip()],
+        "reviewRequired": bool(item.get("review_required")),
+        "sourceTrack": str(item.get("source_track") or "").strip(),
+        "allowedDownstreamUses": [
+            str(use).strip()
+            for use in list(item.get("allowed_downstream_uses") or [])
+            if str(use).strip()
+        ],
+        "holdoutAllowed": bool(item.get("holdout_allowed", True)),
+        "rawChatDirectTrainingAllowed": bool(item.get("raw_chat_direct_training_allowed", True)),
     }
 
 

@@ -38,6 +38,7 @@ import {
   collectModelDetailKeys,
   getString,
   groupModelPresets,
+  hasPendingSecretChanges,
   type ModelPresetGroupLabels,
   type PublicConfigShape,
 } from "./configRouteLogic";
@@ -172,40 +173,38 @@ function defaultSectionUiState(): ConfigSectionUiState {
 const CONFIG_COPY = {
   zh: {
     pageTitle: "统一配置工作台",
-    subtitle: "这里是唯一配置网页入口。结构化编辑、整份草稿校验和最终写回，都收口到同一份 config.toml。",
+    subtitle: "这里是唯一配置网页入口。结构化编辑、JSON 检查和最终保存，都收口到同一份 config.toml。",
     loading: "正在加载统一配置工作区...",
     loadFailed: "配置工作区加载失败",
     sourceTitle: "配置源",
-    sourceBody: "当前页面直接读取共享 public config 工作流，最终只写回同一个 config.toml。",
+    sourceBody: "当前页面直接读取 config.toml，保存时也只写回这一个文件。",
     runtimeTitle: "运行时与界面",
-    runtimeBody: "语言、默认入口和 intake mode 现在都先走草稿，再统一应用。",
+    runtimeBody: "语言、默认入口和引入方式可以在这里修改，确认后页面会立即展示本次修改。",
     profilesTitle: "配置档现场",
-    profilesBody: "先看每个配置档当前在用什么模型、走哪条路由、密钥状态如何；需要修改时先点编辑，确认后只写入草稿。",
+    profilesBody: "先看每个配置档当前在用什么模型、走哪条路由、密钥状态如何；需要修改时先点编辑，确认后页面会立即展示本次修改。",
     modelsTitle: "模型库编辑",
-    modelsBody: "新增、编辑、删除模型库项会继续复用旧配置页背后的共享变更内核。",
-    draftTitle: "JSON 草稿",
-    draftBody: "如果结构化面板不够用，可以直接校验整份 JSON 草稿；应用时仍只写 config.toml。",
-    diagnosticsTitle: "诊断与应用",
-    diagnosticsBody: "阻塞问题、警告和 base hash 冲突保护会在应用前保持可见。",
+    modelsBody: "新增、编辑、删除模型库项后，页面会先展示本次修改，保存后写回 config.toml。",
+    draftTitle: "高级 JSON 编辑",
+    draftBody: "如果结构化面板不够用，可以直接检查整份 JSON；保存时仍只写 config.toml。",
+    diagnosticsTitle: "诊断与保存",
+    diagnosticsBody: "保存前会显示阻塞问题、警告和可能需要处理的动作。",
     configPath: "配置路径",
+    configStatus: "当前状态",
     rawToml: "当前 config.toml",
-    rawTomlHint: "这里只读显示真实配置源，编辑与保存统一走上面的工作区。",
-    persistedHash: "已保存快照",
-    baseHash: "草稿起点",
-    draftHash: "当前草稿",
-    syncedDraft: "草稿与已保存配置一致",
-    unsavedDraft: "草稿尚未应用",
+    rawTomlHint: "这里只读显示真实文件内容；修改并保存后会更新这里。",
+    syncedDraft: "已和 config.toml 一致",
+    unsavedDraft: "有未保存修改",
     refresh: "重新读取",
-    validateDraft: "校验草稿",
-    resetDraft: "撤回本地文本",
-    applyConfig: "应用到 config.toml",
-    applying: "应用中",
+    validateDraft: "检查当前修改",
+    resetDraft: "还原 JSON 文本",
+    saveConfig: "保存到 config.toml",
+    applying: "保存中",
     interfaceLanguage: "界面语言",
     intakeMode: "引入方式",
     languageChinese: "中文",
     languageEnglish: "English",
-    groupOverviewApplyTitle: "总览与应用",
-    groupOverviewApplySummary: "配置源、草稿校验与诊断应用统一收口。",
+    groupOverviewSaveTitle: "总览与保存",
+    groupOverviewSaveSummary: "配置源、修改检查与诊断保存统一收口。",
     groupWorkbenchTitle: "工作台与界面",
     groupWorkbenchSummary: "默认入口、语言与运行界面相关设置。",
     groupAvatarPetTitle: "形象与陪伴体",
@@ -225,7 +224,7 @@ const CONFIG_COPY = {
     profileId: "配置档 ID",
     sourceProfile: "参考配置档",
     assignModel: "模型",
-    createProfile: "加入草稿",
+    createProfile: "确认新增",
     modelEditorCreate: "新增模型",
     modelEditorEdit: "编辑模型",
     preset: "预设",
@@ -255,25 +254,25 @@ const CONFIG_COPY = {
     timeout: "超时（秒）",
     connectTimeout: "连接超时（秒）",
     pendingSecret: "待写入新密钥",
-    clearSecret: "应用时清除此密钥",
-    saveModel: "写入草稿",
+    clearSecret: "保存时清除此密钥",
+    saveModel: "确认模型修改",
     deleteModel: "删除模型",
     cancelEditing: "清空表单",
     modelCards: "现有模型",
     profileCards: "现有配置档",
     testConnection: "测试连接",
     selectedModel: "使用模型",
-    applySelectedModel: "确认修改",
+    saveSelectedModel: "确认修改",
     testSelectedModel: "测试当前内容",
-    profileApplyPending: "保存配置档草稿中",
-    profilePrepared: "已准备好新增配置档草稿",
-    profilePreparedHint: "可以在这里新增配置档。确认后只会加入草稿，点页面底部应用后才会写入 config.toml。",
+    profileSavePendingInline: "保存配置档修改中",
+    profilePrepared: "已准备好新增配置档",
+    profilePreparedHint: "可以在这里新增配置档。确认后页面会立即展示本次修改，保存后写入 config.toml。",
     currentRoute: "当前配置",
     stagedRoute: "本次修改预览",
     apiKeySource: "密钥来源",
     editProfile: "编辑",
     cancelProfileEdit: "取消",
-    profileDraftSaved: "本次修改已写入草稿，应用后才会落盘。",
+    profileDraftSaved: "本次修改已更新，保存到 config.toml 后生效。",
     routeSummary: "路由信息",
     expandSection: "展开内容",
     collapseSection: "收起内容",
@@ -290,24 +289,24 @@ const CONFIG_COPY = {
     blockingIssues: "阻塞问题",
     warningSignals: "警告信号",
     suggestedActions: "建议动作",
-    editorDirtyHint: "JSON 文本有未校验改动。先校验草稿，再继续结构化编辑或测试。",
-    editorCleanHint: "当前结构化草稿和 JSON 文本一致。",
-    saveSourceHint: "应用成功后，这里会刷新为新的已保存快照。",
-    modelSavePending: "保存模型草稿中",
-    profileSavePending: "保存配置档草稿中",
+    editorDirtyHint: "JSON 文本有未检查改动。先检查当前修改，再继续结构化编辑或测试。",
+    editorCleanHint: "当前结构化面板和 JSON 文本一致。",
+    saveSourceHint: "当前修改还没写入 config.toml，保存成功后这里会刷新为最新文件状态。",
+    modelSavePending: "保存模型修改中",
+    profileSavePending: "保存配置档修改中",
     testPending: "测试连接中",
-    testScopeDraft: "按当前草稿测试",
+    testScopeDraft: "按当前修改测试",
     testScopeSaved: "按已保存配置测试",
     testRouteLabel: "测试路由",
     testKeyLabel: "API key",
     testKeyNotRequired: "当前路由不要求",
     testKeySourceLabel: "来源",
-    validationPending: "校验草稿中",
+    validationPending: "检查修改中",
     refreshPending: "重新读取中",
     editSection: "编辑分区",
-    saveSection: "确认分区草稿",
+    saveSection: "确认分区修改",
     cancelSection: "取消编辑",
-    sectionSavePending: "保存分区草稿中",
+    sectionSavePending: "保存分区修改中",
     fieldCountLabel: "字段",
     emptyValue: "空",
     itemLabel: "条目",
@@ -316,40 +315,38 @@ const CONFIG_COPY = {
   },
   en: {
     pageTitle: "Unified Config Workbench",
-    subtitle: "This is the single config web entry. Structured editing, full-draft validation, and final writes now converge on one config.toml.",
+    subtitle: "This is the single config web entry. Structured editing, JSON checks, and final writes converge on one config.toml.",
     loading: "Loading unified config workspace...",
     loadFailed: "Failed to load config workspace",
     sourceTitle: "Config Source",
-    sourceBody: "This page reads the shared public-config workflow directly and writes back to the same config.toml only.",
+    sourceBody: "This page reads config.toml directly and writes back to that same file when saved.",
     runtimeTitle: "Runtime and Interface",
-    runtimeBody: "Language, default route, and intake mode now move through the draft/apply flow together.",
+    runtimeBody: "Language, default route, and intake mode changes are shown here immediately after confirmation.",
     profilesTitle: "Profile State",
-    profilesBody: "Review the current model, route, and key state for each profile here. Click edit before making changes; confirm only saves to the draft.",
+    profilesBody: "Review the current model, route, and key state for each profile here. Click edit, then confirm to update the page immediately.",
     modelsTitle: "Model Library",
-    modelsBody: "Add, edit, and delete model-library entries through the same kernel the old config page used.",
-    draftTitle: "JSON Draft",
-    draftBody: "When the structured panel is not enough, validate the full JSON draft here while persistence still writes only config.toml.",
-    diagnosticsTitle: "Diagnostics and Apply",
-    diagnosticsBody: "Blocking issues, warnings, and base-hash protection stay visible before apply.",
+    modelsBody: "Add, edit, and delete model-library entries here. The page updates first, and saving writes config.toml.",
+    draftTitle: "Advanced JSON",
+    draftBody: "When the structured panel is not enough, check the full JSON here. Saving still writes only config.toml.",
+    diagnosticsTitle: "Diagnostics and Save",
+    diagnosticsBody: "Blocking issues, warnings, and suggested actions stay visible before saving.",
     configPath: "Config path",
+    configStatus: "Current status",
     rawToml: "Current config.toml",
-    rawTomlHint: "This is a read-only view of the real config source. Editing and persistence stay in the workspace above.",
-    persistedHash: "Saved snapshot",
-    baseHash: "Draft base",
-    draftHash: "Current draft",
-    syncedDraft: "Draft matches the saved config",
-    unsavedDraft: "Draft has unapplied changes",
+    rawTomlHint: "This is a read-only view of the real file. It refreshes after you save changes.",
+    syncedDraft: "Matches config.toml",
+    unsavedDraft: "Unsaved changes",
     refresh: "Reload",
-    validateDraft: "Validate draft",
-    resetDraft: "Reset local text",
-    applyConfig: "Apply to config.toml",
-    applying: "Applying",
+    validateDraft: "Check changes",
+    resetDraft: "Restore JSON text",
+    saveConfig: "Save to config.toml",
+    applying: "Saving",
     interfaceLanguage: "Interface language",
     intakeMode: "Intake mode",
     languageChinese: "Chinese",
     languageEnglish: "English",
-    groupOverviewApplyTitle: "Overview and Apply",
-    groupOverviewApplySummary: "Keep config source, draft validation, and diagnostics in one place.",
+    groupOverviewSaveTitle: "Overview and Save",
+    groupOverviewSaveSummary: "Keep config source, change checks, diagnostics, and saving in one place.",
     groupWorkbenchTitle: "Workbench and Interface",
     groupWorkbenchSummary: "Default entry, language, and runtime-facing interface settings.",
     groupAvatarPetTitle: "Avatar and Companion",
@@ -369,7 +366,7 @@ const CONFIG_COPY = {
     profileId: "Profile ID",
     sourceProfile: "Based on profile",
     assignModel: "Model",
-    createProfile: "Add to draft",
+    createProfile: "Confirm profile",
     modelEditorCreate: "Create model",
     modelEditorEdit: "Edit model",
     preset: "Preset",
@@ -399,25 +396,25 @@ const CONFIG_COPY = {
     timeout: "Timeout (s)",
     connectTimeout: "Connect timeout (s)",
     pendingSecret: "Pending new secret",
-    clearSecret: "Clear this secret on apply",
-    saveModel: "Write to draft",
+    clearSecret: "Clear this secret on save",
+    saveModel: "Confirm model changes",
     deleteModel: "Delete model",
     cancelEditing: "Clear form",
     modelCards: "Current models",
     profileCards: "Current profiles",
     testConnection: "Test connection",
     selectedModel: "Model",
-    applySelectedModel: "Confirm changes",
+    saveSelectedModel: "Confirm changes",
     testSelectedModel: "Test current values",
-    profileApplyPending: "Saving profile draft",
-    profilePrepared: "Profile draft is ready",
-    profilePreparedHint: "Add a new profile here. Confirm only saves to the draft until you apply the page.",
+    profileSavePendingInline: "Saving profile changes",
+    profilePrepared: "Profile is ready",
+    profilePreparedHint: "Add a new profile here. Confirm updates the page immediately; saving writes config.toml.",
     currentRoute: "Current values",
-    stagedRoute: "Draft preview",
+    stagedRoute: "Change preview",
     apiKeySource: "API key source",
     editProfile: "Edit",
     cancelProfileEdit: "Cancel",
-    profileDraftSaved: "Changes were saved to the draft. Apply the page to write config.toml.",
+    profileDraftSaved: "Changes are ready. Save to config.toml to persist them.",
     routeSummary: "Route details",
     expandSection: "Expand",
     collapseSection: "Collapse",
@@ -434,24 +431,24 @@ const CONFIG_COPY = {
     blockingIssues: "Blocking issues",
     warningSignals: "Warnings",
     suggestedActions: "Suggested actions",
-    editorDirtyHint: "The JSON editor has unvalidated changes. Validate it before more structured edits or tests.",
-    editorCleanHint: "Structured draft and JSON editor are in sync.",
-    saveSourceHint: "After apply succeeds, the saved snapshot here will refresh.",
-    modelSavePending: "Saving model draft",
-    profileSavePending: "Saving profile draft",
+    editorDirtyHint: "The JSON editor has unchecked changes. Check them before more structured edits or tests.",
+    editorCleanHint: "Structured controls and JSON editor are in sync.",
+    saveSourceHint: "Save to config.toml to persist the current changes.",
+    modelSavePending: "Saving model changes",
+    profileSavePending: "Saving profile changes",
     testPending: "Testing connection",
-    testScopeDraft: "Testing current draft",
+    testScopeDraft: "Testing current changes",
     testScopeSaved: "Testing saved config",
     testRouteLabel: "Route",
     testKeyLabel: "API key",
     testKeyNotRequired: "not required for this route",
     testKeySourceLabel: "source",
-    validationPending: "Validating draft",
+    validationPending: "Checking changes",
     refreshPending: "Reloading",
     editSection: "Edit section",
-    saveSection: "Save section draft",
+    saveSection: "Confirm section changes",
     cancelSection: "Cancel editing",
-    sectionSavePending: "Saving section draft",
+    sectionSavePending: "Saving section changes",
     fieldCountLabel: "fields",
     emptyValue: "Empty",
     itemLabel: "Item",
@@ -515,8 +512,8 @@ function buildConfigSidebarGroups(copy: ConfigCopy): ConfigSidebarGroup[] {
   return [
     {
       id: "overview-apply",
-      title: copy.groupOverviewApplyTitle,
-      summary: copy.groupOverviewApplySummary,
+      title: copy.groupOverviewSaveTitle,
+      summary: copy.groupOverviewSaveSummary,
       memberSectionIds: ["overview", "draft", "diagnostics"],
     },
     {
@@ -1142,6 +1139,7 @@ export function ConfigRoute() {
   const [draftMeta, setDraftMeta] = useState<ConfigDraftMeta>(emptyDraftMeta());
   const [baseHash, setBaseHash] = useState("");
   const [draftHash, setDraftHash] = useState("");
+  const [activeWorkspace, setActiveWorkspace] = useState<ConfigWorkspace | null>(null);
   const [jsonText, setJsonText] = useState("{}");
   const [notice, setNotice] = useState<{ tone: NoticeTone; text: string }>({ tone: "neutral", text: "" });
   const [busyAction, setBusyAction] = useState("");
@@ -1168,6 +1166,7 @@ export function ConfigRoute() {
   });
 
   function syncWorkspace(workspace: ConfigWorkspace, tone: NoticeTone = "neutral") {
+    setActiveWorkspace(clonePublicConfig(workspace));
     setDraftConfig(clonePublicConfig(workspace.publicConfig));
     setDraftMeta(clonePublicConfig(workspace.draftMeta));
     setBaseHash(workspace.baseHash);
@@ -1225,7 +1224,7 @@ export function ConfigRoute() {
     };
   }, []);
 
-  const workspace = workspaceQuery.data;
+  const workspace = activeWorkspace ?? workspaceQuery.data;
   const currentLanguage = getDraftLanguage(draftConfig, workspace?.language === "en" ? "en" : "zh");
   const copy = CONFIG_COPY[currentLanguage];
   const sectionIndexTitle = currentLanguage === "en" ? "Section index" : "分区索引";
@@ -1237,8 +1236,8 @@ export function ConfigRoute() {
   const resizeCornerTitle = currentLanguage === "en" ? "Drag to resize sidebar" : "拖动调整侧栏尺寸";
   const formattedDraft = useMemo(() => formatJson(draftConfig ?? {}), [draftConfig]);
   const hasEditorChanges = jsonText !== formattedDraft;
-  const hasUnsavedDraft = Boolean(baseHash && draftHash && baseHash !== draftHash);
-  const hasPendingApply = hasUnsavedDraft || hasEditorChanges;
+  const hasUnsavedConfigChanges = Boolean(baseHash && draftHash && baseHash !== draftHash);
+  const hasPendingApply = hasUnsavedConfigChanges || hasPendingSecretChanges(draftMeta) || hasEditorChanges;
   const structuredActionsDisabled = !draftConfig || hasEditorChanges || Boolean(busyAction);
   const sidebarSections = workspace?.sections ?? [];
   const editorSections = workspace?.editorSections ?? [];
@@ -1299,7 +1298,7 @@ export function ConfigRoute() {
       }) as CSSProperties,
     [sidebarHeight],
   );
-  const applyButtonLabel = busyAction === copy.applying ? copy.applying : copy.applyConfig;
+  const saveButtonLabel = busyAction === copy.applying ? copy.applying : copy.saveConfig;
 
   function updateSectionUiState(sectionId: string, nextState: ConfigSectionUiState) {
     setSectionUiState((current) => ({ ...current, [sectionId]: nextState }));
@@ -1652,7 +1651,7 @@ export function ConfigRoute() {
     }
     try {
       const { next } = buildDraftWithSelectedProfileModel(profileId, fallbackModelId);
-      await previewDraft(next, draftMeta, copy.profileApplyPending);
+      await previewDraft(next, draftMeta, copy.profileSavePendingInline);
       cancelProfileEdit(profileId);
       setNotice({ tone: "success", text: copy.profileDraftSaved });
     } catch (error) {
@@ -1804,7 +1803,7 @@ export function ConfigRoute() {
             onClick={handleApply}
           >
             <Save size={14} />
-            {applyButtonLabel}
+            {saveButtonLabel}
           </button>
           <span className={styles.helperText}>{sidebarApplyHint}</span>
         </div>
@@ -1922,16 +1921,8 @@ export function ConfigRoute() {
               <code className={styles.hashValue}>{workspace.configPath}</code>
             </article>
             <article className={styles.detailCard}>
-              <span>{copy.persistedHash}</span>
-              <code className={styles.hashValue}>{workspace.baseHash}</code>
-            </article>
-            <article className={styles.detailCard}>
-              <span>{copy.baseHash}</span>
-              <code className={styles.hashValue}>{baseHash}</code>
-            </article>
-            <article className={styles.detailCard}>
-              <span>{copy.draftHash}</span>
-              <code className={styles.hashValue}>{draftHash}</code>
+              <span>{copy.configStatus}</span>
+              <strong>{hasPendingApply ? copy.unsavedDraft : copy.syncedDraft}</strong>
             </article>
           </div>
           <div className={styles.actionsRow}>
@@ -2140,7 +2131,7 @@ export function ConfigRoute() {
                                   onClick={() => handleApplySelectedProfileModel(profile.profileId, profile.selectedModelId)}
                                 >
                                   <Save size={14} />
-                                  {copy.applySelectedModel}
+                                  {copy.saveSelectedModel}
                                 </button>
                                 <button
                                   type="button"
@@ -2388,7 +2379,7 @@ export function ConfigRoute() {
                   </label>
                   <label className={styles.field}>
                     <span>{copy.transport}</span>
-                    <select
+                    <input
                       value={modelEditor.details.transport}
                       onChange={(event) =>
                         setModelEditor((current) => ({
@@ -2396,13 +2387,11 @@ export function ConfigRoute() {
                           details: { ...current.details, transport: event.target.value },
                         }))
                       }
-                    >
-                      <option value="chat_completions">chat_completions</option>
-                    </select>
+                    />
                   </label>
                   <label className={styles.field}>
                     <span>{copy.contract}</span>
-                    <select
+                    <input
                       value={modelEditor.details.contract}
                       onChange={(event) =>
                         setModelEditor((current) => ({
@@ -2410,10 +2399,7 @@ export function ConfigRoute() {
                           details: { ...current.details, contract: event.target.value },
                         }))
                       }
-                    >
-                      <option value="tool_chat">tool_chat</option>
-                      <option value="reasoning_chat">reasoning_chat</option>
-                    </select>
+                    />
                   </label>
                   <label className={styles.field}>
                     <span>{copy.reasoningStateField}</span>
@@ -2429,7 +2415,7 @@ export function ConfigRoute() {
                   </label>
                   <label className={styles.field}>
                     <span>{copy.toolCallingMode}</span>
-                    <select
+                    <input
                       value={modelEditor.details.tool_calling_mode}
                       onChange={(event) =>
                         setModelEditor((current) => ({
@@ -2437,10 +2423,7 @@ export function ConfigRoute() {
                           details: { ...current.details, tool_calling_mode: event.target.value },
                         }))
                       }
-                    >
-                      <option value="auto">auto</option>
-                      <option value="disabled">disabled</option>
-                    </select>
+                    />
                   </label>
                   <label className={styles.field}>
                     <span>{copy.temperature}</span>

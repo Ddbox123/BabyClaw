@@ -1370,6 +1370,33 @@ export function EvolutionRoute({ forcedTrack, forcedView }: EvolutionRouteProps)
                           </span>
                         </div>
                         <p>{selectedDataset.description}</p>
+                        <div className={styles.metaRow}>
+                          <span>{lang === "zh" ? "来源" : "Source"}</span>
+                          <span>{selectedDataset.sourceTrack || "--"}</span>
+                        </div>
+                        <div className={styles.signalRow}>
+                          {selectedDataset.reviewRequired ? (
+                            <span className={styles.secondaryPill}>
+                              {lang === "zh" ? "需审核" : "review required"}
+                            </span>
+                          ) : null}
+                          {!selectedDataset.holdoutAllowed ? (
+                            <span className={styles.secondaryPill}>
+                              {lang === "zh" ? "不进 holdout" : "no holdout"}
+                            </span>
+                          ) : null}
+                          {!selectedDataset.rawChatDirectTrainingAllowed ? (
+                            <span className={styles.secondaryPill}>
+                              {lang === "zh" ? "raw chat 不直训" : "no raw-chat training"}
+                            </span>
+                          ) : null}
+                        </div>
+                        {selectedDataset.allowedDownstreamUses.length > 0 ? (
+                          <div className={styles.metaRow}>
+                            <span>{lang === "zh" ? "下游用途" : "Downstream"}</span>
+                            <span>{selectedDataset.allowedDownstreamUses.join(", ")}</span>
+                          </div>
+                        ) : null}
                       </div>
                     ) : null}
                   </>

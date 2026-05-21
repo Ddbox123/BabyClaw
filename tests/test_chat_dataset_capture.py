@@ -108,6 +108,10 @@ def test_chat_candidate_decisions_update_queue_and_datasets(tmp_path: Path):
     assert bundle.case_count == 1
     assert bundle_payload["cases"][0]["scenario"] == "conversation_collaboration"
     assert "多轮上下文" in bundle_payload["cases"][0]["baseline_prompt"]
+    assert bundle_payload["dataset"]["review_required"] is True
+    assert bundle_payload["dataset"]["source_track"] == "dialogue"
+    assert bundle_payload["dataset"]["holdout_allowed"] is False
+    assert "future_training_export" in bundle_payload["dataset"]["allowed_downstream_uses"]
 
     negative = record_negative_chat_candidate(
         candidate_payload=payload,
