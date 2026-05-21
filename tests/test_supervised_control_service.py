@@ -33,10 +33,45 @@ def reset_supervised_run_state(monkeypatch: pytest.MonkeyPatch):
         active_run_id = manager_index.get(kind, {}).get("activeRunId", "")
         return fake_load_manager_run_snapshot(kind, active_run_id)
 
+    def fake_delete_manager_run_snapshot(kind: str, run_id: str) -> dict:
+        normalized = str(run_id or "").strip()
+        store = manager_store.setdefault(kind, {})
+        index = manager_index.setdefault(kind, {"activeRunId": "", "latestRunId": ""})
+        existed = normalized in store
+        if existed:
+            store.pop(normalized, None)
+        cleared_active = index.get("activeRunId") == normalized
+        cleared_latest = index.get("latestRunId") == normalized
+        if cleared_active:
+            index["activeRunId"] = ""
+        if cleared_latest:
+            candidates = list(store.values())
+            if candidates:
+                latest = max(
+                    candidates,
+                    key=lambda item: (
+                        str(item.get("updatedAt") or ""),
+                        str(item.get("startedAt") or ""),
+                        str(item.get("runId") or ""),
+                    ),
+                )
+                index["latestRunId"] = str(latest.get("runId") or "")
+            else:
+                index["latestRunId"] = ""
+        return {
+            "deleted": existed,
+            "runId": normalized,
+            "clearedActive": cleared_active,
+            "clearedLatest": cleared_latest,
+            "activeRunId": index.get("activeRunId", ""),
+            "latestRunId": index.get("latestRunId", ""),
+        }
+
     monkeypatch.setattr(service, "_runtime_manager_live_control_enabled", lambda: False)
     monkeypatch.setattr(service, "persist_manager_run_snapshot", fake_persist_manager_run_snapshot)
     monkeypatch.setattr(service, "load_manager_run_snapshot", fake_load_manager_run_snapshot)
     monkeypatch.setattr(service, "load_manager_active_run_snapshot", fake_load_manager_active_run_snapshot)
+    monkeypatch.setattr(service, "delete_manager_run_snapshot", fake_delete_manager_run_snapshot)
     with service._RUN_STATE_LOCK:
         service._RUN_STATES.clear()
         service._RUN_CONTROLLERS.clear()
@@ -240,6 +275,119 @@ def test_request_stop_supervised_run_closes_file_only_running_run(monkeypatch):
     assert snapshot["finishedAt"]
     assert persisted["active_run_id"] == ""
     assert persisted["payload"]["status"] == "cancelled"
+
+
+def test_delete_supervised_run_snapshot_clears_file_only_queued_run(monkeypatch):
+    run_id = "web-supervised-file-only-queued"
+    stored = {
+        "runId": run_id,
+        "status": "queued",
+        "currentPhase": "queued",
+        "runtimeStatus": "queued",
+        "startedAt": "2026-05-18T12:00:00Z",
+        "updatedAt": "2026-05-18T12:00:00Z",
+        "finishedAt": "",
+        "latestMessage": "queued",
+        "currentTask": "queued",
+        "pauseRequested": False,
+        "pauseRequestedAt": "",
+        "stopRequested": False,
+        "stopRequestedAt": "",
+        "eventTail": [],
+    }
+    deleted: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        service,
+        "load_manager_run_snapshot",
+        lambda kind, loaded_run_id: copy.deepcopy(stored) if kind == "supervised" and loaded_run_id == run_id else None,
+    )
+
+    def fake_delete(kind: str, loaded_run_id: str) -> dict:
+        deleted["kind"] = kind
+        deleted["run_id"] = loaded_run_id
+        return {
+            "deleted": True,
+            "runId": loaded_run_id,
+            "clearedActive": True,
+            "clearedLatest": True,
+            "activeRunId": "",
+            "latestRunId": "",
+        }
+
+    monkeypatch.setattr(service, "delete_manager_run_snapshot", fake_delete)
+
+    result = service.delete_supervised_run_snapshot(run_id)
+
+    assert result["deleted"] is True
+    assert result["runId"] == run_id
+    assert result["clearedActive"] is True
+    assert result["clearedLatest"] is True
+    assert deleted == {"kind": "supervised", "run_id": run_id}
+
+
+def test_delete_supervised_run_snapshot_clears_corrupt_index_only_run(monkeypatch):
+    run_id = "web-supervised-corrupt-active"
+
+    monkeypatch.setattr(service, "load_manager_run_snapshot", lambda kind, loaded_run_id: None)
+    monkeypatch.setattr(
+        service,
+        "delete_manager_run_snapshot",
+        lambda kind, loaded_run_id: {
+            "deleted": False,
+            "runId": loaded_run_id,
+            "clearedActive": True,
+            "clearedLatest": True,
+            "activeRunId": "",
+            "latestRunId": "",
+        },
+    )
+
+    result = service.delete_supervised_run_snapshot(run_id)
+
+    assert result["deleted"] is True
+    assert result["runId"] == run_id
+    assert result["activeRunId"] == ""
+    assert result["latestRunId"] == ""
+
+
+def test_delete_supervised_run_snapshot_rejects_running_run():
+    run_id = _seed_running_run()
+
+    with pytest.raises(service.SupervisedRunStateError):
+        service.delete_supervised_run_snapshot(run_id)
+
+    assert service.get_supervised_run_snapshot(run_id)["status"] == "running"
+
+
+def test_delete_queued_supervised_run_prevents_background_execution(monkeypatch):
+    run_id = "web-supervised-delete-before-start"
+    context = {
+        "runId": run_id,
+        "lang": "en",
+        "sourceKind": "bundle",
+        "datasetName": "",
+        "datasetLimit": None,
+        "bundleName": "manual_bundle",
+        "keepWorktree": False,
+        "startedAt": "2026-05-18T12:00:00Z",
+    }
+    with service._RUN_STATE_LOCK:
+        state = service._initial_run_state(context)
+        service._RUN_STATES[run_id] = state
+        service._RUN_CONTROLLERS[run_id] = service._SupervisedRunController()
+        service._ACTIVE_RUN_ID = run_id
+    service.persist_manager_run_snapshot("supervised", state, active_run_id=run_id)
+
+    calls: list[str] = []
+    monkeypatch.setattr(service, "run_workbench_session", lambda **kwargs: calls.append("ran"))
+
+    result = service.delete_supervised_run_snapshot(run_id)
+    service._run_supervised_session(context)
+
+    assert result["deleted"] is True
+    assert calls == []
+    assert service.get_active_supervised_run() is None
 
 
 def test_handle_progress_event_updates_current_case_io_snapshot():
