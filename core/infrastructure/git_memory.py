@@ -17,7 +17,7 @@ from core.logging import debug_logger
 
 
 _RISKY_EVOLUTION_PATH_PREFIXES = ("core/", "tools/", "config/", "workspace/prompts/")
-_RISKY_EVOLUTION_PATHS = {"agent.py", "reset.py"}
+_RISKY_EVOLUTION_PATHS = {"agent.py"}
 
 
 def _is_risky_evolution_path(filepath: str) -> bool:

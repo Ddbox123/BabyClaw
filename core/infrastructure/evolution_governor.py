@@ -16,7 +16,7 @@ class EvolutionGovernor:
     """Enforce mutation boundaries during active evolution transactions."""
 
     _RISKY_PATH_PREFIXES = ("core/", "tools/", "config/", "workspace/prompts/")
-    _RISKY_PATHS = {"agent.py", "reset.py"}
+    _RISKY_PATHS = {"agent.py"}
     _FILE_PATH_TOOLS = {
         "write_file_tool",
         "create_file",

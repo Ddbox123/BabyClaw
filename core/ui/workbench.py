@@ -412,9 +412,18 @@ class AgentWorkbenchShell:
         if callable(render):
             self.ui.console.print(render())
 
-    def _open_config_panel(self):
+    def _open_workbench_page(
+        self,
+        route_path: str,
+        *,
+        panel_title: str,
+        page_label: str,
+        border_style: str = "green",
+    ) -> None:
         panel_script = PROJECT_ROOT / "scripts" / "web_workbench.py"
-        url = f"http://127.0.0.1:{CONFIG_PANEL_PORT}/config"
+        route = str(route_path or "").strip("/")
+        suffix = f"/{route}" if route else ""
+        url = f"http://127.0.0.1:{CONFIG_PANEL_PORT}{suffix}"
         health_url = f"http://127.0.0.1:{CONFIG_PANEL_PORT}/api/health"
         cmd = [
             sys.executable,
@@ -442,25 +451,25 @@ class AgentWorkbenchShell:
             except Exception:
                 pass
         _open_config_panel_page(url)
-        self.ui.console.print(Panel(f"配置页面：{url}", title="配置", border_style="green"))
-        self._recent_status = f"已打开配置页面：{url}"
+        self.ui.console.print(Panel(f"{page_label}：{url}", title=panel_title, border_style=border_style))
+        self._recent_status = f"已打开{page_label}：{url}"
         Prompt.ask("按回车返回", default="")
 
-    def _run_reset_menu(self):
-        import reset as reset_module
-
-        self.ui.console.print(
-            Panel(
-                "正在进入重置菜单。\n完成既有重置流程后，再回到这里。",
-                title="重置",
-                border_style="yellow",
-            )
+    def _open_config_panel(self):
+        self._open_workbench_page(
+            "config",
+            panel_title="配置",
+            page_label="配置页面",
+            border_style="green",
         )
-        self._recent_status = "已打开重置菜单"
-        try:
-            reset_module.interactive()
-        except SystemExit:
-            pass
+
+    def _run_reset_menu(self):
+        self._open_workbench_page(
+            "reset",
+            panel_title="重置",
+            page_label="重置页面",
+            border_style="yellow",
+        )
 
     def _show_pet_space(self):
         self.ui.console.print(Panel("宠物空间", title="宠物空间", border_style="magenta"))

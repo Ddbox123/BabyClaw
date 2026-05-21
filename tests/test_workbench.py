@@ -145,6 +145,25 @@ def test_workbench_config_panel_reuses_existing_server(monkeypatch):
     assert shell._recent_status == "已打开配置页面：http://127.0.0.1:8000/config"
 
 
+def test_workbench_reset_menu_opens_web_reset_page(monkeypatch):
+    shell = AgentWorkbenchShell(config=SimpleNamespace(avatar=SimpleNamespace(preset="default")))
+    shell.ui = _FakeUI()
+    opened = {}
+
+    def fail_popen(*_args, **_kwargs):
+        raise AssertionError("existing workbench server should be reused")
+
+    monkeypatch.setattr("core.ui.workbench.subprocess.Popen", fail_popen)
+    monkeypatch.setattr("core.ui.workbench._config_panel_is_ready", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("core.ui.workbench._open_config_panel_page", lambda url: opened.setdefault("url", url))
+    monkeypatch.setattr("core.ui.workbench.Prompt.ask", lambda *args, **kwargs: "")
+
+    shell._run_reset_menu()
+
+    assert opened["url"] == "http://127.0.0.1:8000/reset"
+    assert shell._recent_status == "已打开重置页面：http://127.0.0.1:8000/reset"
+
+
 def test_workbench_supervised_evolution_path_updates_status(monkeypatch):
     shell = AgentWorkbenchShell(config=SimpleNamespace(avatar=SimpleNamespace(preset="default")))
     fake_ui = _FakeUI()

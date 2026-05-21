@@ -335,7 +335,7 @@ def _build_test_coverage(files: List[Path], project_root: Path) -> str:
     lines.append("")
 
     # 仅列出关键模块（core/ 下的核心文件）
-    critical = [u for u in uncovered if u.startswith("core/infrastructure/") or u in ("agent.py", "reset.py")]
+    critical = [u for u in uncovered if u.startswith("core/infrastructure/") or u == "agent.py"]
     other_core = [u for u in uncovered if u.startswith("core/") and u not in critical]
     rest = [u for u in uncovered if u not in critical and u not in other_core]
 
