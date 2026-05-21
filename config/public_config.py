@@ -87,6 +87,33 @@ LLM_MODEL_PRESETS = {
             "discovery_enabled": True,
         },
     },
+    "relay_openai_gpt_5_5": {
+        "label": "中转站 API · GPT-5.5",
+        "category": "relay",
+        "provider_id": "relay_openai",
+        "model_id": "relay_openai_gpt_5_5",
+        "provider": {
+            "kind": "relay",
+            "api_key_env": "OPENAI_API_KEY",
+            "base_url": "https://pixel.try-chatapi.com/v1",
+            "compat_mode": "openai",
+            "requires_api_key": True,
+            "context_window": 1000000,
+        },
+        "model": {
+            "model": "gpt-5.5",
+            "label": "GPT-5.5 via relay",
+            "transport": "chat_completions",
+            "contract": "tool_chat",
+            "temperature": 0.7,
+            "max_output_tokens": 128000,
+            "timeout": 120,
+            "connect_timeout": 20,
+            "streaming": True,
+            "tool_calling_mode": "auto",
+            "discovery_enabled": True,
+        },
+    },
     "openai_gpt_5_4": {
         "label": "OpenAI GPT-5.4",
         "provider_id": "openai_main",
@@ -658,11 +685,27 @@ def _model_library_entry(provider: dict[str, Any], model: str, label: str, detai
     return entry
 
 
+def _llm_model_preset_category(preset: dict[str, Any]) -> str:
+    explicit = str(preset.get("category", "") or "").strip().lower()
+    if explicit:
+        return explicit
+    provider = preset.get("provider", {})
+    provider = provider if isinstance(provider, dict) else {}
+    kind = str(provider.get("kind", "") or "").strip().lower()
+    base_url = str(provider.get("base_url", "") or "").strip().lower()
+    if kind in {"local", "ollama"} or "localhost" in base_url or "127.0.0.1" in base_url:
+        return "local"
+    if kind in {"relay", "openai_compatible"}:
+        return "relay"
+    return "official"
+
+
 def list_llm_model_preset_options() -> list[dict[str, object]]:
     return [
         {
             "preset_id": preset_id,
             "label": str(preset["label"]),
+            "category": _llm_model_preset_category(preset),
             "provider_id": str(preset["provider_id"]),
             "model_id": str(preset["model_id"]),
             "provider": copy.deepcopy(preset["provider"]),

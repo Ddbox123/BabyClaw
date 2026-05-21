@@ -31,11 +31,20 @@ import {
   ConfigModelPresetOption,
   ConfigWorkspace,
 } from "../api/types";
+import {
+  applyModelOptionToProfileDraft,
+  asRecord,
+  clonePublicConfig,
+  collectModelDetailKeys,
+  getString,
+  groupModelPresets,
+  type ModelPresetGroupLabels,
+  type PublicConfigShape,
+} from "./configRouteLogic";
 import styles from "./ConfigRoute.module.css";
 
 type ConfigLanguage = "zh" | "en";
 type NoticeTone = "neutral" | "success" | "error";
-type PublicConfigShape = Record<string, unknown>;
 
 type ProviderDraft = {
   kind: string;
@@ -220,6 +229,9 @@ const CONFIG_COPY = {
     modelEditorCreate: "新增模型",
     modelEditorEdit: "编辑模型",
     preset: "预设",
+    presetGroupOfficial: "官方供应商",
+    presetGroupRelay: "中转站 API",
+    presetGroupLocal: "本地模型",
     customEntry: "手填",
     modelId: "模型 ID",
     label: "显示名",
@@ -361,6 +373,9 @@ const CONFIG_COPY = {
     modelEditorCreate: "Create model",
     modelEditorEdit: "Edit model",
     preset: "Preset",
+    presetGroupOfficial: "Official providers",
+    presetGroupRelay: "Relay APIs",
+    presetGroupLocal: "Local models",
     customEntry: "Manual",
     modelId: "Model ID",
     label: "Label",
@@ -551,69 +566,8 @@ function emptyProfileEditState(modelId = ""): ProfileEditState {
   };
 }
 
-function clonePublicConfig<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
-}
-
-function ensureRecord(target: Record<string, unknown>, key: string): Record<string, unknown> {
-  const current = target[key];
-  if (isPlainObject(current)) {
-    return current;
-  }
-  const created: Record<string, unknown> = {};
-  target[key] = created;
-  return created;
-}
-
-function collectModelDetailKeys(options: ConfigModelOption[]): string[] {
-  const keys = new Set<string>();
-  for (const option of options) {
-    for (const key of Object.keys(asRecord(option.details))) {
-      keys.add(key);
-    }
-  }
-  return Array.from(keys);
-}
-
-function applyModelOptionToProfileDraft(
-  config: PublicConfigShape,
-  profileId: string,
-  option: ConfigModelOption,
-  modelDetailKeys: string[],
-) {
-  const llm = ensureRecord(config, "llm");
-  const profiles = ensureRecord(llm, "profiles");
-  const profile = ensureRecord(profiles, profileId);
-
-  delete profile.overrides;
-  delete profile.model_ref;
-  delete profile.provider_id;
-  for (const key of modelDetailKeys) {
-    delete profile[key];
-  }
-
-  profile.provider = clonePublicConfig(asRecord(option.provider));
-  profile.model = option.model;
-  if (option.api_key_env) {
-    profile.api_key_env = option.api_key_env;
-  } else {
-    delete profile.api_key_env;
-  }
-  for (const [key, value] of Object.entries(asRecord(option.details))) {
-    profile[key] = clonePublicConfig(value);
-  }
-}
-
 function formatJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
-
-function getString(value: unknown): string {
-  return typeof value === "string" ? value : value == null ? "" : String(value);
 }
 
 function getBoolean(value: unknown, fallback = false): boolean {
@@ -1306,6 +1260,17 @@ export function ConfigRoute() {
   const modelOptions = workspace?.modelOptions ?? [];
   const modelOptionsById = useMemo(() => new Map(modelOptions.map((option) => [option.model_id, option])), [modelOptions]);
   const modelDetailKeys = useMemo(() => collectModelDetailKeys(modelOptions), [modelOptions]);
+  const modelPresetGroups = useMemo(
+    () => {
+      const labels: ModelPresetGroupLabels = {
+        official: copy.presetGroupOfficial,
+        relay: copy.presetGroupRelay,
+        local: copy.presetGroupLocal,
+      };
+      return groupModelPresets(workspace?.modelPresetOptions ?? [], labels);
+    },
+    [copy, workspace?.modelPresetOptions],
+  );
 
   useEffect(() => {
     if (!visibleSidebarGroups.length) {
@@ -2327,10 +2292,14 @@ export function ConfigRoute() {
                     <span>{copy.preset}</span>
                     <select value={modelEditor.preset_id} onChange={(event) => applyPreset(event.target.value)}>
                       <option value="">{copy.customEntry}</option>
-                      {workspace.modelPresetOptions.map((preset: ConfigModelPresetOption) => (
-                        <option key={preset.preset_id} value={preset.preset_id}>
-                          {preset.label}
-                        </option>
+                      {modelPresetGroups.map((group) => (
+                        <optgroup key={group.id} label={group.label}>
+                          {group.presets.map((preset: ConfigModelPresetOption) => (
+                            <option key={preset.preset_id} value={preset.preset_id}>
+                              {preset.label}
+                            </option>
+                          ))}
+                        </optgroup>
                       ))}
                     </select>
                   </label>

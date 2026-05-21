@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import queue
 import shutil
 import subprocess
@@ -53,6 +54,7 @@ _RUN_SUBSCRIBERS: dict[str, set[queue.Queue[dict[str, Any]]]] = {}
 _RUN_EXECUTING_STATUSES = {"queued", "running", "stopping"}
 _RUN_LOCKED_STATUSES = {"queued", "running", "stopping", "paused"}
 _RUN_FINAL_STATUSES = {"done", "failed", "cancelled"}
+_MANAGER_CONTROL_KEY = "runtimeManagerControl"
 
 
 class SelfEvolutionRunBusyError(RuntimeError):
@@ -308,6 +310,7 @@ def start_self_evolution_run(payload: dict[str, Any]) -> dict[str, Any]:
             "manifestPath": str(preflight.get("manifestPath") or ""),
             "baseRev": str(preflight.get("baseRev") or ""),
         },
+        _MANAGER_CONTROL_KEY: _build_manager_control_payload(),
     }
     context = {
         "runId": run_id,
@@ -506,6 +509,7 @@ def resume_self_evolution_run(run_id: str) -> dict[str, Any]:
                 "controlAction": "",
                 "controlRequestedAt": "",
                 "resumeCount": max(0, int(current.get("resumeCount") or 0)) + 1,
+                _MANAGER_CONTROL_KEY: _build_manager_control_payload(),
             }
         )
         _append_run_message_locked(
@@ -1351,6 +1355,32 @@ def _build_result_message(result: dict[str, Any], fallback: str = "") -> str:
     return str(fallback or "").strip()
 
 
+def _build_manager_control_payload() -> dict[str, Any]:
+    return {
+        "ownerPid": os.getpid(),
+        "kind": "self",
+        "claimedAt": _now_timestamp(),
+    }
+
+
+def _current_runtime_manager_owner_pid() -> int:
+    try:
+        from core.runtime_manager.state_store import load_pid
+
+        return int(load_pid() or 0)
+    except Exception:
+        return 0
+
+
+def _manager_control_is_current(payload: dict[str, Any]) -> bool:
+    control = payload.get(_MANAGER_CONTROL_KEY) if isinstance(payload.get(_MANAGER_CONTROL_KEY), dict) else {}
+    try:
+        owner_pid = int(control.get("ownerPid") or 0)
+    except (TypeError, ValueError):
+        owner_pid = 0
+    return owner_pid > 0 and owner_pid == _current_runtime_manager_owner_pid()
+
+
 def _current_active_run_locked() -> dict[str, Any] | None:
     if not _ACTIVE_RUN_ID:
         return None
@@ -1700,6 +1730,12 @@ def _build_cancelled_file_self_run_snapshot(
             "stopReason": stop_reason,
             "controlAction": "",
             "controlRequestedAt": "",
+            _MANAGER_CONTROL_KEY: {
+                "ownerPid": "",
+                "kind": "self",
+                "clearedAt": now,
+                "reason": "orphaned",
+            },
         }
     )
     _append_run_message_locked(
@@ -1718,7 +1754,7 @@ def _normalize_manager_latest_self_run(snapshot: dict[str, Any]) -> dict[str, An
     active = load_manager_active_run_snapshot("self")
     active_run_id = str((active or {}).get("runId") or "").strip()
     snapshot_run_id = str(snapshot.get("runId") or "").strip()
-    if active_run_id and active_run_id == snapshot_run_id:
+    if active_run_id and active_run_id == snapshot_run_id and _manager_control_is_current(snapshot):
         return snapshot
     return _finalize_orphaned_manager_self_run(snapshot)
 
@@ -2321,7 +2357,11 @@ def get_active_self_evolution_run() -> dict[str, Any] | None:
         snapshot = load_manager_active_run_snapshot("self")
         if snapshot is None:
             return None
-        if str(snapshot.get("status") or "").strip().lower() not in _RUN_LOCKED_STATUSES:
+        status = str(snapshot.get("status") or "").strip().lower()
+        if status not in _RUN_LOCKED_STATUSES:
+            return None
+        if not _manager_control_is_current(snapshot):
+            _finalize_orphaned_manager_self_run(snapshot)
             return None
         return _decorate_self_snapshot_fields(_clone_payload(snapshot))
     return _LOCAL_GET_ACTIVE_SELF_EVOLUTION_RUN()
@@ -2357,7 +2397,13 @@ def has_active_self_evolution_run() -> bool:
         snapshot = load_manager_active_run_snapshot("self")
         if snapshot is None:
             return False
-        return str(snapshot.get("status") or "").strip().lower() in _RUN_LOCKED_STATUSES
+        status = str(snapshot.get("status") or "").strip().lower()
+        if status not in _RUN_LOCKED_STATUSES:
+            return False
+        if not _manager_control_is_current(snapshot):
+            _finalize_orphaned_manager_self_run(snapshot)
+            return False
+        return True
     return _LOCAL_HAS_ACTIVE_SELF_EVOLUTION_RUN()
 
 

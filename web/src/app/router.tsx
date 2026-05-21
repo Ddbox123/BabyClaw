@@ -4,6 +4,7 @@ import { AppShell } from "./AppShell";
 import { ChatCodingRoute } from "../routes/ChatCodingRoute";
 import { ConfigRoute } from "../routes/ConfigRoute";
 import { EvolutionRoute } from "../routes/EvolutionRoute";
+import { GitRoute } from "../routes/GitRoute";
 import { HomeRedirect } from "../routes/HomeRedirect";
 import { LegacyEvolutionRedirect } from "../routes/LegacyEvolutionRedirect";
 import { LogsRoute } from "../routes/LogsRoute";
@@ -68,6 +69,7 @@ export const router = createBrowserRouter([
         ),
       },
       { path: "evolution", element: <LegacyEvolutionRedirect /> },
+      { path: "git", element: <GitRoute /> },
       { path: "logs", element: <LogsRoute /> },
       { path: "pet", element: <PetRoute /> },
       { path: "reset", element: <ResetRoute /> },

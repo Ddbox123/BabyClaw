@@ -66,6 +66,7 @@ _REMOTE_PROVIDER_HOSTS = {
     "groq": {"api.groq.com"},
     "minimax": {"api.minimax.io", "api.minimaxi.com"},
     "openai": {"api.openai.com"},
+    "relay": {"pixel.try-chatapi.com"},
     "siliconflow": {"api.siliconflow.cn"},
     "zhipu": {"open.bigmodel.cn"},
 }

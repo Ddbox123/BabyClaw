@@ -1,0 +1,327 @@
+.route {
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  background: rgba(18, 20, 22, 0.74);
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 22px 24px 16px;
+  border-bottom: 1px solid var(--border-strong);
+  background: rgba(22, 25, 28, 0.78);
+}
+
+.eyebrow,
+.panelEyebrow {
+  margin: 0 0 6px;
+  color: var(--fg-tertiary);
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.6rem;
+}
+
+.subtitle {
+  margin: 10px 0 0;
+  max-width: 78ch;
+  color: var(--fg-secondary);
+  line-height: 1.5;
+}
+
+.refreshButton,
+.filterButton,
+.filterButtonActive {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 34px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(20, 23, 26, 0.72);
+  color: var(--fg-secondary);
+}
+
+.refreshButton {
+  flex: 0 0 auto;
+  padding: 7px 12px;
+}
+
+.refreshButton:hover,
+.filterButton:hover {
+  border-color: var(--border-strong);
+  color: var(--fg-primary);
+  background: rgba(34, 39, 44, 0.9);
+}
+
+.summaryGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  padding: 16px 24px 0;
+}
+
+.summaryCard,
+.changePanel,
+.commitPanel,
+.emptyPreview {
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(27, 31, 35, 0.78);
+}
+
+.summaryCard {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 13px 14px;
+}
+
+.summaryCard span {
+  color: var(--fg-tertiary);
+  font-size: 0.78rem;
+}
+
+.summaryCard strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-primary);
+  font-size: 1rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notice {
+  margin: 12px 24px 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(216, 91, 91, 0.32);
+  border-radius: 8px;
+  background: rgba(216, 91, 91, 0.12);
+  color: #efb0ad;
+  font-size: 0.86rem;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(520px, 1fr) minmax(280px, 340px);
+  gap: 16px;
+  min-height: 0;
+  padding: 18px 24px 24px;
+}
+
+.changePanel,
+.commitPanel {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
+  padding: 14px;
+}
+
+.commitPanel {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.panelHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.panelHeader h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1rem;
+}
+
+.countPill,
+.inlineMeta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid rgba(124, 155, 150, 0.22);
+  border-radius: 999px;
+  background: rgba(124, 155, 150, 0.12);
+  color: var(--accent-cool);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.filterRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.filterButton,
+.filterButtonActive {
+  min-height: 30px;
+  padding: 5px 9px;
+  font-size: 0.78rem;
+}
+
+.filterButtonActive {
+  border-color: rgba(216, 167, 91, 0.3);
+  background: rgba(216, 167, 91, 0.14);
+  color: var(--accent-warm-2);
+}
+
+.fileList,
+.commitList {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.fileButton,
+.fileButtonActive {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 10px;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(21, 24, 27, 0.82);
+  color: var(--fg-primary);
+  text-align: left;
+}
+
+.fileButton:hover {
+  border-color: var(--border-strong);
+  background: rgba(34, 39, 44, 0.92);
+}
+
+.fileButtonActive {
+  border-color: rgba(216, 167, 91, 0.3);
+  box-shadow: inset 3px 0 0 var(--accent-warm);
+  background: rgba(35, 36, 33, 0.96);
+}
+
+.fileStatus {
+  color: var(--accent-warm-2);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+}
+
+.fileCopy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.fileCopy strong,
+.commitItem strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileCopy span,
+.commitItem p,
+.emptyState,
+.emptyPreview p {
+  margin: 0;
+  color: var(--fg-secondary);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.fileCopy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diffPanel {
+  min-width: 0;
+  min-height: 0;
+}
+
+.emptyPreview {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  color: var(--fg-secondary);
+}
+
+.emptyPreview strong {
+  color: var(--fg-primary);
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+}
+
+.commitItem {
+  display: grid;
+  gap: 8px;
+  padding: 11px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(21, 24, 27, 0.82);
+}
+
+.commitHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.commitHeader code {
+  color: var(--accent-warm-2);
+  font-size: 0.78rem;
+}
+
+.commitHeader span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--fg-tertiary);
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+@media (max-width: 1200px) {
+  .workspace {
+    grid-template-columns: minmax(280px, 340px) minmax(520px, 1fr);
+  }
+
+  .commitPanel {
+    display: none;
+  }
+}
+
+@media (max-width: 860px) {
+  .route {
+    overflow: auto;
+  }
+
+  .summaryGrid,
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace {
+    min-height: 720px;
+  }
+}

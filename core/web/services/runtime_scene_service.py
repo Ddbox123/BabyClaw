@@ -51,6 +51,36 @@ LANGUAGE_BY_SUFFIX = {
     ".yaml": "yaml",
     ".yml": "yaml",
 }
+DISPLAY_NAME_TRIGGER_LABELS = {
+    "start": "工作台启动",
+    "internal-start": "工作台启动",
+    "internal-restart": "工作台重启",
+    "restart": "工作台重启",
+    "open": "打开工作台",
+    "stop": "关闭工作台",
+    "shutdown": "关闭工作台",
+}
+DISPLAY_NAME_STATUS_LABELS = {
+    "running": "运行中",
+    "starting": "启动中",
+    "queued": "等待中",
+    "stopping": "停止中",
+    "stopped": "已停止",
+    "failed": "失败",
+    "success": "成功",
+    "succeeded": "成功",
+}
+DISPLAY_NAME_RESULT_LABELS = {
+    "explicit_stop": "手动停止",
+    "explicit stop": "手动停止",
+    "browser_window_closed": "窗口关闭",
+    "app window closed": "窗口关闭",
+    "startup_failed": "启动失败",
+    "backend_exited": "后端退出",
+    "success": "成功",
+    "succeeded": "成功",
+    "failed": "失败",
+}
 
 
 def list_runtime_scenes(limit: int = 80) -> list[dict]:
@@ -69,6 +99,7 @@ def list_runtime_scenes(limit: int = 80) -> list[dict]:
                 "runtimeSceneId": scene_id,
                 "directoryName": scene_dir.name,
                 "title": str(manifest.get("title") or scene_dir.name),
+                "displayName": _runtime_scene_display_name(scene_dir, manifest, scene_id),
                 "startedAt": str(manifest.get("started_at") or ""),
                 "endedAt": str(manifest.get("ended_at") or ""),
                 "status": str(manifest.get("status") or "unknown"),
@@ -98,6 +129,7 @@ def get_runtime_scene_detail(scene_id: str) -> dict:
     return {
         "runtimeSceneId": detail_scene_id,
         "directoryName": scene_dir.name,
+        "displayName": _runtime_scene_display_name(scene_dir, manifest, detail_scene_id),
         "manifestPath": str((scene_dir / "manifest.json").relative_to(PROJECT_ROOT).as_posix()),
         "manifest": manifest,
         "startedAt": str(manifest.get("started_at") or ""),
@@ -354,6 +386,77 @@ def _scene_id(scene_dir: Path, manifest: dict) -> str:
     if marker in scene_dir.name:
         return scene_dir.name.split(marker, 1)[1].strip()
     return scene_dir.name
+
+
+def _runtime_scene_display_name(scene_dir: Path, manifest: dict, scene_id: str) -> str:
+    label = _display_name_time_label(str(manifest.get("started_at") or ""), scene_dir)
+    trigger_label = _display_name_trigger_label(str(manifest.get("trigger") or ""))
+    status_label = _display_name_status_label(manifest)
+    parts = [item for item in [label, trigger_label, status_label] if item]
+    if parts:
+        return " · ".join(parts)
+    return str(manifest.get("title") or scene_dir.name or scene_id).strip()
+
+
+def _display_name_time_label(started_at: str, scene_dir: Path) -> str:
+    parsed = _parse_datetime(started_at)
+    if parsed is None:
+        marker = "__"
+        token = scene_dir.name.split(marker, 1)[0] if marker in scene_dir.name else scene_dir.name
+        parsed = _parse_directory_timestamp_token(token)
+    if parsed is None:
+        return ""
+    local_value = parsed.astimezone()
+    return local_value.strftime("%m/%d %H:%M")
+
+
+def _display_name_trigger_label(trigger: str) -> str:
+    normalized = str(trigger or "").strip().lower()
+    if not normalized:
+        return "工作台运行"
+    return DISPLAY_NAME_TRIGGER_LABELS.get(normalized, _humanize_runtime_token(normalized))
+
+
+def _display_name_status_label(manifest: dict) -> str:
+    status = str(manifest.get("status") or "").strip().lower()
+    result = str(manifest.get("result") or "").strip().lower()
+    stop_reason = str(manifest.get("stop_reason") or "").strip().lower()
+    if status == "stopped" and (result or stop_reason):
+        return DISPLAY_NAME_RESULT_LABELS.get(result) or _humanize_runtime_token(stop_reason or result)
+    return DISPLAY_NAME_STATUS_LABELS.get(status, _humanize_runtime_token(status))
+
+
+def _parse_datetime(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def _parse_directory_timestamp_token(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    for pattern in ("%Y%m%dT%H%M%SZ", "%Y%m%dT%H%M%S"):
+        try:
+            parsed = datetime.strptime(text, pattern)
+        except ValueError:
+            continue
+        return parsed.replace(tzinfo=UTC)
+    return None
+
+
+def _humanize_runtime_token(value: str) -> str:
+    token = str(value or "").strip(" ._-")
+    if not token:
+        return ""
+    return token.replace("_", " ").replace("-", " ")
 
 
 def _read_scene_timeline(scene_dir: Path) -> list[dict]:

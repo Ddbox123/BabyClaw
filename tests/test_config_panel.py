@@ -529,6 +529,13 @@ def test_model_preset_options_include_codex_preset():
     assert "openai_gpt_5_5" in presets
     assert presets["openai_gpt_5_5"]["model"]["model"] == "gpt-5.5"
     assert presets["openai_gpt_5_5"]["provider"]["context_window"] == 1050000
+    assert "relay_openai_gpt_5_5" in presets
+    assert presets["relay_openai_gpt_5_5"]["category"] == "relay"
+    assert presets["relay_openai_gpt_5_5"]["model"]["model"] == "gpt-5.5"
+    assert presets["relay_openai_gpt_5_5"]["model"]["transport"] == "chat_completions"
+    assert presets["relay_openai_gpt_5_5"]["model"]["contract"] == "tool_chat"
+    assert presets["relay_openai_gpt_5_5"]["provider"]["kind"] == "relay"
+    assert presets["relay_openai_gpt_5_5"]["provider"]["base_url"] == "https://pixel.try-chatapi.com/v1"
     assert "deepseek_v4_flash" in presets
     assert presets["deepseek_v4_flash"]["model"]["model"] == "deepseek-v4-flash"
     assert presets["deepseek_v4_flash"]["model"]["contract"] == "reasoning_chat"
@@ -555,6 +562,23 @@ def test_apply_codex_model_preset_materializes_inline_provider():
     assert model["model"] == "gpt-5.3-codex"
     assert model["contract"] == "tool_chat"
     assert model["api_key_env"] == "VIBELUTION_LLM_OPENAI_GPT_5_3_CODEX_API_KEY"
+    build_effective_config(updated)
+
+
+def test_apply_relay_model_preset_materializes_openai_compatible_provider():
+    updated = apply_llm_model_preset(load_public_config(), "relay_openai_gpt_5_5")
+    model = updated["llm"]["model_library"]["relay_openai_gpt_5_5"]
+
+    assert model["provider"]["kind"] == "relay"
+    assert model["provider"]["api_key_env"] == "OPENAI_API_KEY"
+    assert model["provider"]["base_url"] == "https://pixel.try-chatapi.com/v1"
+    assert model["provider"]["compat_mode"] == "openai"
+    assert model["provider"]["requires_api_key"] is True
+    assert model["provider"]["context_window"] == 1000000
+    assert model["model"] == "gpt-5.5"
+    assert model["transport"] == "chat_completions"
+    assert model["contract"] == "tool_chat"
+    assert model["api_key_env"] == "VIBELUTION_LLM_RELAY_OPENAI_GPT_5_5_API_KEY"
     build_effective_config(updated)
 
 

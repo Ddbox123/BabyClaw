@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { NavLink, Outlet, useLocation, useNavigationType } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation, useNavigationType } from "react-router-dom";
 import { GitBranch, LoaderCircle, Power, Settings } from "lucide-react";
 
 import { fetchJson, setFetchJsonFailureReporter } from "../api/client";
@@ -34,17 +34,6 @@ function formatHistoryTarget(value: string | URL | null | undefined): string {
     return "";
   }
   return typeof value === "string" ? value : value.toString();
-}
-
-function compactGitPath(path: string): string {
-  const normalized = path.replaceAll("\\", "/");
-  if (normalized.length <= 52) {
-    return normalized;
-  }
-  const parts = normalized.split("/");
-  const fileName = parts.pop() ?? normalized;
-  const parent = parts.pop();
-  return parent ? `.../${parent}/${fileName}` : `.../${fileName}`;
 }
 
 export function AppShell() {
@@ -704,53 +693,20 @@ export function AppShell() {
           <NavLink to="/logs" className={linkClassName} reloadDocument>
             {t("navLogs")}
           </NavLink>
+          <NavLink to="/git" className={linkClassName} reloadDocument>
+            {t("navGit")}
+          </NavLink>
         </nav>
 
         <div className={styles.topActions}>
-          <div className={styles.gitCluster} tabIndex={0} aria-label={t("gitStatusGuide")} title={gitTitle}>
+          <Link className={styles.gitCluster} to="/git" aria-label={t("gitOpenPage")} title={gitTitle} reloadDocument>
             <div className={styles.gitChip}>
               <GitBranch size={14} />
               <span className={`${styles.statusDot} ${styles[`status_${gitTone}`]}`} />
               <span className={styles.gitBranchName}>{gitBranch}</span>
               <strong className={styles.gitCount}>{gitValue}</strong>
             </div>
-            <div className={styles.gitPanel} role="note" aria-live="polite">
-              <div className={styles.statusGuideHeader}>
-                <strong>{t("gitStatusGuide")}</strong>
-                <span>{t("gitStatusGuideHint")}</span>
-              </div>
-              <div className={styles.gitMetaGrid}>
-                <span>{t("gitBranch")}</span>
-                <strong>{gitBranch}</strong>
-                <span>{t("gitHead")}</span>
-                <strong>{gitStatus?.headRevShort || "-"}</strong>
-                <span>{t("gitChangedFiles")}</span>
-                <strong>{gitStatus?.counts.total ?? 0}</strong>
-              </div>
-              <div className={styles.gitCountGrid}>
-                <span>{t("gitStaged")} <strong>{gitStatus?.counts.staged ?? 0}</strong></span>
-                <span>{t("gitUnstaged")} <strong>{gitStatus?.counts.unstaged ?? 0}</strong></span>
-                <span>{t("gitUntracked")} <strong>{gitStatus?.counts.untracked ?? 0}</strong></span>
-                <span>{t("gitDeleted")} <strong>{gitStatus?.counts.deleted ?? 0}</strong></span>
-              </div>
-              <div className={styles.gitFileSection}>
-                <strong>{t("gitRecentChanges")}</strong>
-                {gitStatus?.files.length ? (
-                  <ul className={styles.gitFileList}>
-                    {gitStatus.files.slice(0, 10).map((file) => (
-                      <li key={`${file.status}-${file.path}`}>
-                        <span className={styles.gitFileStatus}>{file.status}</span>
-                        <span className={styles.gitFilePath} title={file.path}>{compactGitPath(file.path)}</span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className={styles.gitEmpty}>{gitAvailable ? t("gitNoChanges") : gitTitle}</p>
-                )}
-                {gitStatus?.truncated ? <p className={styles.gitEmpty}>{t("gitTruncated")}</p> : null}
-              </div>
-            </div>
-          </div>
+          </Link>
           <div className={styles.statusCluster} tabIndex={0} aria-label={t("systemStatusGuide")}>
             <div className={styles.statusChipRow}>
               {systemStatusCards.map((item) => (

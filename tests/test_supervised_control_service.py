@@ -336,9 +336,18 @@ def test_runtime_manager_start_supervised_run_submits_command(monkeypatch):
 
 
 def test_runtime_manager_get_active_supervised_run_reads_store(monkeypatch):
-    snapshot = {"runId": "web-supervised-managed", "status": "running"}
+    snapshot = {
+        "runId": "web-supervised-managed",
+        "status": "running",
+        "runtimeManagerControl": {
+            "ownerPid": 222,
+            "kind": "supervised",
+            "claimedAt": "2026-05-18T12:00:00Z",
+        },
+    }
 
     monkeypatch.setattr(service, "_runtime_manager_live_control_enabled", lambda: True)
+    monkeypatch.setattr(service, "_current_runtime_manager_owner_pid", lambda: 222)
     monkeypatch.setattr(service, "load_manager_active_run_snapshot", lambda kind: snapshot if kind == "supervised" else None)
 
     result = service.get_active_supervised_run()
@@ -347,6 +356,78 @@ def test_runtime_manager_get_active_supervised_run_reads_store(monkeypatch):
     assert result["runId"] == snapshot["runId"]
     assert result["status"] == snapshot["status"]
     assert result["actionStates"]["pause"]["enabled"] is True
+
+
+def test_runtime_manager_active_supervised_run_closes_stale_locked_snapshot(monkeypatch):
+    run_id = "web-supervised-stale-active"
+    snapshot = {
+        "runId": run_id,
+        "status": "queued",
+        "currentPhase": "queued",
+        "runtimeStatus": "queued",
+        "startedAt": "2026-05-18T12:00:00Z",
+        "updatedAt": "2026-05-18T12:00:00Z",
+        "finishedAt": "",
+        "latestMessage": "queued",
+        "currentTask": "queued",
+        "pauseRequested": False,
+        "pauseRequestedAt": "",
+        "stopRequested": False,
+        "stopRequestedAt": "",
+        "eventTail": [],
+        "runtimeManagerControl": {
+            "ownerPid": 111,
+            "kind": "supervised",
+            "claimedAt": "2026-05-18T12:00:00Z",
+        },
+    }
+    service.persist_manager_run_snapshot("supervised", snapshot, active_run_id=run_id)
+
+    monkeypatch.setattr(service, "_runtime_manager_live_control_enabled", lambda: True)
+    monkeypatch.setattr(service, "_current_runtime_manager_owner_pid", lambda: 222)
+
+    result = service.get_active_supervised_run()
+    persisted = service.load_manager_run_snapshot("supervised", run_id)
+
+    assert result is None
+    assert service.load_manager_active_run_snapshot("supervised") is None
+    assert persisted is not None
+    assert persisted["status"] == "cancelled"
+    assert persisted["runtimeStatus"] == "idle"
+    assert persisted["stopRequested"] is True
+    assert persisted["runtimeManagerControl"]["reason"] == "orphaned"
+
+
+def test_runtime_manager_active_supervised_run_keeps_current_owner(monkeypatch):
+    run_id = "web-supervised-current-active"
+    snapshot = {
+        "runId": run_id,
+        "status": "running",
+        "currentPhase": "running",
+        "runtimeStatus": "running",
+        "pauseRequested": False,
+        "stopRequested": False,
+        "eventTail": [],
+        "runtimeManagerControl": {
+            "ownerPid": 222,
+            "kind": "supervised",
+            "claimedAt": "2026-05-18T12:00:00Z",
+        },
+    }
+    service.persist_manager_run_snapshot("supervised", snapshot, active_run_id=run_id)
+
+    monkeypatch.setattr(service, "_runtime_manager_live_control_enabled", lambda: True)
+    monkeypatch.setattr(service, "_current_runtime_manager_owner_pid", lambda: 222)
+
+    result = service.get_active_supervised_run()
+    persisted = service.load_manager_run_snapshot("supervised", run_id)
+
+    assert result is not None
+    assert result["runId"] == run_id
+    assert result["status"] == "running"
+    assert persisted is not None
+    assert persisted["status"] == "running"
+    assert service.load_manager_active_run_snapshot("supervised") is not None
 
 
 def test_runtime_manager_live_control_requires_matching_project_root(monkeypatch, tmp_path):

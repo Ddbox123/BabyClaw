@@ -53,6 +53,7 @@ export type RuntimeSceneListItem = {
   runtimeSceneId: string;
   directoryName: string;
   title: string;
+  displayName: string;
   startedAt: string;
   endedAt: string;
   status: string;
@@ -94,6 +95,7 @@ export type RuntimeSceneRawFile = {
 export type RuntimeSceneDetail = {
   runtimeSceneId: string;
   directoryName: string;
+  displayName: string;
   manifestPath: string;
   manifest: Record<string, unknown>;
   startedAt: string;
@@ -140,6 +142,13 @@ export type GitStatusSummary = {
   branch: string;
   headRev: string;
   headRevShort: string;
+  upstream: {
+    name: string;
+    remote: string;
+    ahead: number;
+    behind: number;
+    hasUpstream: boolean;
+  };
   snapshotId: string;
   createdAt: string;
   dirty: boolean;
@@ -152,7 +161,36 @@ export type GitStatusSummary = {
     deleted: number;
   };
   files: GitStatusFile[];
+  totalFiles: number;
   truncated: boolean;
+};
+
+export type GitCommitSummary = {
+  sha: string;
+  shortSha: string;
+  author: string;
+  authoredAt: string;
+  subject: string;
+};
+
+export type GitCommitsResponse = {
+  available: boolean;
+  error: string;
+  commits: GitCommitSummary[];
+};
+
+export type GitFileDiff = {
+  available: boolean;
+  error: string;
+  path: string;
+  status: string;
+  statusLabel: string;
+  summary: string;
+  diff: string;
+  content: string;
+  language: string;
+  truncated: boolean;
+  binary: boolean;
 };
 
 export type LogTreeResponse = {
@@ -1033,6 +1071,7 @@ export type ConfigDiagnosis = {
 export type ConfigModelPresetOption = {
   preset_id: string;
   label: string;
+  category?: string;
   provider_id: string;
   model_id: string;
   provider: Record<string, unknown>;

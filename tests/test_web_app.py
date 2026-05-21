@@ -433,17 +433,24 @@ def test_git_status_endpoint_exposes_read_only_worktree_snapshot(monkeypatch):
         def _run_git(self, args):
             if args == ["branch", "--show-current"]:
                 return SimpleNamespace(returncode=0, stdout="codex/git-navbar\n")
+            if args == ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]:
+                return SimpleNamespace(returncode=0, stdout="origin/codex/git-navbar\n")
+            if args == ["rev-list", "--left-right", "--count", "origin/codex/git-navbar...HEAD"]:
+                return SimpleNamespace(returncode=0, stdout="1\t2\n")
             raise AssertionError(args)
 
     monkeypatch.setattr(git_status_service, "get_git_memory_service", lambda: FakeGitStatusService())
 
-    response = client.get("/api/git/status")
+    response = client.get("/api/git/status", params={"limit": 1})
 
     assert response.status_code == 200, response.json()
     payload = response.json()
     assert payload["available"] is True
     assert payload["branch"] == "codex/git-navbar"
     assert payload["headRevShort"] == "abcdef123456"
+    assert payload["upstream"]["name"] == "origin/codex/git-navbar"
+    assert payload["upstream"]["ahead"] == 2
+    assert payload["upstream"]["behind"] == 1
     assert payload["dirty"] is True
     assert payload["counts"] == {
         "total": 2,
@@ -454,8 +461,8 @@ def test_git_status_endpoint_exposes_read_only_worktree_snapshot(monkeypatch):
     }
     assert payload["files"][0]["path"] == "web/src/app/AppShell.tsx"
     assert payload["files"][0]["statusLabel"] == "modified"
-    assert payload["files"][1]["statusLabel"] == "untracked"
-    assert payload["truncated"] is False
+    assert payload["totalFiles"] == 2
+    assert payload["truncated"] is True
 
 
 def test_git_status_endpoint_reports_unavailable(monkeypatch):
@@ -481,6 +488,90 @@ def test_git_status_endpoint_reports_unavailable(monkeypatch):
     assert payload["summary"] == "Git unavailable: not a git repository"
     assert payload["error"] == "not a git repository"
     assert payload["files"] == []
+
+
+def test_git_commits_endpoint_exposes_recent_commits(monkeypatch):
+    class FakeGitStatusService:
+        def is_git_available(self):
+            return True, None
+
+        def _run_git(self, args):
+            assert args == [
+                "log",
+                "--max-count=2",
+                "--date=iso-strict",
+                "--pretty=format:%H%x1f%h%x1f%aN%x1f%aI%x1f%s",
+            ]
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "abcdef1234567890\x1fabcdef1\x1fAgent\x1f2026-05-21T10:00:00+08:00\x1ffeat: git page\n"
+                    "1111111111111111\x1f1111111\x1fAgent\x1f2026-05-20T10:00:00+08:00\x1ffix: prior"
+                ),
+                stderr="",
+            )
+
+    monkeypatch.setattr(git_status_service, "get_git_memory_service", lambda: FakeGitStatusService())
+
+    response = client.get("/api/git/commits", params={"limit": 2})
+
+    assert response.status_code == 200, response.json()
+    payload = response.json()
+    assert payload["available"] is True
+    assert [item["shortSha"] for item in payload["commits"]] == ["abcdef1", "1111111"]
+    assert payload["commits"][0]["subject"] == "feat: git page"
+
+
+def test_git_diff_endpoint_exposes_file_diff(monkeypatch):
+    class FakeGitStatusService:
+        def is_git_available(self):
+            return True, None
+
+        def scan_working_tree(self, store=False):
+            return SimpleNamespace(
+                available=True,
+                error=None,
+                snapshot_id="wt-test",
+                created_at="2026-05-21T10:00:00",
+                base_rev="abcdef1234567890",
+                files=[
+                    SimpleNamespace(
+                        path="web/src/routes/GitRoute.tsx",
+                        status=" M",
+                        staged=False,
+                        unstaged=True,
+                        untracked=False,
+                        deleted=False,
+                        old_path=None,
+                    )
+                ],
+            )
+
+        def _run_git(self, args):
+            if args == ["diff", "--cached", "--no-ext-diff", "--no-color", "--", "web/src/routes/GitRoute.tsx"]:
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            if args == ["diff", "--no-ext-diff", "--no-color", "--", "web/src/routes/GitRoute.tsx"]:
+                return SimpleNamespace(returncode=0, stdout="diff --git a/web/src/routes/GitRoute.tsx b/web/src/routes/GitRoute.tsx\n+page\n", stderr="")
+            raise AssertionError(args)
+
+    monkeypatch.setattr(git_status_service, "get_git_memory_service", lambda: FakeGitStatusService())
+
+    response = client.get("/api/git/diff", params={"path": "web/src/routes/GitRoute.tsx"})
+
+    assert response.status_code == 200, response.json()
+    payload = response.json()
+    assert payload["available"] is True
+    assert payload["path"] == "web/src/routes/GitRoute.tsx"
+    assert payload["language"] == "diff"
+    assert "# unstaged" in payload["diff"]
+    assert payload["statusLabel"] == "modified"
+
+
+def test_git_diff_endpoint_rejects_path_escape():
+    response = client.get("/api/git/diff", params={"path": "../secret.txt"})
+
+    assert response.status_code == 400
+    assert "project root" in response.json()["detail"]
 
 
 def test_logs_roots_and_tree_are_read_only(tmp_path, monkeypatch):
@@ -668,6 +759,10 @@ def test_runtime_scene_endpoints_list_detail_content_and_delete(tmp_path, monkey
     assert list_response.status_code == 200
     scenes = list_response.json()
     assert {item["runtimeSceneId"] for item in scenes} == {"scene-a", "scene-b"}
+    scene_a = next(item for item in scenes if item["runtimeSceneId"] == "scene-a")
+    assert scene_a["displayName"] != "scene-a"
+    assert "工作台启动" in scene_a["displayName"]
+    assert "手动停止" in scene_a["displayName"]
     assert scenes[0]["eventCount"] >= 3
     assert scenes[0]["rawLogCount"] >= 5
 
@@ -675,6 +770,7 @@ def test_runtime_scene_endpoints_list_detail_content_and_delete(tmp_path, monkey
     assert detail_response.status_code == 200
     detail = detail_response.json()
     assert detail["runtimeSceneId"] == "scene-a"
+    assert detail["displayName"] == scene_a["displayName"]
     assert detail["status"] == "stopped"
     assert detail["frontend"]["build_status"] == "success"
     assert detail["timeline"][0]["eventCode"] == "frontend.build.started"
@@ -2668,6 +2764,13 @@ def test_config_workspace_exposes_unified_config_payload(monkeypatch):
     assert payload["publicConfig"]["ui"]["language"] == "en"
     assert "rawToml" in payload
     assert "diagnosis" in payload
+    preset_options = {item["preset_id"]: item for item in payload["modelPresetOptions"]}
+    relay_preset = preset_options["relay_openai_gpt_5_5"]
+    assert relay_preset["category"] == "relay"
+    assert relay_preset["provider"]["kind"] == "relay"
+    assert relay_preset["provider"]["base_url"] == "https://pixel.try-chatapi.com/v1"
+    assert relay_preset["model"]["transport"] == "chat_completions"
+    assert relay_preset["model"]["contract"] == "tool_chat"
     assert "modelOptions" in payload
     assert "profileCards" in payload
 

@@ -293,9 +293,18 @@ def test_self_evolution_run_events_route(monkeypatch):
 
 
 def test_runtime_manager_latest_self_evolution_run_reads_store(monkeypatch):
-    snapshot = {"runId": "web-self-managed", "status": "running"}
+    snapshot = {
+        "runId": "web-self-managed",
+        "status": "running",
+        "runtimeManagerControl": {
+            "ownerPid": 222,
+            "kind": "self",
+            "claimedAt": "2026-05-18T12:00:00Z",
+        },
+    }
 
     monkeypatch.setattr(service, "_runtime_manager_live_control_enabled", lambda: True)
+    monkeypatch.setattr(service, "_current_runtime_manager_owner_pid", lambda: 222)
     monkeypatch.setattr(service, "load_manager_latest_run_snapshot", lambda kind: snapshot if kind == "self" else None)
     monkeypatch.setattr(service, "load_manager_active_run_snapshot", lambda kind: snapshot if kind == "self" else None)
 
@@ -371,6 +380,110 @@ def test_runtime_manager_latest_self_evolution_run_closes_orphaned_locked_snapsh
     assert persisted["payload"]["status"] == "cancelled"
 
 
+def test_runtime_manager_active_self_evolution_run_closes_stale_locked_snapshot(monkeypatch):
+    snapshot = {
+        "runId": "web-self-stale-active",
+        "goal": "stale active",
+        "status": "queued",
+        "phase": "queued",
+        "startedAt": "2026-05-18T12:00:00Z",
+        "updatedAt": "2026-05-18T12:00:00Z",
+        "finishedAt": "",
+        "latestMessage": "queued",
+        "currentGoal": "stale active",
+        "lastToolName": "",
+        "runtimeStatus": "working",
+        "toolCallCount": 0,
+        "summary": "",
+        "error": "",
+        "cancelRequested": False,
+        "cancelRequestedAt": "",
+        "stopReason": "",
+        "controlAction": "",
+        "controlRequestedAt": "",
+        "messages": [],
+        "turnCount": 0,
+        "resumeCount": 0,
+        "rollback": {
+            "status": "unavailable",
+            "reason": "",
+            "baseRev": "",
+            "rolledBackAt": "",
+            "entryCount": 0,
+            "touchedFiles": [],
+            "conflictFiles": [],
+            "blockedHint": "",
+        },
+        "runtimeManagerControl": {
+            "ownerPid": 111,
+            "kind": "self",
+            "claimedAt": "2026-05-18T12:00:00Z",
+        },
+    }
+    persisted: dict[str, object] = {}
+
+    monkeypatch.setattr(service, "_runtime_manager_live_control_enabled", lambda: True)
+    monkeypatch.setattr(service, "_current_runtime_manager_owner_pid", lambda: 222)
+    monkeypatch.setattr(service, "load_manager_active_run_snapshot", lambda kind: copy.deepcopy(snapshot) if kind == "self" else None)
+
+    def fake_persist(kind: str, payload: dict, *, active_run_id: str = "") -> dict:
+        persisted["kind"] = kind
+        persisted["payload"] = copy.deepcopy(payload)
+        persisted["active_run_id"] = active_run_id
+        return copy.deepcopy(payload)
+
+    monkeypatch.setattr(service, "persist_manager_run_snapshot", fake_persist)
+
+    result = service.get_active_self_evolution_run()
+
+    assert result is None
+    assert persisted["kind"] == "self"
+    assert persisted["active_run_id"] == ""
+    assert persisted["payload"]["status"] == "cancelled"
+    assert persisted["payload"]["runtimeManagerControl"]["reason"] == "orphaned"
+
+
+def test_runtime_manager_active_self_evolution_run_keeps_current_owner(monkeypatch):
+    snapshot = {
+        "runId": "web-self-current-active",
+        "status": "queued",
+        "phase": "queued",
+        "latestMessage": "queued",
+        "rollback": {
+            "status": "unavailable",
+            "reason": "",
+            "baseRev": "",
+            "rolledBackAt": "",
+            "entryCount": 0,
+            "touchedFiles": [],
+            "conflictFiles": [],
+            "blockedHint": "",
+        },
+        "runtimeManagerControl": {
+            "ownerPid": 222,
+            "kind": "self",
+            "claimedAt": "2026-05-18T12:00:00Z",
+        },
+    }
+    persisted: list[dict] = []
+
+    monkeypatch.setattr(service, "_runtime_manager_live_control_enabled", lambda: True)
+    monkeypatch.setattr(service, "_current_runtime_manager_owner_pid", lambda: 222)
+    monkeypatch.setattr(service, "load_manager_active_run_snapshot", lambda kind: copy.deepcopy(snapshot) if kind == "self" else None)
+    monkeypatch.setattr(
+        service,
+        "persist_manager_run_snapshot",
+        lambda kind, payload, *, active_run_id="": persisted.append(copy.deepcopy(payload)) or copy.deepcopy(payload),
+    )
+
+    result = service.get_active_self_evolution_run()
+
+    assert result is not None
+    assert result["runId"] == "web-self-current-active"
+    assert result["status"] == "queued"
+    assert persisted == []
+
+
 def test_runtime_manager_start_self_evolution_still_blocks_running_sessions(monkeypatch):
     monkeypatch.setattr(service, "_runtime_manager_live_control_enabled", lambda: True)
     monkeypatch.setattr(
@@ -383,6 +496,39 @@ def test_runtime_manager_start_self_evolution_still_blocks_running_sessions(monk
 
     with pytest.raises(service.SelfEvolutionRunBusyError):
         service.start_self_evolution_run({"goal": "managed"})
+
+
+def test_runtime_manager_start_self_evolution_ignores_cleaned_stale_supervised_lock(monkeypatch):
+    calls: list[object] = []
+    snapshot = {"runId": "web-self-managed", "status": "queued"}
+
+    monkeypatch.setattr(service, "_runtime_manager_live_control_enabled", lambda: True)
+    monkeypatch.setattr(
+        service,
+        "get_workbench_contract",
+        lambda: {"modeAvailability": {"self_evolution": True}},
+    )
+    monkeypatch.setattr(service, "has_running_sessions", lambda: False)
+    monkeypatch.setattr(service, "get_active_supervised_run", lambda: None)
+    monkeypatch.setattr(service, "_ensure_runtime_manager_daemon", lambda: calls.append("ensure"))
+    monkeypatch.setattr(
+        service,
+        "submit_command",
+        lambda command_type, args=None, requested_by="unknown": calls.append((command_type, args, requested_by)) or {"commandId": "cmd-1"},
+    )
+    monkeypatch.setattr(service, "wait_for_result", lambda command_id: {"ok": True, "snapshot": snapshot})
+
+    result = service.start_self_evolution_run({"goal": "managed"})
+
+    assert result == snapshot
+    assert calls == [
+        "ensure",
+        (
+            "start_self_evolution_run",
+            {"payload": {"goal": "managed"}},
+            "web_ui",
+        ),
+    ]
 
 
 def test_runtime_manager_live_control_requires_matching_project_root(monkeypatch, tmp_path):

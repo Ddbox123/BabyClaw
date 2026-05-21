@@ -62,6 +62,7 @@ function filterRuntimeScenes(items: RuntimeSceneListItem[], query: string): Runt
       item.runtimeSceneId,
       item.directoryName,
       item.title,
+      item.displayName,
       item.status,
       item.result,
       item.stopReason,
@@ -207,6 +208,11 @@ function formatTimestamp(value: string, lang: "zh" | "en") {
   });
 }
 
+function runtimeSceneDisplayName(scene: RuntimeSceneListItem | RuntimeSceneDetail) {
+  const title = "title" in scene ? scene.title : "";
+  return scene.displayName || title || scene.directoryName || scene.runtimeSceneId;
+}
+
 function formatBytes(size: number) {
   const value = Number(size || 0);
   if (value < 1024) {
@@ -229,6 +235,8 @@ const runtimeSceneTokenZhMap: Record<string, string> = {
   stopped: "已停止",
   running: "运行中",
   success: "成功",
+  explicit_stop: "手动停止",
+  "explicit stop": "手动停止",
   failed: "失败",
   info: "信息",
   error: "错误",
@@ -590,7 +598,11 @@ export function RuntimeScenesPane({ activeRoot, lang, t, statusLabel }: RuntimeS
   }
 
   function buildDeleteConfirmationLabel(sceneIds: string[]) {
-    const names = sceneIds.slice(0, 4);
+    const sceneById = new Map((runtimeScenesQuery.data ?? []).map((scene) => [scene.runtimeSceneId, scene]));
+    const names = sceneIds.slice(0, 4).map((sceneId) => {
+      const scene = sceneById.get(sceneId);
+      return scene ? `${runtimeSceneDisplayName(scene)} (${sceneId})` : sceneId;
+    });
     const tail = sceneIds.length > names.length ? `\n等 ${sceneIds.length} 组运行。` : "";
     return `确认删除这 ${sceneIds.length} 组运行现场日志吗？\n${names.map((name) => `- ${name}`).join("\n")}${tail}`;
   }
@@ -755,6 +767,7 @@ export function RuntimeScenesPane({ activeRoot, lang, t, statusLabel }: RuntimeS
             filteredScenes.map((scene) => {
               const isActive = activeSceneId === scene.runtimeSceneId;
               const isSelected = selectedSceneIdSet.has(scene.runtimeSceneId);
+              const displayName = runtimeSceneDisplayName(scene);
               return (
                 <div
                   key={scene.runtimeSceneId}
@@ -779,17 +792,18 @@ export function RuntimeScenesPane({ activeRoot, lang, t, statusLabel }: RuntimeS
                       onClick={() => setActiveSceneId(scene.runtimeSceneId)}
                     >
                       <div className={styles.sceneCardHeader}>
-                        <strong>{scene.runtimeSceneId}</strong>
+                        <strong title={scene.runtimeSceneId}>{displayName}</strong>
                         <span className={styles.sceneCardStatus}>{statusLabel(scene.status)}</span>
                       </div>
                       <div className={styles.sceneCardMeta}>
+                        <span>ID {scene.runtimeSceneId}</span>
                         <span>{formatTimestamp(scene.startedAt, lang)}</span>
                         <span>{scene.eventCount} 条事件</span>
                         <span>{scene.rawLogCount} 个原始日志</span>
                       </div>
                       <p className={styles.sceneCardSummary}>
                         {localizeRuntimeSceneText(
-                          scene.stopReason || scene.result || scene.title || scene.directoryName,
+                          scene.stopReason || scene.result || scene.displayName || scene.title || scene.directoryName,
                           lang,
                         )}
                       </p>
@@ -834,13 +848,17 @@ export function RuntimeScenesPane({ activeRoot, lang, t, statusLabel }: RuntimeS
             <div className={styles.sceneDetailHeader}>
               <div>
                 <p className={styles.eyebrow}>{t("logsRootRuntimeScenes")}</p>
-                <h2 className={styles.sceneDetailTitle}>{sceneDetailQuery.data.runtimeSceneId}</h2>
+                <h2 className={styles.sceneDetailTitle}>{runtimeSceneDisplayName(sceneDetailQuery.data)}</h2>
                 <p className={styles.sceneDetailSummary}>
                   {localizeRuntimeSceneText(
-                    sceneDetailQuery.data.stopReason || sceneDetailQuery.data.result || sceneDetailQuery.data.directoryName,
+                    sceneDetailQuery.data.stopReason ||
+                      sceneDetailQuery.data.result ||
+                      sceneDetailQuery.data.displayName ||
+                      sceneDetailQuery.data.directoryName,
                     lang,
                   )}
                 </p>
+                <p className={styles.sceneDetailSummary}>ID {sceneDetailQuery.data.runtimeSceneId}</p>
               </div>
               <div className={styles.scenePillRow}>
                 <span className={styles.metaPill}>{statusLabel(sceneDetailQuery.data.status)}</span>

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import threading
 import time
@@ -46,6 +47,7 @@ _RUN_STREAM_HEARTBEAT_SECONDS = 15.0
 _RUN_STREAM_QUEUE_SIZE = 16
 _EVENT_TAIL_LIMIT = 12
 _ACTIVE_RUN_STATUSES = {"queued", "running", "paused", "stopping"}
+_MANAGER_CONTROL_KEY = "runtimeManagerControl"
 
 
 class SupervisedRunBusyError(RuntimeError):
@@ -505,6 +507,12 @@ def _cancel_file_only_supervised_run(run_id: str, *, lang: str) -> dict[str, Any
         zh="监督任务已结束，不再继续执行。",
         en="The supervised run has stopped and will not continue.",
     )
+    payload[_MANAGER_CONTROL_KEY] = {
+        "ownerPid": "",
+        "kind": "supervised",
+        "clearedAt": now,
+        "reason": "orphaned",
+    }
     _append_control_event_locked(
         payload,
         event="run_cancelled",
@@ -944,11 +952,38 @@ def _initial_run_state(context: dict[str, Any]) -> dict[str, Any]:
                 "keepWorktree": bool(context["keepWorktree"]),
             }
         ],
+        _MANAGER_CONTROL_KEY: _build_manager_control_payload(),
     }
 
 
 def _clone_locked(payload: dict[str, Any]) -> dict[str, Any]:
     return json.loads(json.dumps(payload, ensure_ascii=False))
+
+
+def _build_manager_control_payload() -> dict[str, Any]:
+    return {
+        "ownerPid": os.getpid(),
+        "kind": "supervised",
+        "claimedAt": _now_timestamp(),
+    }
+
+
+def _current_runtime_manager_owner_pid() -> int:
+    try:
+        from core.runtime_manager.state_store import load_pid
+
+        return int(load_pid() or 0)
+    except Exception:
+        return 0
+
+
+def _manager_control_is_current(payload: dict[str, Any]) -> bool:
+    control = payload.get(_MANAGER_CONTROL_KEY) if isinstance(payload.get(_MANAGER_CONTROL_KEY), dict) else {}
+    try:
+        owner_pid = int(control.get("ownerPid") or 0)
+    except (TypeError, ValueError):
+        owner_pid = 0
+    return owner_pid > 0 and owner_pid == _current_runtime_manager_owner_pid()
 
 
 def _decorate_supervised_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1597,6 +1632,10 @@ def get_active_supervised_run() -> dict[str, Any] | None:
     if _runtime_manager_live_control_enabled():
         snapshot = load_manager_active_run_snapshot("supervised")
         if snapshot is None:
+            return None
+        status = str(snapshot.get("status") or "").strip().lower()
+        if status in _ACTIVE_RUN_STATUSES and not _manager_control_is_current(snapshot):
+            _cancel_file_only_supervised_run(str(snapshot.get("runId") or ""), lang=get_web_language())
             return None
         return _decorate_supervised_snapshot(_clone_locked(snapshot))
     return _LOCAL_GET_ACTIVE_SUPERVISED_RUN()
