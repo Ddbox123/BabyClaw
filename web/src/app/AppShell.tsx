@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, NavLink, Outlet, useLocation, useNavigationType } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigationType } from "react-router-dom";
 import { GitBranch, LoaderCircle, Power, Settings } from "lucide-react";
 
 import { fetchJson, setFetchJsonFailureReporter } from "../api/client";
@@ -699,14 +699,14 @@ export function AppShell() {
         </nav>
 
         <div className={styles.topActions}>
-          <Link className={styles.gitCluster} to="/git" aria-label={t("gitOpenPage")} title={gitTitle} reloadDocument>
+          <div className={styles.gitCluster} aria-label={t("gitStatusGuide")} title={gitTitle}>
             <div className={styles.gitChip}>
               <GitBranch size={14} />
               <span className={`${styles.statusDot} ${styles[`status_${gitTone}`]}`} />
               <span className={styles.gitBranchName}>{gitBranch}</span>
               <strong className={styles.gitCount}>{gitValue}</strong>
             </div>
-          </Link>
+          </div>
           <div className={styles.statusCluster} tabIndex={0} aria-label={t("systemStatusGuide")}>
             <div className={styles.statusChipRow}>
               {systemStatusCards.map((item) => (

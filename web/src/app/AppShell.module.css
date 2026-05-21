@@ -168,8 +168,6 @@
 .gitCluster {
   position: relative;
   display: flex;
-  color: inherit;
-  text-decoration: none;
   outline: none;
 }
 
